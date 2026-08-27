@@ -1,0 +1,12 @@
+[submodule "lib/spectra"]
+	path = lib/spectra
+	url = git@github.com:yixuan/spectra.git
+[submodule "lib/meshoptimizer"]
+	path = lib/meshoptimizer
+	url = git@github.com:khiner/meshoptimizer.git
+[submodule "lib/tinyobjloader"]
+	path = lib/tinyobjloader
+	url = git@github.com:tinyobjloader/tinyobjloader.git
+[submodule "lib/ut"]
+	path = lib/ut
+	url = git@github.com:boost-ext/ut.git
