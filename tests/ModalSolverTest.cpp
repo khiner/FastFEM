@@ -1,10 +1,14 @@
 #include "LoadObj.h"
 #include "RunSuites.h"
+#include "StructuredBar.h"
 #include "ValidateTetMesh.h"
 #include "audio/AcousticMaterialProperties.h"
+#include "audio/SparseCholesky.h"
+#include "audio/Tet10Assembler.h"
 #include "audio/mesh2modes.h"
 #include "mesh/Tets.h"
 
+#include <Eigen/Eigenvalues>
 #include <boost/ut.hpp>
 
 #include <algorithm>
@@ -32,41 +36,6 @@ struct Bar {
 };
 
 constexpr double BendingBL[]{4.73004074, 7.85320462, 10.9956078};
-
-// Structured tet mesh of the bar: (nx+1)*(ny+1)*(nz+1) vertices, each grid cell split
-// into six tetrahedra around its main diagonal (Kuhn subdivision).
-TetMesh MakeBarTets(const Bar &bar, int nx, int ny, int nz) {
-    TetMesh tets;
-    const int vx = nx + 1, vy = ny + 1, vz = nz + 1;
-    tets.Points.resize(vx * vy * vz);
-    const auto id = [&](int i, int j, int k) { return uint32_t((i * vy + j) * vz + k); };
-    for (int i = 0; i < vx; ++i) {
-        for (int j = 0; j < vy; ++j) {
-            for (int k = 0; k < vz; ++k) {
-                tets.Points[id(i, j, k)] = {bar.Length * i / nx, bar.Width * j / ny, bar.Thickness * k / nz};
-            }
-        }
-    }
-    tets.Tets.reserve(nx * ny * nz * 6);
-    for (int i = 0; i < nx; ++i) {
-        for (int j = 0; j < ny; ++j) {
-            for (int k = 0; k < nz; ++k) {
-                const uint32_t c[8]{
-                    id(i, j, k), id(i + 1, j, k), id(i, j + 1, k), id(i + 1, j + 1, k),
-                    id(i, j, k + 1), id(i + 1, j, k + 1), id(i, j + 1, k + 1), id(i + 1, j + 1, k + 1)
-                };
-                // Six tets sharing the c[0]-c[7] diagonal, one per axis-order path between them.
-                static constexpr int Corners[6][4]{
-                    {0, 1, 3, 7}, {0, 3, 2, 7}, {0, 2, 6, 7}, {0, 6, 4, 7}, {0, 4, 5, 7}, {0, 5, 1, 7}
-                };
-                for (const auto &tet : Corners) {
-                    tets.Tets.push_back({c[tet[0]], c[tet[1]], c[tet[2]], c[tet[3]]});
-                }
-            }
-        }
-    }
-    return tets;
-}
 
 enum class Family {
     Longitudinal,
@@ -115,7 +84,7 @@ Family Classify(const ModalModes &modes, uint32_t mode, const Bar &bar, int nx) 
 
 // Solve the bar and bucket FEM frequencies by classified family, ascending.
 std::map<Family, std::vector<double>> SolveBar(const Bar &bar, int nx, int ny, int nz) {
-    const auto tets = MakeBarTets(bar, nx, ny, nz);
+    const auto tets = MakeStructuredBar(nx, ny, nz, {bar.Length, bar.Width, bar.Thickness});
     const std::vector<vec3> all_positions(tets.Points.begin(), tets.Points.end());
     const auto result = modal::mesh2modes(tets, bar.Material, all_positions, vec3{1}, {});
     std::map<Family, std::vector<double>> fem;
@@ -220,9 +189,96 @@ void CheckFamily(std::string_view name, const std::vector<double> &fem, const st
         expect(std::abs(ratio - 1.0) < tolerance);
     }
 }
+
 } // namespace
 
 int main() {
+    "Tet10 assembly preserves translational mass and rigid modes"_test = [] {
+        constexpr AcousticMaterialProperties material{
+            .Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19, .Alpha = 0, .Beta = 0
+        };
+        const modal::Tet10Assembler fem{
+            {.Points = {{0, 0, 0}, {1.2, 0.1, 0}, {-0.2, 0.9, 0.1}, {0.1, -0.1, 1.1}},
+             .Tets = {{0, 1, 2, 3}}},
+            material
+        };
+        const auto [mass, stiffness] = fem.AssembleLower();
+        const auto mass_action = mass.selfadjointView<Eigen::Lower>();
+        const auto stiffness_action = stiffness.selfadjointView<Eigen::Lower>();
+        const double physical_mass = material.Density * fem.Elements().front().Volume;
+        for (uint32_t component = 0; component < 3; ++component) {
+            Eigen::VectorXd translation = Eigen::VectorXd::Zero(fem.Dofs());
+            for (uint32_t node = 0; node < fem.NumNodes; ++node) translation[3 * node + component] = 1;
+            expect(std::abs(translation.dot(mass_action * translation) / physical_mass - 1) < 1e-14);
+            expect((stiffness_action * translation).norm() < 1e-14 * stiffness.norm() * translation.norm());
+        }
+    };
+
+    "Accelerate block3 Cholesky matches scalar storage"_test = [] {
+        constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
+        const double alpha = std::pow(2 * std::numbers::pi * 20, 2);
+        const modal::Tet10Assembler fem{MakeStructuredBar(2, 1, 1), material};
+        const auto [mass, stiffness] = fem.AssembleLower();
+        const Eigen::SparseMatrix<double> shifted = stiffness + alpha * mass;
+        SparseCholesky scalar{shifted}, blocked{shifted, SparseOrdering::Default, SparseStorage::Block3};
+        Eigen::MatrixXd rhs(fem.Dofs(), 4), scalar_solution(fem.Dofs(), 4), blocked_solution(fem.Dofs(), 4);
+        for (Eigen::Index column = 0; column < rhs.cols(); ++column)
+            for (Eigen::Index row = 0; row < rhs.rows(); ++row) rhs(row, column) = std::sin(0.03 * double((row + 1) * (column + 2)));
+        scalar.Solve(rhs.data(), scalar_solution.data(), rhs.cols());
+        blocked.Solve(rhs.data(), blocked_solution.data(), rhs.cols());
+        const auto action = shifted.selfadjointView<Eigen::Lower>();
+        expect((action * scalar_solution - rhs).norm() / rhs.norm() < 1e-8);
+        expect((action * blocked_solution - rhs).norm() / rhs.norm() < 1e-8);
+        expect((scalar_solution - blocked_solution).norm() / scalar_solution.norm() < 1e-8);
+    };
+
+    "Accelerate Cholesky reuses symbolic analysis"_test = [] {
+        constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
+        const double alpha = std::pow(2 * std::numbers::pi * 20, 2);
+        const modal::Tet10Assembler fem{MakeStructuredBar(2, 1, 1), material};
+        const auto [mass, stiffness] = fem.AssembleLower();
+        const Eigen::SparseMatrix<double> first = stiffness + alpha * mass;
+        const Eigen::SparseMatrix<double> second = stiffness + 2 * alpha * mass;
+        SparseCholeskySymbolic symbolic{first, SparseOrdering::Metis};
+        Eigen::SparseMatrix<double> diagonal(first.rows(), first.cols());
+        diagonal.setIdentity();
+        expect(symbolic.Matches(second));
+        expect(!symbolic.Matches(diagonal));
+        SparseCholesky reused{second, symbolic};
+        Eigen::MatrixXd rhs(fem.Dofs(), 4), solution(fem.Dofs(), 4);
+        for (Eigen::Index column = 0; column < rhs.cols(); ++column)
+            for (Eigen::Index row = 0; row < rhs.rows(); ++row) rhs(row, column) = std::cos(0.07 * double((row + 3) * (column + 1)));
+        reused.Solve(rhs.data(), solution.data(), rhs.cols());
+        expect((second.selfadjointView<Eigen::Lower>() * solution - rhs).norm() / rhs.norm() < 1e-8);
+    };
+
+    "solve cache reuses Tet10 topology and assembly across material edits"_test = [] {
+        constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
+        const TetMesh mesh = MakeStructuredBar(2, 1, 1);
+        modal::SolveCache cache;
+        constexpr modal::SolverConfig config{.NumModes = 12, .NumFemModes = 12, .Tolerance = 1e-8};
+        const auto first = modal::mesh2modes(mesh, material, {vec3(mesh.Points.front())}, vec3{1}, config, {.Cache = &cache, .KeepBasis = true});
+        const auto second = modal::mesh2modes(mesh, material, {vec3(mesh.Points.front())}, vec3{1}, config, {.Cache = &cache, .KeepBasis = true});
+        auto changed_material = material;
+        changed_material.YoungModulus *= 1.5;
+        const auto changed = modal::mesh2modes(mesh, changed_material, {vec3(mesh.Points.front())}, vec3{1}, config, {.Cache = &cache, .KeepBasis = true});
+        expect(!first.Profile.TopologyReuse);
+        expect(!first.Profile.AssemblyReuse);
+        expect(second.Profile.TopologyReuse);
+        expect(second.Profile.AssemblyReuse);
+        expect(second.Profile.SymbolicReuse);
+        expect(changed.Profile.TopologyReuse);
+        expect(changed.Profile.AssemblyReuse);
+        expect(changed.Profile.SymbolicReuse);
+        expect(first.Summary.Eigenvalues.size() == 12);
+        expect(second.Summary.Eigenvalues.size() == 12);
+        expect(changed.Summary.Eigenvalues.size() == 12);
+        for (uint32_t mode = 6; mode < 12; ++mode) {
+            expect(std::abs(second.Summary.Eigenvalues[mode] / first.Summary.Eigenvalues[mode] - 1) < 1e-8);
+            expect(std::abs(changed.Summary.Eigenvalues[mode] / first.Summary.Eigenvalues[mode] - 1.5) < 1e-8);
+        }
+    };
+
     // Square section: longitudinal validates the E/rho/assembly/eigensolve chain end to end,
     // torsion and bending validate shear response.
     "square bar modes match closed forms"_test = [] {
@@ -281,6 +337,26 @@ int main() {
                 expect(err.empty()) << name << "invalid tet mesh:" << err;
             }
         }
+    };
+
+    "tetrahedralizer cavity seeds remove enclosed voids"_test = [] {
+        Surface surface = GridBox(2), inner = GridBox(2);
+        for (dvec3 &point : inner.Points) point = 0.25 + 0.5 * point;
+        const uint32_t offset = uint32_t(surface.Points.size());
+        surface.Points.insert(surface.Points.end(), inner.Points.begin(), inner.Points.end());
+        for (const uint32_t point : inner.Tris) surface.Tris.push_back(offset + point);
+        const std::array holes{dvec3{0.5}};
+        const auto result = tetra::Tetrahedralize(surface.Points, surface.Tris, {.Quality = true, .Holes = holes});
+        expect(bool(result));
+        if (!result) return;
+        expect(ValidateTetMesh(surface.Points, surface.Tris, result->Mesh).empty());
+        double volume{};
+        for (const auto &tet : result->Mesh.Tets) {
+            const dvec3 center = 0.25 * (result->Mesh.Points[tet[0]] + result->Mesh.Points[tet[1]] + result->Mesh.Points[tet[2]] + result->Mesh.Points[tet[3]]);
+            expect(center.x < 0.25 || center.y < 0.25 || center.z < 0.25 || center.x > 0.75 || center.y > 0.75 || center.z > 0.75);
+            volume += std::abs(geom::Orient3D(result->Mesh.Points[tet[0]], result->Mesh.Points[tet[1]], result->Mesh.Points[tet[2]], result->Mesh.Points[tet[3]])) / 6;
+        }
+        expect(std::abs(volume - 0.875) < 1e-12);
     };
 
     // Real-world complexity: a thin-walled RealImpact scan through the app's tet generation,

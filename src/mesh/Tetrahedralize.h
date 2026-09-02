@@ -24,6 +24,8 @@ struct Options {
     // Setting it turns Quality on as well.
     // Zero leaves element size unconstrained.
     double MaxVolume{0};
+    // One point strictly inside each enclosed void. Tetrahedra connected to a seed without crossing an input face are removed.
+    std::span<const dvec3> Holes{};
 };
 
 // Wall-clock seconds per stage, with size and effort counters.

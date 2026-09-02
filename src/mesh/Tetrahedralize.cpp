@@ -1118,6 +1118,7 @@ struct Mesh {
     double MinRatio{2.0};
     // Zero leaves tet size unconstrained.
     double MaxVolume{0};
+    std::span<const dvec3> HoleSeeds;
     double MinDihedral{3.5}, CosMinDihedral{0};
     double OptMaxDihedral{177.0}, CosOptMaxDihedral{0};
     double OptMaxAspRatio{1000.0}, OptMaxEdgeRatio{100.0};
@@ -7955,6 +7956,25 @@ struct Mesh {
             }
         }
 
+        for (const dvec3 &seed : HoleSeeds) {
+            for (int t = 0; t < int(Tets.size()); ++t) {
+                const Tet &tet = Tets[t];
+                if (tet.V[0] == None || tet.V[3] == DummyPoint) continue;
+                const dvec3 &a = P(tet.V[0]), &b = P(tet.V[1]), &c = P(tet.V[2]), &d = P(tet.V[3]);
+                const double orientation = orient3d(a, b, c, d);
+                const auto SameSide = [=](double value) { return orientation > 0 ? value >= 0 : value <= 0; };
+                if (!SameSide(orient3d(seed, b, c, d)) || !SameSide(orient3d(a, seed, c, d)) ||
+                    !SameSide(orient3d(a, b, seed, d)) || !SameSide(orient3d(a, b, c, seed)))
+                    continue;
+                Triface hole{t, 11};
+                if (!infected(hole)) {
+                    infect(hole);
+                    tetarray.push_back(hole);
+                }
+                break;
+            }
+        }
+
         for (size_t i = 0; i < tetarray.size(); ++i) {
             const Triface parytet = tetarray[i];
             const int j = parytet.ver & 3;
@@ -10039,6 +10059,7 @@ struct Mesh {
 std::expected<Result, std::string> Tetrahedralize(std::span<const dvec3> points, std::span<const uint32_t> triangle_indices, Options options) {
     Mesh m;
     m.MaxVolume = options.MaxVolume;
+    m.HoleSeeds = options.Holes;
     // A volume bound turns the quality pass on, so the radius-edge and dihedral targets apply alongside it.
     m.Quality = options.Quality || options.MaxVolume > 0;
     // Without a quality bound the dihedral target relaxes.

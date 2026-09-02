@@ -240,9 +240,15 @@ int main(int argc, char **argv) {
             return 0;
         } else names.emplace_back(argument);
     }
-    if (datasets.empty()) datasets = {"realimpact", "thingi10k"};
     if (!fs::is_directory(corpus_root)) {
         std::println("tet corpus root is absent: {} (run script/SetupTetCorpus)", corpus_root.string());
+        return 77;
+    }
+    if (datasets.empty())
+        for (const std::string_view dataset : {"realimpact", "thingi10k"})
+            if (fs::is_directory(corpus_root / dataset)) datasets.emplace_back(dataset);
+    if (datasets.empty()) {
+        std::println("tet corpus has no installed datasets: {} (run script/SetupTetCorpus)", corpus_root.string());
         return 77;
     }
 
