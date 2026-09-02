@@ -1,5 +1,7 @@
 #pragma once
 
+#include "SparseCholesky.h"
+
 #include <Eigen/SparseCore>
 
 #include <memory>
@@ -8,11 +10,17 @@
 // The shift must be negative: K is positive semidefinite and M is positive definite, so
 // K - sigma*M is then positive definite as Cholesky requires. Reads the lower triangles of K and M.
 // Accumulates factorization and solve wall-clock time into the provided references.
-class CholeskyShiftInvert {
-public:
+struct CholeskyShiftInvert {
     using Scalar = double;
 
-    CholeskyShiftInvert(const Eigen::SparseMatrix<double> &k, const Eigen::SparseMatrix<double> &m, double &factorize_seconds, double &solve_seconds);
+    CholeskyShiftInvert(
+        const Eigen::SparseMatrix<double> &k, const Eigen::SparseMatrix<double> &m,
+        double &factorize_seconds, double &solve_seconds,
+        SparseOrdering ordering = SparseOrdering::Default,
+        SparseStorage storage = SparseStorage::Scalar,
+        SparseCholeskyCache *cache = nullptr,
+        bool *symbolic_reuse = nullptr
+    );
     ~CholeskyShiftInvert();
 
     Eigen::Index rows() const { return K.rows(); }
@@ -22,9 +30,11 @@ public:
     // Solve across a column-major panel of `width` right-hand sides in one pass over the factor.
     void solve_panel(const Scalar *b_in, Scalar *x_out, int width) const;
 
-private:
     const Eigen::SparseMatrix<double> &K, &M;
     double &FactorizeSeconds, &SolveSeconds;
-    struct Factorization;
-    std::unique_ptr<Factorization> Factor;
+    SparseOrdering Ordering;
+    SparseStorage Storage;
+    SparseCholeskyCache *Cache;
+    bool *SymbolicReuse;
+    std::unique_ptr<SparseCholesky> Factor;
 };

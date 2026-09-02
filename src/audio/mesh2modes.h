@@ -3,10 +3,13 @@
 #include "MassProperties.h"
 #include "ModalEigenSummary.h"
 #include "ModalModes.h"
+#include "SparseCholesky.h"
 
 #include <Eigen/Core>
 
 #include <atomic>
+#include <algorithm>
+#include <memory>
 #include <optional>
 #include <span>
 
@@ -29,6 +32,9 @@ struct SolverConfig {
     uint32_t NumFemModes{45}; // Eigenpairs requested from the eigensolver
     double Tolerance{1e-8}; // Eigensolver convergence tolerance
     double WarmTolerance{1e-4}; // Warm-started re-solve tolerance (relative eigenvalue change between block iterations)
+    uint32_t WarmOversampling{15}; // Extra block-subspace vectors guarding the requested warm-start modes
+    uint32_t WarmRefinementIterations{}; // FP64 augmented residual-correction steps after warm subspace iteration
+    double CorrectionTolerance{}; // Physical residual target; zero derives it from Tolerance
     uint32_t MaxRestarts{100}; // Eigensolver restart limit
     std::optional<float> FundamentalFreq{}; // Scale mode freqs so the lowest mode is at this fundamental
 };
@@ -38,7 +44,10 @@ struct SolverConfig {
 struct SolveProfile {
     double MassProps{}, QuadMesh{}, Assemble{}, SampleExcite{};
     double Factorize{}, Iterate{}, OpSolve{}, Extract{};
+    double PhysicalResidual{}, MassOrthogonality{};
     uint32_t Dofs{}, StiffnessNonZeros{}, OpApplications{}, Restarts{};
+    uint32_t RefinementApplications{}, RefinementIterations{}, RefinementMaxWidth{};
+    bool TopologyReuse{}, AssemblyReuse{}, SymbolicReuse{};
 
     SolveProfile &operator+=(const SolveProfile &o) {
         MassProps += o.MassProps;
@@ -49,10 +58,18 @@ struct SolveProfile {
         Iterate += o.Iterate;
         OpSolve += o.OpSolve;
         Extract += o.Extract;
+        PhysicalResidual = std::max(PhysicalResidual, o.PhysicalResidual);
+        MassOrthogonality = std::max(MassOrthogonality, o.MassOrthogonality);
         Dofs += o.Dofs;
         StiffnessNonZeros += o.StiffnessNonZeros;
         OpApplications += o.OpApplications;
         Restarts += o.Restarts;
+        RefinementApplications += o.RefinementApplications;
+        RefinementIterations += o.RefinementIterations;
+        RefinementMaxWidth = std::max(RefinementMaxWidth, o.RefinementMaxWidth);
+        TopologyReuse = TopologyReuse || o.TopologyReuse;
+        AssemblyReuse = AssemblyReuse || o.AssemblyReuse;
+        SymbolicReuse = SymbolicReuse || o.SymbolicReuse;
         return *this;
     }
 };
@@ -68,10 +85,24 @@ struct ModalResult {
     std::vector<uint32_t> SamplePointOfExcitation;
 };
 
+// mesh2modes uses a process-wide one-entry topology, assembly, and symbolic-factor cache by
+// default. Supply a SolveCache to give a solve stream its own lifetime and prevent unrelated
+// topologies from replacing it.
+struct SolveCache {
+    struct State;
+
+    SparseCholeskyCache Cholesky;
+    std::unique_ptr<State> Reuse;
+
+    SolveCache();
+    ~SolveCache();
+};
+
 // A prior solve's eigenvector basis over the same tet inputs seeds the eigensolver, which
 // re-converges it in a few block iterations (WarmTolerance) instead of solving from scratch.
 struct SolveReuse {
     const Eigen::MatrixXf *SeedBasis{};
+    SolveCache *Cache{}; // Optional lifetime override for the bounded default cache
     bool KeepBasis{}; // Fill ModalResult::Basis
 };
 
