@@ -2,7 +2,6 @@
 
 #include <boost/ut.hpp>
 
-// Runs every suite the translation unit declared, and returns what main returns.
-// Running them here keeps the code under test running while its statics are still alive, where the runner's destructor would reach library code after that library's statics are gone.
-// The returned result is how the run reports its failures, the destructor setting an exit code only for a run it started itself.
+// Returns the Boost.UT status after running every suite declared by the translation unit.
+// Explicit execution completes before static destruction, avoiding calls into library code after library statics are destroyed.
 inline int RunSuites() { return boost::ut::cfg<>.run(); }

@@ -1,6 +1,5 @@
-// Tetrahedral mesh generator.
-// `Tetrahedralize.h` says what this implements.
-//
+// Implements the constrained Delaunay algorithm from Hang Si, "TetGen, a Delaunay-Based Quality Tetrahedral Mesh Generator," TOMS 41(2), 2015.
+// This port matches TetGen 1.6.0 mesh and flip-sequence output across the project corpus.
 // A tetrahedron (a, b, c, d) is stored with Orient3D(a, b, c, d) < 0.
 // The output flips each tet into TetMesh's positive convention.
 
@@ -26,12 +25,8 @@ using u64 = uint64_t;
 
 constexpr int None = -1;
 
-// The point standing for infinity.
-// Every hull tetrahedron holds it as its fourth vertex, and no predicate is ever handed it.
-// It occupies point slot 0, so an input point i lives at i + 1.
-constexpr int DummyPoint = 0;
+constexpr int DummyPoint = 0; // Reserves point slot 0 for the infinite vertex used by every hull tetrahedron.
 
-//=== Handles ===
 // A `Triface` is a (tet, ver) pair naming one of the twelve directed edges of a tetrahedron.
 // The version's upper two bits are the edge within an oriented face, its lower two the face.
 // A `Facet` is the same idea for a triangle, six versions over three edges and two orientations.
@@ -47,8 +42,6 @@ struct Facet {
     int shver{0};
 };
 
-// Lookup tables driving the handle algebra.
-// `esymtbl`, the pivots and `snextpivot` are constants; the rest are the products `inittables` computes from them.
 constexpr int esymtbl[12]{9, 6, 11, 4, 3, 7, 1, 5, 10, 0, 8, 2};
 constexpr int orgpivot[12]{3, 3, 1, 1, 2, 0, 0, 2, 1, 2, 3, 0};
 constexpr int destpivot[12]{2, 0, 0, 2, 1, 2, 3, 0, 3, 3, 1, 1};
@@ -56,8 +49,7 @@ constexpr int apexpivot[12]{1, 2, 3, 0, 3, 3, 1, 1, 2, 0, 0, 2};
 constexpr int oppopivot[12]{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3};
 constexpr int ver2edge[12]{0, 1, 2, 3, 3, 5, 1, 5, 4, 0, 4, 2};
 constexpr int edge2ver[6]{0, 1, 2, 3, 8, 5};
-// The pair of faces meeting at each of those six edges: [c,d], [a,d], [a,b], [b,c], [b,d], [a,c].
-constexpr std::array<std::array<int, 2>, 6> DihedralFaces{{{0, 1}, {1, 2}, {2, 3}, {0, 3}, {2, 0}, {1, 3}}};
+constexpr std::array<std::array<int, 2>, 6> DihedralFaces{{{0, 1}, {1, 2}, {2, 3}, {0, 3}, {2, 0}, {1, 3}}}; // Maps each edge to its two faces.
 constexpr int epivot[12]{4, 5, 2, 11, 4, 5, 2, 11, 4, 5, 2, 11};
 constexpr int snextpivot[6]{2, 5, 4, 1, 0, 3};
 constexpr int sorgpivot[6]{0, 1, 1, 2, 2, 0};
@@ -132,8 +124,6 @@ inline void SDecode(int p, Facet &s) {
     }
 }
 
-//=== Records ===
-
 // Four neighbours indexed by face, four vertices, the six subsegments on its edges, the four subfaces on its faces, and the packed marker word.
 struct Tet {
     int N[4]{None, None, None, None};
@@ -154,9 +144,7 @@ struct Shell {
     int Flags{0};
     int FacetIndex{0};
     double AreaBound{0};
-    // 0 for a subface, 1 for a subsegment.
-    // One pool holds both, so the record says which it is.
-    int Kind{0};
+    int Kind{0}; // Distinguishes subfaces (0) from subsegments (1) in the shared pool.
 };
 
 enum VertType {
@@ -174,10 +162,9 @@ enum VertType {
 
 struct Point {
     dvec3 Pos{};
-    // point2tet, point2sh and point2ppt: an encoded handle each, and the parent this was split from.
+    // Stores the incident tetrahedron, incident shell, and split parent handles.
     int Tet{None}, Sh{None}, Parent{None};
-    // Low byte holds the infect and marktest bits, and the type sits above it.
-    int Flags{0};
+    int Flags{0}; // Packs the infection and test marks below the vertex type.
     double InsRadius{0};
     // The target edge length at this vertex.
     double Mtr{0};
@@ -223,7 +210,7 @@ enum LocateResult {
     NonCoplanar,
     SelfEncroach
 };
-// Which of the three faces about the current edge a walk crosses to reach the next tet.
+// Identifies the face crossed during edge-based tetrahedron traversal.
 enum WalkMove {
     OrgMove,
     DestMove,
@@ -248,8 +235,7 @@ struct InsertFlags {
     int parentpt{None};
 };
 
-// How a Steiner point placed on the boundary is inserted: Bowyer-Watson in the tets and again in the
-// subfaces, flipped back to Delaunay afterwards, and leaving the boundary itself unsplit.
+// Returns flags for inserting a boundary Steiner point without splitting the boundary.
 InsertFlags boundary_split_flags(int iloc) {
     return {
         .iloc = iloc,
@@ -297,7 +283,7 @@ struct OptParameters {
     int smthiter{0};
 };
 
-// A queued element, carrying the vertices it had when it was queued so a stale entry can be recognised on pop.
+// Stores the queued element vertices needed to reject stale entries.
 struct BadFace {
     Triface tt{};
     Facet ss{};
@@ -307,18 +293,12 @@ struct BadFace {
     int nextitem{None};
 };
 
-//=== Geometric predicates and constructions ===
-// These take coordinates rather than point handles, because the coplanar triangle-edge test invents a lift point that belongs to no mesh.
-
 constexpr double PI = std::numbers::pi;
 
-// The determinant is expanded about the z terms.
-// The approximate value is returned whenever it clears the first error bound, and the rest goes to the refinement stages.
-// Callers read the magnitude as a volume, not only the sign, so the expansion order is part of the result.
-// Every sign comes from the error bound, the refinement stages and the exact fallback.
-// None comes from a fixed magnitude below which a determinant is treated as noise.
-// Such a filter is sized from the input bounding box, and not every point asked about is inside it.
-// A point far outside would be decided on a value that can be pure cancellation.
+// Coordinate arguments also support temporary lift points without mesh handles.
+// Returns a determinant whose sign and volume magnitude remain valid near degeneracy.
+// The fixed expansion order forms part of the numeric result.
+// Adaptive error bounds avoid a scale-dependent zero threshold for points outside the input bounds.
 inline double orient3d(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d) {
     const double adx = a.x - d.x, ady = a.y - d.y, adz = a.z - d.z;
     const double bdx = b.x - d.x, bdy = b.y - d.y, bdz = b.z - d.z;
@@ -341,7 +321,7 @@ inline double orient3d(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dve
     return geom::Orient3DRefined(a, b, c, d, permanent);
 }
 inline double insphere(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d, const dvec3 &e) { return geom::InSphere(a, b, c, d, e); }
-// Written as a running sum of products, which is the form the results are compared in.
+// Preserves the running-sum expression used by downstream comparisons.
 inline double dot(const dvec3 &a, const dvec3 &b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 inline double distance(const dvec3 &a, const dvec3 &b) {
     const double x = b.x - a.x, y = b.y - a.y, z = b.z - a.z;
@@ -349,13 +329,12 @@ inline double distance(const dvec3 &a, const dvec3 &b) {
 }
 inline dvec3 cross(const dvec3 &a, const dvec3 &b) { return numeric::Cross(a, b); }
 
-// The normal of [pa, pb, pc].
-// With pivot set it picks the two shortest edge vectors by Burdakov's rule, which keeps the cross product accurate on a thin triangle.
-// The average edge length comes back through lav.
+// Returns the face normal and optionally its average edge length.
 inline void facenormal(const dvec3 &pa, const dvec3 &pb, const dvec3 &pc, dvec3 &n, int pivot, double *lav) {
     const dvec3 v1 = pb - pa, v2 = pa - pc, v3 = pc - pb;
     const dvec3 *pv1 = &v1, *pv2 = &v2;
     if (pivot > 0) {
+        // Burdakov's rule selects the two shortest edge vectors to reduce cross-product error for thin triangles.
         const double l1 = dot(v1, v1), l2 = dot(v2, v2), l3 = dot(v3, v3);
         if (l1 < l2) {
             if (l2 < l3) {
@@ -425,7 +404,7 @@ inline void projpt2face(const dvec3 &p, const dvec3 &f1, const dvec3 &f2, const 
     prj = p - dot(fnormal, p - f1) * fnormal;
 }
 
-// An LU factorisation with partial pivoting, used to solve the small dense systems the circumcentre constructions set up.
+// Factors a small dense system with partial pivoting.
 inline bool lu_decmp(double lu[4][4], int n, int *ps, double *d, int N) {
     double scales[4];
     *d = 1.0;
@@ -469,8 +448,7 @@ inline bool lu_decmp(double lu[4][4], int n, int *ps, double *d, int N) {
 }
 
 inline void lu_solve(double lu[4][4], int n, int *ps, double *b, int N) {
-    // The right-hand side is read through the pivot sequence, so the solution comes back in the original row order.
-    // The result accumulates in X because b still holds entries not yet read.
+    // A separate result preserves unread right-hand-side entries while applying the pivot sequence.
     double X[4]{};
     for (int i = N; i < n + N; ++i) {
         double dot = 0.0;
@@ -485,9 +463,7 @@ inline void lu_solve(double lu[4][4], int n, int *ps, double *b, int N) {
     for (int i = N; i < n + N; ++i) b[i] = X[i];
 }
 
-// With pd omitted it returns the circumcircle of the triangle, lying in the triangle's own plane.
-// The four inward face normals of a tet, from its already-factorised edge matrix.
-// Each of the first three solves for one unit right-hand side, and the fourth closes the sum.
+// Returns four inward tetrahedron face normals from its factorized edge matrix.
 inline void face_normals(double A[4][4], int *indx, dvec3 *N) {
     for (int j = 0; j < 3; ++j) {
         double n[4]{};
@@ -498,7 +474,7 @@ inline void face_normals(double A[4][4], int *indx, dvec3 *N) {
     N[3] = -N[0] - N[1] - N[2];
 }
 
-// The three vectors as the rows of the 3x3 system the LU routines factorise.
+// Writes three vectors as the rows of a 3x3 system.
 inline void set_rows(double A[4][4], const dvec3 &r0, const dvec3 &r1, const dvec3 &r2) {
     A[0][0] = r0.x;
     A[0][1] = r0.y;
@@ -511,6 +487,7 @@ inline void set_rows(double A[4][4], const dvec3 &r0, const dvec3 &r1, const dve
     A[2][2] = r2.z;
 }
 
+// Returns a tetrahedron circumsphere or the triangle circumcircle in its plane when pd is null.
 inline bool circumsphere(const dvec3 &pa, const dvec3 &pb, const dvec3 &pc, const dvec3 *pd, dvec3 *cent, double *radius) {
     double A[4][4]{}, rhs[4]{};
     int indx[4]{};
@@ -531,17 +508,15 @@ inline bool circumsphere(const dvec3 &pa, const dvec3 &pb, const dvec3 &pc, cons
     return true;
 }
 
-// Where the line through (e1, e2) meets the plane of (pa, pb, pc).
-// Both determinants are exact, because the ratio of the two places a Steiner point.
+// Returns the intersection of line (e1, e2) with plane (pa, pb, pc) using exact determinant ratios.
 inline void planelineint(const dvec3 &pa, const dvec3 &pb, const dvec3 &pc, const dvec3 &e1, const dvec3 &e2, dvec3 &ip, double *u) {
     const dvec3 vuv = e2 - e1;
-    // The coordinates transposed into the rows of the 4x4 system.
-    // The line's direction is the fourth column, with the heights it carries.
+    // Transpose coordinates into the first three rows and place the line direction in the fourth column.
     const dvec3 A{pa.x, pb.x, pc.x}, B{pa.y, pb.y, pc.y}, C{pa.z, pb.z, pc.z}, D{1, 1, 1}, O{0, 0, 0};
     const double det = geom::Orient4DExactCofactor(A, B, C, D, O, -vuv.x, -vuv.y, -vuv.z, 0, 0);
     if (det != 0.0) {
         *u = geom::Orient3DExactCofactor(pa, pb, pc, e1) / det;
-        // Per component, which is the form the intersection points are compared in.
+        // Preserve component-wise evaluation order for intersection-point comparisons.
         for (int i = 0; i < 3; ++i) ip[i] = e1[i] + (*u) * vuv[i];
     } else {
         *u = 0.0;
@@ -564,10 +539,9 @@ inline int linelineint(const dvec3 &A, const dvec3 &B, const dvec3 &C, const dve
     return 1;
 }
 
-// The orientation of five points lifted to the given heights.
-// The expression order is fixed, since callers compare one result against another.
-// The approximate value is returned whenever it clears the first error bound, and the rest goes to the refinement stages.
-// The caller compares a sum of these against zero, so a term the filter cannot resolve decides the comparison.
+// Returns the orientation of five points lifted to the supplied heights.
+// The fixed expression order supports direct comparison between results.
+// Adaptive refinement resolves terms within the first error bound.
 inline double orient4d(const dvec3 &pa, const dvec3 &pb, const dvec3 &pc, const dvec3 &pd, const dvec3 &pe, double aheight, double bheight, double cheight, double dheight, double eheight) {
     const double aex = pa.x - pe.x, bex = pb.x - pe.x, cex = pc.x - pe.x, dex = pd.x - pe.x;
     const double aey = pa.y - pe.y, bey = pb.y - pe.y, cey = pc.y - pe.y, dey = pd.y - pe.y;
@@ -602,9 +576,7 @@ inline double orient4d(const dvec3 &pa, const dvec3 &pb, const dvec3 &pc, const 
     return geom::Orient4DRefined(pa, pb, pc, pd, pe, aheight, bheight, cheight, dheight, eheight, permanent);
 }
 
-// 24 times the 4d volume of the prism between the tet and its lift onto the paraboloid.
-// It decomposes into four 4d orientations.
-// The magnitudes are summed, so a term of either sign adds to the volume.
+// Returns 24 times the 4D volume between the tetrahedron and its paraboloid lift.
 inline double tetprismvol(const dvec3 &p0, const dvec3 &p1, const dvec3 &p2, const dvec3 &p3) {
     const double w4 = dot(p0, p0), w5 = dot(p1, p1), w6 = dot(p2, p2), w7 = dot(p3, p3);
     const double vol0 = orient4d(p1, p2, p0, p3, p3, w5, w6, w4, 0, w7);
@@ -614,7 +586,7 @@ inline double tetprismvol(const dvec3 &p0, const dvec3 &p1, const dvec3 &p2, con
     return std::abs(vol0) + std::abs(vol1) + std::abs(vol2) + std::abs(vol3);
 }
 
-// Is pd inside the circumcircle of (pa, pb, pc), all four coplanar?
+// Returns the signed distance from pd to the circumcircle of coplanar triangle (pa, pb, pc).
 inline double incircle3d(const dvec3 &pa, const dvec3 &pb, const dvec3 &pc, const dvec3 &pd) {
     double area2[2];
     dvec3 nn1, nn2, cc;
@@ -641,8 +613,7 @@ inline double incircle3d(const dvec3 &pa, const dvec3 &pb, const dvec3 &pc, cons
     return sign;
 }
 
-// One verdict of a triangle-edge test: what was met, and the two vertices naming where.
-// Slot 0 takes the first verdict and slot 1 the second, each writing its own pair of position slots.
+// Stores one triangle-edge intersection type and its two identifying vertices.
 inline void set_inter(int *types, int *pos, int slot, int type, int p0, int p1) {
     types[slot] = type;
     pos[slot * 2] = p0;
@@ -1096,13 +1067,10 @@ inline int tri_edge_test(const dvec3 &A, const dvec3 &B, const dvec3 &C, const d
     return tri_edge_tail(A, B, C, P, Q, R, orient3d(A, B, C, P), orient3d(A, B, C, Q), level, types, pos);
 }
 
-//=== Mesh ===
-// The pools, the counters and every routine that works on them.
-// Subfaces and subsegments share one pool, since their record is the same eleven slots.
-// A `Kind` field tells them apart, and two free lists keep the allocations separate.
+// Stores tetrahedralization records, allocation state, configuration, and working storage.
+// Subfaces and subsegments share one record pool and use `Kind` plus separate free lists to distinguish allocations.
 
 struct Mesh {
-    //=== Pools ===
     // A dead tetrahedron and a dead shellface both have V[0] == None.
     // A freed slot is handed straight back out by the next allocation.
     std::vector<Point> Pts;
@@ -1111,13 +1079,10 @@ struct Mesh {
     std::vector<int> DeadTets, DeadSubfaces, DeadSubsegs, DeadPoints;
     long TetItems{0}, SubfaceItems{0}, SubsegItems{0}, PointItems{0};
 
-    //=== Behaviour ===
-    // The run path is fixed, apart from the quality pass and the volume bound.
     bool Quality{false};
     double Epsilon{1.0e-8};
     double MinRatio{2.0};
-    // Zero leaves tet size unconstrained.
-    double MaxVolume{0};
+    double MaxVolume{0}; // Zero disables the tetrahedron size constraint.
     std::span<const dvec3> HoleSeeds;
     double MinDihedral{3.5}, CosMinDihedral{0};
     double OptMaxDihedral{177.0}, CosOptMaxDihedral{0};
@@ -1133,36 +1098,28 @@ struct Mesh {
     int FlipLinkLevel{-1}, FlipStarSize{-1}, FlipLinkLevelInc{1};
     double FacetSepAngTol{179.9}, CollinearAngTol{179.9}, FacetSmallAngTol{15.0};
     double CosFacetSepAngTol{0}, CosSmallAngTol{0};
-    // Set for a piecewise-linear input, and cleared while a cavity's own Delaunay triangulation is built.
-    int Plc{1};
+    int Plc{1}; // Marks piecewise-linear input and clears during cavity triangulation.
 
-    //=== State carried across the passes ===
-    long HullSize{0};
-    int CheckSubsegFlag{0}, CheckSubfaceFlag{0}, CheckConstraints{0};
-    int BoundaryRecoveryFlag{0};
-    int NonConvex{0};
-    int UseInsertRadius{0};
-    long InSegments{0};
-    long DupVerts{0}, UnuVerts{0};
-    long StSegRefCount{0}, StFacRefCount{0}, StVolRefCount{0};
-    long Flip14Count{0}, Flip26Count{0}, FlipN2nCount{0};
-    long Flip23Count{0}, Flip32Count{0}, Flip44Count{0}, Flip41Count{0}, Flip31Count{0}, Flip22Count{0};
+    long HullSize{};
+    int CheckSubsegFlag{}, CheckSubfaceFlag{}, CheckConstraints{};
+    int BoundaryRecoveryFlag{};
+    int NonConvex{};
+    int UseInsertRadius{};
+    long InSegments{};
+    long DupVerts{}, UnuVerts{};
+    long StSegRefCount{}, StFacRefCount{}, StVolRefCount{};
+    long Flip14Count{}, Flip26Count{}, FlipN2nCount{};
+    long Flip23Count{}, Flip32Count{}, Flip44Count{}, Flip41Count{}, Flip31Count{}, Flip22Count{};
     unsigned long RandomSeed{1};
-    // Draws the sequence libc's rand() produces, held per mesh so one build's draws stand alone.
-    std::minstd_rand0 Rng;
-    double LongEst{0}, MinEdgeLength{0};
-    dvec3 BoxMin{0}, BoxMax{0};
+    std::minstd_rand0 Rng; // Stores one libc-compatible random sequence per mesh.
+    double LongEst{}, MinEdgeLength{};
+    dvec3 BoxMin{}, BoxMax{};
     long SteinerLeft{-1};
-    // Set when recovery gives up on a facet it cannot recover, which means self-intersecting input.
-    bool SkippedFacet{false};
-    // How many segments and subfaces the initial Delaunay triangulation was missing.
-    long MissingEdgeCount{0}, MissingFaceCount{0};
-
+    bool SkippedFacet{}; // Indicates a facet-recovery failure caused by self-intersecting input.
+    long MissingEdgeCount{}, MissingFaceCount{}; // Counts boundary elements absent from the initial Delaunay triangulation.
     Triface RecentTet{};
     Facet RecentSh{};
 
-    //=== Working arrays, reused across calls ===
-    // Their lifetime is part of the algorithm: one routine fills a list and a later routine drains it.
     std::vector<Triface> CaveOldTetList, CaveBdryList, CaveTetList;
     std::vector<Facet> CaveTetShList, CaveTetSegList;
     std::vector<int> CaveTetVertList;
@@ -1170,8 +1127,8 @@ struct Mesh {
     std::vector<Facet> CaveEncSegList, CaveEncShList;
     std::vector<int> SubSegStack, SubFaceStack, SubVertStack;
 
-    // A stack of faces that may need flipping, each carrying the tet handle it was pushed with.
-    // The face is marked in that tet, so a duplicate push is refused.
+    // Stores candidate faces with their tetrahedron handle at insertion time.
+    // The tetrahedron face mark suppresses duplicate entries.
     std::vector<BadFace> FlipStack;
 
     // Queues of bad-quality elements, drained by refinement and by mesh improvement.
@@ -1192,11 +1149,8 @@ struct Mesh {
     std::vector<int> SegmentEndpointsList;
     std::vector<int> IdxSegmentRidgeVertexList, SegmentRidgeVertexList;
 
-    // Input, kept for the surface mesh.
-    std::vector<std::array<int, 3>> InTris;
+    std::vector<std::array<int, 3>> InTris; // Retains the input surface triangles.
     int NumInputPoints{0};
-
-    //=== Allocation ===
 
     void maketetrahedron(Triface *newtet) {
         if (!DeadTets.empty()) {
@@ -1267,8 +1221,6 @@ struct Mesh {
         DeadPoints.push_back(p);
         --PointItems;
     }
-
-    //=== Primitives for tetrahedra ===
 
     void bond(const Triface &t1, const Triface &t2) {
         Tets[t1.tet].N[t1.ver & 3] = Encode2(t2.tet, Tbl.bondtbl[t1.ver][t2.ver]);
@@ -1348,8 +1300,6 @@ struct Mesh {
     bool ishulltet(const Triface &t) const { return Tets[t.tet].V[3] == DummyPoint; }
     bool isdeadtet(const Triface &t) const { return t.tet < 0 || Tets[t.tet].V[0] == None; }
 
-    //=== Primitives for subfaces and subsegments ===
-
     void sdissolve(const Facet &s) { Shells[s.sh].S[s.shver >> 1] = None; }
     void sbond(const Facet &s1, const Facet &s2) {
         Shells[s1.sh].S[s1.shver >> 1] = SEncode(s2);
@@ -1396,8 +1346,6 @@ struct Mesh {
     int getfacetindex(const Facet &s) const { return Shells[s.sh].FacetIndex; }
     bool isdeadsh(const Facet &s) const { return s.sh < 0 || Shells[s.sh].V[0] == None; }
 
-    //=== Primitives between tetrahedra and subfaces ===
-
     void tsbond(const Triface &t, const Facet &s) {
         Tets[t.tet].Sub[t.ver & 3] = SEncode2(s.sh, Tbl.tsbondtbl[t.ver][s.shver]);
         Shells[s.sh].T[s.shver & 1] = Encode2(t.tet, Tbl.stbondtbl[t.ver][s.shver]);
@@ -1418,8 +1366,6 @@ struct Mesh {
         Shells[s.sh].T[1] = None;
     }
 
-    //=== Primitives between subfaces and segments ===
-
     void ssbond(const Facet &s, const Facet &edge) {
         Shells[s.sh].Seg[s.shver >> 1] = SEncode(edge);
         Shells[edge.sh].S[0] = SEncode(s);
@@ -1427,8 +1373,6 @@ struct Mesh {
     void ssdissolve(const Facet &s) { Shells[s.sh].Seg[s.shver >> 1] = None; }
     void sspivot(const Facet &s, Facet &edge) const { SDecode(Shells[s.sh].Seg[s.shver >> 1], edge); }
     bool isshsubseg(const Facet &s) const { return Shells[s.sh].Seg[s.shver >> 1] != None; }
-
-    //=== Primitives between tetrahedra and segments ===
 
     void tssbond1(const Triface &t, const Facet &s) { Tets[t.tet].Seg[ver2edge[t.ver]] = SEncode(s); }
     void sstbond1(const Facet &s, const Triface &t) { Shells[s.sh].T[0] = Encode(t); }
@@ -1451,7 +1395,7 @@ struct Mesh {
         sstbond1(s, t);
         mark_seg_ring(s, t);
     }
-    // Take `s` off every tet around it.
+    // Detaches `s` from every incident tetrahedron.
     void dissolve_seg_ring(const Facet &s) {
         Triface neightet;
         sstpivot1(s, neightet);
@@ -1461,8 +1405,6 @@ struct Mesh {
             fnextself(spintet);
         } while (spintet.tet != neightet.tet);
     }
-
-    //=== Primitives for points ===
 
     const dvec3 &P(int p) const { return Pts[p].Pos; }
     VertType pointtype(int pt) const { return VertType(Pts[pt].Flags >> 8); }
@@ -1481,7 +1423,7 @@ struct Mesh {
     double getpointinsradius(int pt) const { return Pts[pt].InsRadius; }
     void setpointinsradius(int pt, double v) { Pts[pt].InsRadius = v; }
 
-    // Retire a Steiner point that was of type `vt`: mark it unused and give back the budget it took.
+    // Marks a Steiner point unused and restores its `vt` allocation budget.
     void release_steiner(int steinerpt, VertType vt) {
         if (pointtype(steinerpt) != UnusedVertex) {
             setpointtype(steinerpt, UnusedVertex);
@@ -1495,10 +1437,7 @@ struct Mesh {
         }
     }
 
-    //=== Flips ===
-
-    // Mark and stack a face that may need flipping.
-    // The mark refuses a duplicate push and is cleared when the face is popped.
+    // Marks and queues a candidate face while suppressing duplicate entries.
     void flippush(Triface *flipface) {
         if (!facemarked(*flipface)) {
             markface(*flipface);
@@ -1508,9 +1447,9 @@ struct Mesh {
         }
     }
 
-    // Arrays flipnm takes for the star of a link edge.
-    // They are addressed by slot, so a nested call growing the table cannot invalidate an outer call's pointer.
-    // A slot keeps its buffer between uses and grows only when a larger star asks for it, so a run of flips reuses the same memory.
+    // Provides arrays for the link-edge star processed by `flipnm`.
+    // Slot addressing preserves outer-call pointers when a nested call expands the table.
+    // Each slot reuses its buffer and expands only for a larger vertex star.
     std::vector<std::vector<Triface>> FlipArrays;
     std::vector<int> FlipArraysFree;
     int flip_array_new(int n) {
@@ -1540,7 +1479,7 @@ struct Mesh {
         tssbond1(t, s);
         sstbond1(s, t);
     }
-    // Move the subface carried by `from` onto `to`, turned to face the other way.
+    // Transfers the subface from `from` to the oppositely oriented `to` face.
     void rebond_subface(const Triface &from, const Triface &to, FlipConstraints *fc) {
         if (!issubface(from)) return;
         Facet checksh;
@@ -1552,7 +1491,7 @@ struct Mesh {
 
     // Replace the face [a,b,c] shared by [a,b,c,d] and [b,a,c,e] with the edge [d,e].
     // fliptets[0] and [1] are those two tets on entry.
-    // The three new tets [e,d,a,b], [e,d,b,c] and [e,d,c,a] come back in [0], [1] and [2].
+    // Returns new tetrahedra [e,d,a,b], [e,d,b,c], and [e,d,c,a] in slots 0, 1, and 2.
     void flip23(Triface *fliptets, int hullflag, FlipConstraints *fc) {
         Triface topcastets[3], botcastets[3];
         Triface newface, casface;
@@ -1707,7 +1646,7 @@ struct Mesh {
         setpoint2tet(pe, Encode2(fliptets[0].tet, 0));
 
         if (hullflag > 0 && dummyflag != 0) {
-            // Put the points back where flipnm expects them.
+            // Restores the point order required by `flipnm`.
             if (dummyflag == -1) {
                 for (int i = 0; i < 3; ++i) esymself(fliptets[i]);
                 std::swap(fliptets[1], fliptets[2]);
@@ -1740,7 +1679,7 @@ struct Mesh {
     }
 
     // Replace the edge [e,d] shared by [e,d,a,b], [e,d,b,c], [e,d,c,a] with the face [a,b,c].
-    // The two new tets [a,b,c,d] and [b,a,c,e] come back in [0] and [1].
+    // Returns new tetrahedra [a,b,c,d] and [b,a,c,e] in slots 0 and 1.
     void flip32(Triface *fliptets, int hullflag, FlipConstraints *fc) {
         Triface topcastets[3], botcastets[3];
         Triface newface, casface;
@@ -1974,7 +1913,7 @@ struct Mesh {
     }
 
     // Remove the vertex p at the centre of [p,d,a,b], [p,d,b,c], [p,d,c,a] and [a,b,c,p].
-    // [a,b,c,d] is left in fliptets[0].
+    // Stores [a,b,c,d] in fliptets[0].
     void flip41(Triface *fliptets, int hullflag, FlipConstraints *fc) {
         Triface topcastets[3], botcastet;
         Triface newface, neightet;
@@ -2112,7 +2051,7 @@ struct Mesh {
             rebond_subface(botcastet, fliptets[0], fc);
 
             if (spivotidx >= 0) {
-                // Three subfaces meet at p: take p out of the surface with a 3-1 flip.
+                // A 3-1 flip removes p at the junction of three subfaces.
                 for (int i = 0; i < 3; ++i) senext2self(flipshs[i]);
                 flip31(flipshs, 0);
                 for (int i = 0; i < 3; ++i) subfacedealloc(flipshs[i].sh);
@@ -2232,7 +2171,7 @@ struct Mesh {
         return false;
     }
 
-    // Refuse a 2-3 flip that would make a face whose three vertices sit on one segment or on two nearly collinear ones.
+    // Reject a 2-3 flip whose new face has collinear or nearly collinear vertices.
     bool valid_constrained_f23(Triface &checktet, int pd, int pe) const {
         Triface spintet;
         Facet checkseg1, checkseg2;
@@ -2360,7 +2299,7 @@ struct Mesh {
 
         if (fc->remove_large_angle && !rejflag) {
             BadFace bf;
-            // Both tets a flip produces have to improve, and the pair's worst values are what the flip reports.
+            // Accept only flips that improve both tetrahedra and report the worse resulting quality.
             const auto accept_pair = [&](int a1, int b1, int c1, int d1, int a2, int b2, int c2, int d2) {
                 if (!improves_dihedral(a1, b1, c1, d1, fc->cosdihed_in, &bf)) return false;
                 const double cosmaxd = bf.cent[0], asp = bf.key;
@@ -2370,7 +2309,7 @@ struct Mesh {
                 return true;
             };
             if (fliptype == 1) {
-                // Only [e,d,b,c] and [e,d,c,a] need checking: [e,d,a,b] is flipped again below.
+                // Checks [e,d,b,c] and [e,d,c,a] because the following step flips [e,d,a,b] again.
                 if (pc != DummyPoint && pe != DummyPoint && pd != DummyPoint) {
                     if (!accept_pair(pe, pd, pb, pc, pe, pd, pc, pa)) rejflag = 1;
                 }
@@ -2389,7 +2328,7 @@ struct Mesh {
     }
 
     // The two tets about [a,b] that go back into the star once a nested edge removal has finished, as [a,b,e,c] and [a,b,c,d].
-    // The pivot decides which way each one is turned.
+    // The pivot selects each orientation.
     void make_abtets_pair(const Triface *tmpabtets, int edgepivot, Triface *fliptets) {
         fliptets[0] = tmpabtets[1];
         if (edgepivot == 1) enextself(fliptets[0]);
@@ -2402,7 +2341,7 @@ struct Mesh {
     }
 
     // Remove the edge [a,b] through a sequence of elementary flips.
-    // abtets holds the n tets around it in a counterclockwise cycle about a->b.
+    // `abtets` stores the n incident tetrahedra counterclockwise about a->b.
     // The return is the size of the current star, 2 when the edge is gone.
     int flipnm(Triface *abtets, int n, int level, int abedgepivot, FlipConstraints *fc) {
         Triface fliptets[3], spintet, flipedge;
@@ -2421,7 +2360,7 @@ struct Mesh {
             for (int i = 0; i < n; ++i) {
                 // Let the face of abtets[i] be [a,b,c].
                 if (CheckSubfaceFlag && issubface(abtets[i])) continue;
-                // Leave a face alone when it belongs to two stars at once.
+                // Preserve faces shared by two vertex stars.
                 if (elemcounter(abtets[i]) > 1 || elemcounter(abtets[(i - 1 + n) % n]) > 1) continue;
 
                 pc = apex(abtets[i]);
@@ -2469,7 +2408,7 @@ struct Mesh {
                 }
 
                 if (reducflag && NonConvex && hulledgeflag) {
-                    // The hull edge [e,d] is about to be created: make sure it does not exist.
+                    // Reject creation of duplicate hull edge [e,d].
                     if (getedge(pe, pd, &spintet)) reducflag = 0;
                 }
                 if (reducflag) {
@@ -2488,12 +2427,12 @@ struct Mesh {
                         flip23(fliptets, hullflag, fc);
 
                         // Shrink abtets while keeping its order.
-                        // The tet [a,b,e,d] stays in the star and takes the [i-1] slot; everything above [i] shifts down.
+                        // Retains tetrahedron [a,b,e,d] in star slot i-1 and shifts higher slots down.
                         edestoppoself(fliptets[0]); // [a,b,e,d]
                         increaseelemcounter(fliptets[0]);
                         abtets[(i - 1 + n) % n] = fliptets[0];
                         for (int j = i; j < n - 1; ++j) abtets[j] = abtets[j + 1];
-                        // The freed last entry remembers the vertex c and the position of this flip, which is what lets flipnm_post undo it.
+                        // The freed final entry stores vertex c and the flip position for `flipnm_post`.
                         abtets[n - 1].tet = pc;
                         abtets[n - 1].ver = (1 << 4) | (i << 6);
 
@@ -2506,7 +2445,7 @@ struct Mesh {
                         if (nn == 2) return nn;
                         if (fc->unflip || ori == 0) {
                             // Undo the 2-3 flip.
-                            // `ori == 0` means it made a degenerate tet, which has to come out whether or not the caller asked for an unflip.
+                            // `ori == 0` identifies a degenerate tetrahedron that requires removal during every unflip mode.
                             fliptets[0] = abtets[(i - 1 + (n - 1)) % (n - 1)]; // [a,b,e,d]
                             edestoppoself(fliptets[0]); // [e,d,a,b]
                             fnext(fliptets[0], fliptets[1]); // [e,d,b,c]
@@ -2520,13 +2459,13 @@ struct Mesh {
                             if (fc->collectnewtets) CaveTetList.resize(CaveTetList.size() - 2);
                         }
                         if (!fc->unflip) return nn;
-                        // With unflip set the mesh is back where it started: keep searching.
+                        // Continue searching after `unflip` restores the initial mesh.
                     }
                 }
             }
 
             if (reflexlinkedgecount > 0) {
-                // There are reflex edges in the link of [a,b]: try to flip one away.
+                // Attempts to remove a reflex edge from the [a,b] link.
                 if ((FlipLinkLevel < 0 && level < AutoFlipLinkLevel) || (FlipLinkLevel >= 0 && level < FlipLinkLevel)) {
                     for (int i = 0; i < n; ++i) {
                         if (elemcounter(abtets[i]) > 1 || elemcounter(abtets[(i - 1 + n) % n]) > 1) continue;
@@ -2592,7 +2531,7 @@ struct Mesh {
                         nn = flipnm(tmpabtets, n1, level + 1, edgepivot, fc);
 
                         if (nn == 2) {
-                            // The link edge went, so the star of [a,b] is one smaller.
+                            // Removing the link edge reduces the [a,b] star size by one.
                             if (edgepivot == 1) {
                                 spintet = tmpabtets[0]; // [d,a,e,b]
                                 enextself(spintet);
@@ -2607,7 +2546,7 @@ struct Mesh {
                             increaseelemcounter(spintet);
                             abtets[(i - 1 + n) % n] = spintet;
                             for (int j = i; j < n - 1; ++j) abtets[j] = abtets[j + 1];
-                            // Record the flip so it can be undone: star array, pivot, position and star size pack into the last entry.
+                            // Pack the star array, pivot, position, and size into the final entry for reversal.
                             abtets[n - 1].tet = arrayslot;
                             abtets[n - 1].ver = edgepivot | (1 << 5) | (i << 6) | (n1 << 19);
                             tmpabtets[0].tet = pc;
@@ -2617,7 +2556,7 @@ struct Mesh {
 
                             if (nn == 2) return nn;
                             if (fc->unflip) {
-                                // Put the link edge back. abtets[(i-1)%(n-1)] is [a,b,e,d], the tet the link flip created, and it is still in the star.
+                                // Restores the link edge through tetrahedron [a,b,e,d] in star slot (i-1)%(n-1).
                                 if (edgepivot == 1) {
                                     tmpabtets[0] = abtets[((i - 1) + (n - 1)) % (n - 1)]; // [a,b,e,d]
                                     eprevself(tmpabtets[0]);
@@ -2650,8 +2589,8 @@ struct Mesh {
                 }
             }
         } else {
-            // n == 3: try a 3-2 flip.
-            // Rearrange so that any dummy apex sits at e.
+            // Attempts a 3-2 flip for n == 3.
+            // Place any dummy apex at e.
             hullflag = 0;
             if (apex(abtets[0]) == DummyPoint) {
                 pc = apex(abtets[1]);
@@ -2688,8 +2627,7 @@ struct Mesh {
                     reducflag = 1;
                 }
                 if (reducflag == 1) {
-                    // Find an interior apex of [c,d] to test against.
-                    // The one whose tet has the biggest volume decides the sign as far from zero as possible.
+                    // Selects the interior [c,d] apex whose incident tetrahedron maximizes the predicate magnitude.
                     int searchpt = None, chkpt;
                     double bigvol = 0.0, ori1, ori2;
                     fliptets[0] = abtets[hullflag % 3]; // [a,b,c,d]
@@ -2725,7 +2663,7 @@ struct Mesh {
             if (reducflag) {
                 if (CheckSubfaceFlag) {
                     // The edge may be flipped only when 0 or 2 subfaces meet it.
-                    // With two, the 3-2 flip carries a 2-2 flip in the surface mesh with it.
+                    // Two incident subfaces require a corresponding surface 2-2 flip.
                     nn = 0;
                     edgepivot = -1;
                     for (int j = 0; j < 3; ++j) {
@@ -2734,7 +2672,7 @@ struct Mesh {
                     }
                     if (nn == 1) {
                         // One subface only, which happens during recovery while the neighbour is not yet back.
-                        // Leave the edge alone until the neighbour is back.
+                        // Defer the edge until its neighbor returns.
                         rejflag = 1;
                     } else if (nn == 2) {
                         eorgoppo(abtets[(edgepivot + 1) % 3], spintet); // [q,p,b,a]
@@ -2747,13 +2685,13 @@ struct Mesh {
                 }
                 if (!rejflag && !valid_constrained_f32(abtets, pa, pb)) rejflag = 1;
                 if (!rejflag && fc->checkflipeligibility) {
-                    // The eligibility check names the face to be flipped as [a,b,c] and the new edge as [e,d], so a and b swap places here.
+                    // Swap a and b because the eligibility check names face [a,b,c] and new edge [e,d].
                     rejflag = checkflipeligibility(2, pc, pd, pe, pb, pa, level, abedgepivot, fc);
                 }
                 if (!rejflag) {
                     flip32(abtets, hullflag, fc);
                     if (fc->remove_ndelaunay_edge && level == 0) {
-                        // This is the edge we set out to remove: keep the flip only if the objective actually improved.
+                        // Retains removal of the target edge only when the objective improves.
                         if (fc->tetprism_vol_sum >= 0.0 || std::abs(fc->tetprism_vol_sum) < fc->bak_tetprism_vol) {
                             flip23(abtets, hullflag, fc);
                             for (int j = 0; j < 3; ++j) increaseelemcounter(abtets[j]);
@@ -2775,8 +2713,8 @@ struct Mesh {
         return n;
     }
 
-    // Walk back over the flips flipnm recorded, freeing their arrays.
-    // With unflip set each one is undone, so the mesh returns to its original state.
+    // Reverses recorded flips and releases their arrays.
+    // `unflip` restores the original mesh state.
     int flipnm_post(Triface *abtets, int n, int nn, int abedgepivot, FlipConstraints *fc) {
         Triface fliptets[3];
         int fliptype, edgepivot, t, n1;
@@ -2852,8 +2790,7 @@ struct Mesh {
         FlipStack.push_back({.ss = *flipedge, .forg = sorg(*flipedge), .fdest = sdest(*flipedge)});
     }
 
-    // Note what the boundary edge `bdedge` is attached to: the subface on its far side, the last
-    // subface before the ring comes back to it, and any segment it carries.
+    // Record the far subface, the preceding ring subface, and any segment attached to boundary edge `bdedge`.
     void take_bdedge(const Facet &bdedge, Facet &outface, Facet &inface, Facet &bdseg) const {
         spivot(bdedge, outface);
         inface = outface;
@@ -2867,7 +2804,7 @@ struct Mesh {
             }
         }
     }
-    // Hang `bdedge` back where `take_bdedge` found it.
+    // Restores `bdedge` to the attachment recorded by `take_bdedge`.
     void put_bdedge(Facet &bdedge, const Facet &outface, const Facet &inface, Facet &bdseg) {
         if (bdseg.sh != None) {
             bdseg.shver = 0;
@@ -2981,7 +2918,7 @@ struct Mesh {
         return flipcount;
     }
 
-    // Try to take the edge out.
+    // Attempts to remove the edge.
     // Returns 2 when it is gone, otherwise the current size of its star.
     int removeedgebyflips(Triface *flipedge, FlipConstraints *fc) {
         Triface spintet;
@@ -3032,7 +2969,7 @@ struct Mesh {
         return nn;
     }
 
-    // Take a face out, by a 2-3 flip when it is convex and otherwise by removing one of its edges.
+    // Removes a face through a convex 2-3 flip or removal of one incident edge.
     int removefacebyflips(Triface *flipface, FlipConstraints *fc) {
         Triface fliptets[3], flipedge;
         int reducflag = 0;
@@ -3065,8 +3002,7 @@ struct Mesh {
         return removeedgebyflips(&flipedge, fc) == 2 ? 1 : 0;
     }
 
-    // The two segments meeting at a Steiner point that sits on a segment, turned so the point is the
-    // destination of the left one and the origin of the right one.
+    // Orients the two incident segments with the Steiner point as the first segment's destination and the second segment's origin.
     void segments_at(int steinerpt, Facet &leftseg, Facet &rightseg) const {
         SDecode(point2sh(steinerpt), leftseg);
         leftseg.shver = 0;
@@ -3082,8 +3018,8 @@ struct Mesh {
         }
     }
 
-    // Cross to the face opposite searchtet's edge, collecting a subface found on the way.
-    // False when that subface stops the walk, which it does unless the whole star is wanted.
+    // Crosses to the face opposite the `searchtet` edge and records any intervening subface.
+    // Returns false when a subface terminates traversal unless full-star traversal is enabled.
     bool cross_link_face(const Triface &searchtet, Triface &neightet, int fullstar, std::vector<Facet> *shlist) {
         esym(searchtet, neightet);
         if (!issubface(neightet)) return true;
@@ -3099,7 +3035,7 @@ struct Mesh {
     }
 
     // Collect the tets, the link vertices and the subfaces around a vertex.
-    // With fullstar clear the walk stops at subfaces.
+    // Disabling `fullstar` terminates traversal at subfaces.
     int getvertexstar(int fullstar, int searchpt, std::vector<Triface> *tetlist, std::vector<int> *vertlist, std::vector<Facet> *shlist) {
         Triface searchtet, neightet;
         point2tetorg(searchpt, searchtet);
@@ -3159,7 +3095,7 @@ struct Mesh {
         return int(tetlist->size());
     }
 
-    // Find a tet holding the edge (e1, e2), searching the link faces of e1 when the direction walk does not land on it.
+    // Returns a tetrahedron incident to edge (e1, e2), with link-face search as the fallback.
     int getedge(int e1, int e2, Triface *tedge) {
         Triface searchtet, neightet;
         if (e1 == None || e2 == None) return 0;
@@ -3232,8 +3168,6 @@ struct Mesh {
         return done;
     }
 
-    //=== Point insertion ===
-
     std::vector<BadFace> EncSegList, EncShList;
     std::vector<int> CaveOldTetOnly;
 
@@ -3250,7 +3184,7 @@ struct Mesh {
         return RandomSeed % choices;
     }
 
-    // Put the cavity back and clear the working lists.
+    // Restores the cavity and clears working lists.
     void insertpoint_abort(Facet *splitseg, InsertFlags *ivf) {
         for (auto &t : CaveOldTetList) {
             uninfect(t);
@@ -3270,8 +3204,8 @@ struct Mesh {
         }
     }
 
-    // The Bowyer-Watson insertion, with all the cavity validation and boundary bookkeeping the constrained phases need.
-    // The three faces of a tet's link, turned to the pivot convention and put on the cavity boundary.
+    // Performs Bowyer-Watson insertion with constrained-cavity validation and boundary updates.
+    // Orients the three tetrahedron-link faces to the pivot convention and appends them to the cavity boundary.
     void push_link_faces(Triface &t) {
         Triface link;
         for (int j = 0; j < 3; ++j) {
@@ -3293,7 +3227,7 @@ struct Mesh {
     }
 
     // The tets p conflicts with, and on a segment or subface the sub-cavity in the surface mesh alongside them.
-    // False when p needs no insertion, being already a vertex or sitting on an encroached subface.
+    // Returns false when p matches an existing vertex or lies on an encroached subface.
     bool build_initial_cavity(int loc, Triface *searchtet, Facet *splitsh, Facet *splitseg, InsertFlags *ivf) {
         Triface neightet, spintet;
         if (loc == Outside || loc == InTetrahedron) {
@@ -3390,7 +3324,7 @@ struct Mesh {
         return true;
     }
 
-    // True when p sits on top of an existing vertex or inside its protecting ball, which leaves that vertex as the search handle.
+    // Returns true and selects the existing vertex when p coincides with it or enters its protection ball.
     bool reject_near_vertex(int insertpt, int loc, Triface *searchtet, Facet *splitseg, InsertFlags *ivf) {
         if (!(Plc || Quality) || loc == InStar) return false;
         Triface spintet;
@@ -3451,7 +3385,7 @@ struct Mesh {
         return false;
     }
 
-    // Grow C(p) by the Bowyer-Watson rule: take in every neighbouring tet whose circumsphere holds p.
+    // Adds every neighboring tetrahedron whose circumsphere contains p to the Bowyer-Watson cavity C(p).
     void grow_cavity_bw(int insertpt, InsertFlags *ivf) {
         if (!ivf->bowywat) return;
         Triface neightet, neineitet;
@@ -3467,9 +3401,8 @@ struct Mesh {
                 if (e.V[3] != DummyPoint) {
                     enqflag = insphere_s(e.V[0], e.V[1], e.V[2], e.V[3], insertpt) < 0.0;
                 } else {
-                    // A hull face. On a convex mesh a visible one grows the hull and a coplanar one is settled by the
-                    // tet behind it. On a non-convex mesh the face is a subface, so the tet behind it always settles it,
-                    // and validation decides later whether the face survives.
+                    // A visible convex-hull face expands the cavity.
+                    // A coplanar convex-hull face and every non-convex boundary face use the adjacent interior tetrahedron.
                     bool decide_behind = NonConvex;
                     if (!NonConvex) {
                         const double ori = orient3d(P(e.V[0]), P(e.V[1]), P(e.V[2]), P(insertpt));
@@ -3507,8 +3440,8 @@ struct Mesh {
         CaveTetList.clear();
     }
 
-    // Every segment and subface of a tet in C(p), collected so the new tets can be hung on them.
-    // False when p would encroach one of them, which refuses the point.
+    // Collects every segment and subface of C(p) for attachment to the replacement tetrahedra.
+    // Returns false when p encroaches a collected boundary element.
     bool collect_cavity_boundary(int insertpt, Facet *splitseg, InsertFlags *ivf) {
         if (CheckSubsegFlag) {
             Facet checkseg;
@@ -3586,7 +3519,7 @@ struct Mesh {
         return true;
     }
 
-    // Grow the sub-cavity out from the subfaces p meets, without crossing a segment.
+    // Expands the subcavity from subfaces incident to p without crossing a segment.
     void grow_subcavity(int insertpt, InsertFlags *ivf) {
         if (!ivf->splitbdflag) return;
         Triface neightet;
@@ -3657,7 +3590,7 @@ struct Mesh {
                     if (spintet.tet == neightet.tet) break;
                 }
                 if (!infected(spintet)) continue;
-                // Find a tet at this segment with neither of its two faces visible from p.
+                // Locates an incident tetrahedron whose two segment faces are hidden from p.
                 const int pa = org(neightet), pb = dest(neightet);
                 spintet = neightet;
                 int found = 0;
@@ -3912,7 +3845,7 @@ struct Mesh {
         }
     }
 
-    // Hang the boundary subfaces and segments on the new tets, split whichever one p landed on, and queue what that produced.
+    // Attaches boundary elements, splits the element containing p, and queues the resulting elements.
     void reattach_boundary(int insertpt, Facet *splitsh, Facet *splitseg, InsertFlags *ivf) {
         Triface neightet, spintet;
         Facet checksh, checkseg;
@@ -4015,7 +3948,7 @@ struct Mesh {
         }
     }
 
-    // Retire what the cavity swallowed, queue the new elements for the encroachment passes, and empty the work lists.
+    // Removes replaced cavity elements, queues replacements for encroachment checks, and clears the work lists.
     void finish_insertion(Facet *splitsh, Facet *splitseg, InsertFlags *ivf) {
         Triface neightet;
         Facet checksh;
@@ -4095,7 +4028,7 @@ struct Mesh {
         }
     }
 
-    // True when some tet around the edge at `t` is outside the cavity, so the edge survives the insertion.
+    // Returns true when at least one tetrahedron incident to the edge at `t` remains outside the cavity.
     bool ring_leaves_cavity(const Triface &t) const {
         Triface spintet = t;
         do {
@@ -4143,7 +4076,7 @@ struct Mesh {
                 ivf->iloc = BadElement;
                 return 0;
             }
-            // Recovery asks for the crossing face (4) or crossing edge (8) to be gone: refuse the point when it would survive the insertion.
+            // Rejects insertion when the designated crossing face (4) or edge (8) would remain.
             bool bflag = false;
             if (ivf->refineflag == 4) {
                 Triface adjtet;
@@ -4208,8 +4141,6 @@ struct Mesh {
         finish_insertion(splitsh, splitseg, ivf);
         return 1;
     }
-
-    //=== Point location and the incremental Delaunay construction ===
 
     int TransGC[8][3][8]{};
     int Tsb1Mod3[8]{};
@@ -4364,7 +4295,7 @@ struct Mesh {
         } else {
             searchdist = LongEst;
         }
-        // As many samples as the fourth root of the pool size, spread so each block gets at least one.
+        // Uses the fourth root of the pool size and assigns at least one sample to each block.
         // A dead slot is re-drawn rather than skipped.
         while (Samples * Samples * Samples * Samples < TetItems) ++Samples;
         const long maxitems = long(Tets.size());
@@ -4390,8 +4321,8 @@ struct Mesh {
         }
     }
 
-    // Turn searchtet to the one face searchpt lies below, which is where a walk toward it starts.
-    // Every face turned away means the mesh holds an inverted tet.
+    // Orients `searchtet` to a face with `searchpt` on its negative side before traversal.
+    // Failure to find such a face indicates an inverted tetrahedron.
     void face_toward(int searchpt, Triface *searchtet) const {
         for (searchtet->ver = 0; searchtet->ver < 4; ++searchtet->ver) {
             if (orient3d(P(org(*searchtet)), P(dest(*searchtet)), P(apex(*searchtet)), P(searchpt)) < 0.0) break;
@@ -4399,8 +4330,8 @@ struct Mesh {
         if (searchtet->ver == 4) bail(2);
     }
 
-    // Cross the face the move names, into the neighbouring tet.
-    // Returns LocUnknown to keep walking, or the reason the walk stopped.
+    // Crosses the selected face into the neighboring tetrahedron.
+    // Returns LocUnknown to continue traversal or the terminal location otherwise.
     int step_across(Triface *searchtet, WalkMove nextmove, int chkencflag) {
         if (nextmove == OrgMove) enextesymself(*searchtet);
         else if (nextmove == DestMove) eprevesymself(*searchtet);
@@ -4411,8 +4342,8 @@ struct Mesh {
         return ishulltet(*searchtet) ? Outside : LocUnknown;
     }
 
-    // Where searchpt lies in searchtet, once a walk has stopped and none of the three orientations is negative.
-    // searchtet is turned so that the feature the point lies on is named by its face, its edge or its origin.
+    // Returns the location of `searchpt` in a tetrahedron with no negative face orientation.
+    // Orients `searchtet` to identify the containing feature by face, edge, or origin.
     int locate_feature(Triface *searchtet, double oriorg, double oridest, double oriapex) {
         if (oriorg == 0) {
             enextesymself(*searchtet); // The face opposite the origin.
@@ -4441,7 +4372,7 @@ struct Mesh {
         return InTetrahedron;
     }
 
-    // The walk used while the triangulation is still convex.
+    // Locates a point while the triangulation remains convex.
     int locate_dt(int searchpt, Triface *searchtet) {
         int loc = Outside;
         if (searchtet->tet == None) searchtet->tet = RecentTet.tet;
@@ -4460,7 +4391,7 @@ struct Mesh {
             const int s = int(Rng() % 3);
             for (int i = 0; i < s; ++i) enextself(*searchtet);
 
-            // Each orientation is asked for only once the one before it has failed to settle the direction.
+            // Evaluates each orientation only after the preceding result fails to select a direction.
             WalkMove nextmove;
             const double oriorg = orient3d(P(dest(*searchtet)), P(apex(*searchtet)), P(toppo), P(searchpt));
             if (oriorg < 0) {
@@ -4486,7 +4417,7 @@ struct Mesh {
         return loc;
     }
 
-    // The general walk, which may stop at a subface.
+    // Locates a point in a constrained triangulation and may terminate at a subface.
     int locate(int searchpt, Triface *searchtet, int chkencflag = 0) {
         WalkMove nextmove = OrgMove;
         int loc = Outside;
@@ -4629,7 +4560,7 @@ struct Mesh {
             maketetrahedron2(&newtet, v1, v0, insertpt, v2);
             newtet.ver = 2;
             bond(newtet, neightet);
-            // Each cavity vertex points at the first new tet that reaches it, whose third vertex is not yet the inserted point.
+            // Associates each cavity vertex with its first replacement tetrahedron before inserting p as the third vertex.
             for (const int v : {v0, v1, v2}) {
                 const int enc = point2tet(v);
                 if (enc == None || Tets[enc >> 4].V[2] != insertpt) setpoint2tet(v, Encode2(newtet.tet, 0));
@@ -4786,7 +4717,7 @@ struct Mesh {
         return true;
     }
 
-    // Walk the tets around org(searchtet) until the one facing endpt is found, reporting how the ray leaves it.
+    // Traverses tetrahedra incident to `org(searchtet)` and returns the exit feature toward `endpt`.
     int finddirection(Triface *searchtet, int endpt) {
         enum { HMove,
                RMove,
@@ -4878,8 +4809,6 @@ struct Mesh {
         }
     }
 
-    //=== The surface mesh ===
-
     // Insert a vertex into the triangulation of a facet, and split the segment it lies on when one is given.
     int sinsertvertex(int insertpt, Facet *searchsh, Facet *splitseg, int iloc, int bowywat, int rflag) {
         Facet cavesh, neighsh, newsh, casout, casin, checkseg;
@@ -4926,8 +4855,8 @@ struct Mesh {
         } else if (loc == OnVertex) {
             return loc;
         } else if (loc == Outside) {
-            // Grow the facet's convex hull to take p in.
-            // dummypoint carries an above point of the facet, so every 2d orientation here is an orient3d against it.
+            // Expands the facet's convex hull to include p.
+            // Uses `dummypoint` above the facet to express each 2D orientation as `orient3d`.
             neighsh = *searchsh;
             while (true) {
                 senext2self(neighsh);
@@ -4977,7 +4906,7 @@ struct Mesh {
             }
         }
 
-        // Grow the Bowyer-Watson sub-cavity.
+        // Expands the Bowyer-Watson subcavity.
         for (size_t i = 0; i < CaveShList.size(); ++i) {
             cavesh = CaveShList[i];
             for (int j = 0; j < 3; ++j) {
@@ -5190,7 +5119,7 @@ struct Mesh {
         return loc;
     }
 
-    // Put an above point of the facet into dummypoint, and report the three points of the largest triangle it found on the way.
+    // Stores a point above the facet in `dummypoint` and returns the largest triangle found during traversal.
     bool calculateabovepoint(const std::vector<int> &facpoints, int *ppa, int *ppb, int *ppc) {
         const int pa = facpoints[0];
         int pb = None, pc = None;
@@ -5239,7 +5168,7 @@ struct Mesh {
     }
 
     // Locate a point in the triangulation of a facet.
-    // dummypoint holds an above point, so every 2d orientation is an orient3d against it.
+    // Uses `dummypoint` above the facet to express each 2D orientation as `orient3d`.
     // The coordinate and the point index are separate because hole seeds are located by position and belong to no vertex.
     int slocate_at(const dvec3 &q, int qidx, Facet *searchsh, int aflag, int cflag, int rflag) {
         Facet neighsh;
@@ -5364,7 +5293,7 @@ struct Mesh {
         return slocate_at(P(searchpt), searchpt, searchsh, aflag, cflag, rflag);
     }
 
-    // Find the segment from sorg(searchsh) to endpt in the facet's triangulation, flipping the first edge it crosses and recurring.
+    // Recovers the segment from `sorg(searchsh)` to `endpt` by recursively flipping its first crossing edge.
     int sscoutsegment(Facet *searchsh, int endpt, int insertsegflag, int reporterrorflag, int chkencflag) {
         Facet flipshs[2], neighsh;
         int dir;
@@ -5426,7 +5355,7 @@ struct Mesh {
                     senext(neighsh, *searchsh);
                 } else {
                     // This side is outside, from rounding.
-                    // Take the other one.
+                    // Selects the other incident element.
                     senext2(*searchsh, neighsh);
                     if (chkencflag && isshsubseg(neighsh)) {
                         *searchsh = neighsh;
@@ -5478,7 +5407,7 @@ struct Mesh {
         spivot(flipshs[0], flipshs[1]);
         if (sorg(flipshs[1]) != sdest(flipshs[0])) sesymself(flipshs[1]);
         flip22(flipshs, 1, 0);
-        // The flip can leave an inverted triangle behind: queue whichever side turned over.
+        // Queues the side inverted by the flip.
         {
             const int pa = sapex(flipshs[1]), pbb = sapex(flipshs[0]);
             const int pcc = sorg(flipshs[0]), pd = sdest(flipshs[0]);
@@ -5650,7 +5579,7 @@ struct Mesh {
             return 1;
         }
 
-        // Everything created here is remembered, so a failed triangulation can be undone.
+        // Records every created element for rollback after failed triangulation.
         CaveEncShList.push_back(newsh);
 
         pinfect(pa);
@@ -5812,7 +5741,7 @@ struct Mesh {
     }
 
     // Turn each edge given in the input into a segment.
-    // A triangle-soup input supplies none, so the list this walks is empty.
+    // Triangle-soup input produces an empty polygon list.
     void identifyinputedges(const std::vector<std::array<int, 2>> &inedges) {
         if (inedges.empty()) return;
         std::vector<int> idx2shlist;
@@ -5876,7 +5805,7 @@ struct Mesh {
             const std::array<int, 3> &tri = InTris[shmark - 1];
             ptlist.clear();
             conlist.clear();
-            // One polygon of three corners per input triangle, so the walk below reduces to three vertices and three sides.
+            // Each input triangle contributes one three-corner polygon with three sides.
             int end1 = tri[0];
             if (pointtype(end1) == DuplicatedVertex) end1 = point2ppt(end1);
             int tstart = end1;
@@ -5910,8 +5839,6 @@ struct Mesh {
         });
         InSegments = SubsegItems;
     }
-
-    //=== Boundary recovery ===
 
     // Abandon the build.
     // Code 2 is an internal error, 3 a self-intersecting input surface, 4 an input feature too small to resolve.
@@ -5950,8 +5877,8 @@ struct Mesh {
             if (dir == AcrossVert) {
                 if (dest(*searchtet) == endpt) return 1;
                 if (sedge != nullptr) {
-                    // A vertex sits on the element being recovered.
-                    // Whether that is a genuine self-intersection depends on what the vertex is.
+                    // A vertex lies on the element under recovery.
+                    // The vertex type determines whether the contact is a self-intersection.
                     const int nearpt = dest(*searchtet);
                     bool intersect_flag = false;
                     if (Shells[sedge->sh].V[2] == None) { // sedge is a segment
@@ -6077,8 +6004,7 @@ struct Mesh {
                         bail(2);
                     }
 
-                    // The flip failed, and it may have moved the face under us.
-                    // Find it again.
+                    // Relocates the face after a failed flip may have changed its handle.
                     if (searchtet->tet == None || org(*searchtet) != bakface.forg || dest(*searchtet) != bakface.fdest ||
                         apex(*searchtet) != bakface.fapex || oppo(*searchtet) != bakface.foppo) {
                         point2tetorg(bakface.forg, *searchtet);
@@ -6116,8 +6042,8 @@ struct Mesh {
         return 0;
     }
 
-    // Put a point inside the pocket the n tets around edge [a,b] form.
-    // It is chosen along (p0, p_(n-1)) to maximise the smallest volume it makes with the pocket's outer faces, then moved inward by smoothing.
+    // Inserts a point into the region formed by the n tetrahedra incident to edge [a,b].
+    // Selects the point on (p0, p_(n-1)) that maximizes minimum outer-face volume before inward smoothing.
     int add_steinerpt_in_schoenhardtpoly(Triface *abtets, int n, int splitsliverflag, int chkencflag) {
         Triface worktet, faketet1, faketet2;
         InsertFlags ivf;
@@ -6184,7 +6110,7 @@ struct Mesh {
         dvec3 smtpt;
         for (int i = 0; i < 3; ++i) smtpt[i] = P(pc)[i] + (stepi * double(maxidx)) * vcd[i];
 
-        // Two stand-in tets carry the pocket's two missing outer faces [d,c,a] and [c,d,b].
+        // Two temporary tetrahedra represent missing outer faces [d,c,a] and [c,d,b].
         maketetrahedron(&faketet1);
         setvertices(faketet1, pd, pc, org(abtets[0]), DummyPoint);
         CaveTetList.push_back(faketet1);
@@ -6230,7 +6156,7 @@ struct Mesh {
         return 0;
     }
 
-    // Split a missing segment where it comes closest to whichever segment the flip search reported it fighting with.
+    // Splits a missing segment at its closest approach to the obstructing segment reported by flip search.
     int add_steinerpt_in_segment(Facet *misseg, int searchlevel, int &idir) {
         Triface searchtet;
         Facet candseg;
@@ -6351,7 +6277,7 @@ struct Mesh {
     }
 
     // Place a Steiner point that helps the edge (startpt, endpt) appear.
-    // With splitsegflag clear it only tries the volume placements; with it set it may also split the segment itself.
+    // `splitsegflag` enables segment splitting in addition to volume placements.
     int add_steinerpt_to_recover_edge(int startpt, int endpt, Facet *misseg, int splitsegflag, int splitsliverflag, int &idir) {
         Triface searchtet, spintet;
         Facet splitsh;
@@ -6386,7 +6312,7 @@ struct Mesh {
 
         if (dir == AcrossFace) {
             // The segment cuts at least three faces.
-            // Find the common edge of the first three.
+            // Locates the common edge of the first three subfaces.
             esymself(searchtet);
             fsym(searchtet, spintet);
             const int pd = oppo(spintet);
@@ -6538,8 +6464,7 @@ struct Mesh {
     // Segments and subfaces recovery gave up on because the input intersects itself.
     std::vector<BadFace> SkippedSegmentList, SkippedFacetList;
 
-    // Drain the segment queue, flipping each missing segment in.
-    // With steinerflag set, the ones flips cannot reach take Steiner points.
+    // Processes every missing segment through flips or optional Steiner-point insertion.
     int recoversegments(std::vector<Facet> *misseglist, int fullsearch, int steinerflag) {
         Triface searchtet;
         Facet sseg;
@@ -6581,7 +6506,7 @@ struct Mesh {
                 if (misseglist != nullptr) misseglist->push_back(sseg);
             } else {
                 // The input intersects itself here.
-                // Set this segment and every subface at it aside, so recovery does not try them again.
+                // Excludes this segment and its incident subfaces from subsequent recovery attempts.
                 SkippedSegmentList.push_back({.ss = sseg, .key = double(shellmark(sseg)), .forg = sorg(sseg), .fdest = sdest(sseg)});
                 smarktest3(sseg);
                 Facet neighsh, spinsh;
@@ -6664,7 +6589,7 @@ struct Mesh {
                                         return 0;
                                     }
                                 } else if (dir == TouchFace) {
-                                    // A Steiner point already sits in this subface.
+                                    // This subface already contains a Steiner point.
                                     const int touchpt = poss[1] == 0 ? pd : pe;
                                     if (!issteinerpoint(touchpt)) {
                                         dir = SelfIntersect;
@@ -6716,7 +6641,7 @@ struct Mesh {
 
     long DuplicatedFacetsCount{0};
 
-    // Take out a temporary segment recoversubfaces planted on an edge of a subface.
+    // Removes a temporary segment inserted by `recoversubfaces` on a subface edge.
     void remove_temp_segment(Facet &seg) {
         Facet neineish, neighsh;
         spivot(seg, neineish);
@@ -6729,7 +6654,7 @@ struct Mesh {
 
     // Recover every queued subface.
     // Its three edges are made present first, each fenced with a temporary segment, and then the face is flipped in.
-    // With steinerflag set, a face flips cannot reach is split.
+    // Splits faces that flips cannot recover when `steinerflag` is set.
     int recoversubfaces(std::vector<Facet> *misshlist, int steinerflag) {
         Triface searchtet, neightet;
         Facet searchsh, neighsh, bdsegs[3];
@@ -6793,7 +6718,7 @@ struct Mesh {
 
             if (i < 3) {
                 // An edge is missing.
-                // Take back the fences already planted.
+                // Removes previously inserted fences.
                 for (int j = i - 1; j >= 0; --j) {
                     if (bdsegs[j].sh != None && smarktest2ed(bdsegs[j])) remove_temp_segment(bdsegs[j]);
                 }
@@ -6827,7 +6752,7 @@ struct Mesh {
                         }
                     }
                 } else if (dir != SelfIntersect && steinerflag) {
-                    // Split the subface where the crossing edge meets its plane, falling back to the barycentre when that lands on a side.
+                    // Splits at the edge-plane intersection or at the barycenter when the intersection lies on a side.
                     dvec3 ip;
                     double u;
                     int fpt[3], ept[2];
@@ -6886,7 +6811,7 @@ struct Mesh {
 
             if (i < 3 && dir != SelfIntersect && steinerflag > 0) {
                 // An edge of the subface is missing.
-                // Split it where it first leaves the mesh.
+                // Splits at the first mesh-boundary intersection.
                 point2tetorg(startpt, searchtet);
                 dir = finddirection(&searchtet, endpt);
                 enextself(searchtet);
@@ -7016,7 +6941,7 @@ struct Mesh {
         return int(endptlist.size());
     }
 
-    // Take a Steiner point out by a sequence of flips, when its star reduces far enough for one of the vertex-removing flips.
+    // Removes a Steiner point after flips reduce its star to a supported vertex-removal configuration.
     int removevertexbyflips(int steinerpt) {
         Triface searchtet, spintet, neightet;
         Triface wrktets[4];
@@ -7046,7 +6971,7 @@ struct Mesh {
         CaveTetVertList.clear();
 
         if (valence == 4) {
-            // Four vertices left: p is inside their convex hull.
+            // Four remaining vertices contain p in their convex hull.
             point2tetorg(steinerpt, searchtet);
             loc = InTetrahedron;
             removeflag = 1;
@@ -7065,7 +6990,7 @@ struct Mesh {
                 }
                 if (i == 4 && neightet.tet != None && apex(neightet) == rpt) {
                     // The segment is already back.
-                    // A 6-2 flip may take p out.
+                    // A 6-2 flip may remove p.
                     esym(neightet, searchtet);
                     enextself(searchtet);
                     wrktets[0] = searchtet; // [p,d,a,b]
@@ -7127,7 +7052,7 @@ struct Mesh {
 
         if (!removeflag && vt == FreeSegVertex) {
             if (getedge(lpt, rpt, &searchtet) && !CheckSubfaceFlag) {
-                // The edge is already there: move the point into the volume instead.
+                // Moves the point into the volume when the edge already exists.
                 for (const Facet &seg : {leftseg, rightseg}) {
                     dissolve_seg_ring(seg);
                     sstdissolve1(seg);
@@ -7196,7 +7121,7 @@ struct Mesh {
                     if (issubface(fliptets[i])) ++count;
                 }
                 if (count > 0) {
-                    // The three subfaces sit in the upper half: swap the two halves round so the 3-2 flip happens there.
+                    // Swaps halves to place the three subfaces in the half receiving the 3-2 flip.
                     for (int i = 0; i < 3; ++i) {
                         esym(fliptets[i + 3], wrktets[i]);
                         esym(fliptets[i], fliptets[i + 3]);
@@ -7308,7 +7233,7 @@ struct Mesh {
     }
 
     // The check made before the closing 4-1 flip at a facet vertex.
-    // One of the three tets must carry all three subfaces, or all three must carry one each.
+    // Requires all three subfaces on one tetrahedron or one subface on each tetrahedron.
     bool valid_41_flip_at_facet_vertex(Triface *fliptets) const {
         Triface checktet, chkface;
         int i = 0;
@@ -7333,7 +7258,7 @@ struct Mesh {
         return scount == 3;
     }
 
-    // Walk the point toward the centre of one of its link faces for as long as the chosen objective over the whole star improves.
+    // Moves the point toward a link-face center while the whole-star objective improves.
     int smoothpoint(dvec3 &smtpt, std::vector<Triface> &linkfacelist, int ccw, OptParameters *opm) {
         BadFace bf;
         dvec3 startpt = smtpt, bestpt = smtpt;
@@ -7409,7 +7334,7 @@ struct Mesh {
     }
 
     // Replace a Steiner point on a segment or facet by one interior point per sector it separates.
-    // The boundary point then comes out by flips.
+    // Subsequent flips remove the boundary point.
     int suppressbdrysteinerpoint(int steinerpt) {
         Facet parentsh, spinsh;
         Facet leftseg, rightseg;
@@ -7589,7 +7514,7 @@ struct Mesh {
     }
 
     // The two far endpoints of the input segment each subsegment belongs to.
-    // The ridge-vertex adjacency the flip guards read comes with them.
+    // Copies ridge-vertex adjacency used by the flip guards.
     void makesegmentendpointsmap() {
         std::vector<std::array<int, 2>> segptlist;
         const int np = int(Pts.size());
@@ -7648,7 +7573,7 @@ struct Mesh {
         IdxSegmentRidgeVertexList[0] = 0;
     }
 
-    // Take the Steiner points recovery left on the boundary back off it, then remove or smooth the interior ones it created.
+    // Removes boundary Steiner points from recovery, then removes or smooths the interior Steiner points.
     int suppresssteinerpoints() {
         const int bak_fliplinklevel = FlipLinkLevel;
         FlipLinkLevel = 100000;
@@ -7694,7 +7619,7 @@ struct Mesh {
                     if (nt > 2) break;
                 }
                 if (ivcount > 0 && opm.maxiter > 0) {
-                    // Inverted elements remain: try again with an unlimited, finer search.
+                    // Retries remaining inverted elements with an unrestricted finer search.
                     opm.numofsearchdirs = 30;
                     opm.searchstep = 0.0001;
                     opm.maxiter = -1;
@@ -7726,7 +7651,7 @@ struct Mesh {
             forallsubsegs([&](int sh) { segs.push_back(sh); });
             for (size_t i = 0; i < segs.size(); ++i) {
                 const size_t s = randomnation(unsigned(i) + 1);
-                // Move the s-th segment to the i-th, and put this one at the s-th.
+                // Swaps segment slots s and i.
                 SubSegStack.push_back(None);
                 SubSegStack[i] = SubSegStack[s];
                 SubSegStack[s] = SEncode2(segs[i], 0);
@@ -7759,7 +7684,7 @@ struct Mesh {
             AutoFlipLinkLevel += FlipLinkLevelInc;
         }
 
-        // Requeue what is still missing and recover again, until a pass stops shrinking the list.
+        // Requeues remaining missing elements until a pass no longer reduces their count.
         const auto retry_segments = [&](int fullsearch, int steinerflag) {
             while (!misseglist.empty()) {
                 ms = long(misseglist.size());
@@ -7786,7 +7711,7 @@ struct Mesh {
         }
 
         if (StSegRefCount > 0) {
-            // Try to take the segment Steiner points back out.
+            // Attempts to remove segment Steiner points.
             const int bak = FlipLinkLevel;
             FlipLinkLevel = 20;
             for (const int rempt : SubVertStack) {
@@ -7803,7 +7728,7 @@ struct Mesh {
             forallsubfaces([&](int sh) { shs.push_back(sh); });
             for (size_t i = 0; i < shs.size(); ++i) {
                 const size_t s = randomnation(unsigned(i) + 1);
-                // Move the s-th subface to the i-th, and put this one at the s-th.
+                // Swaps subface slots s and i.
                 SubFaceStack.push_back(None);
                 SubFaceStack[i] = SubFaceStack[s];
                 SubFaceStack[s] = SEncode2(shs[i], 0);
@@ -7936,7 +7861,7 @@ struct Mesh {
     }
 
     // Flood from the hull inward across every face that is not a subface.
-    // What the flood reaches is deleted, and a fresh hull closes the domain.
+    // Deletes the traversed exterior tetrahedra and closes the domain with a new hull.
     void carveholes() {
         std::vector<Triface> tetarray, hullarray, newhullfacearray;
         Triface tetloop, neightet, hulltet, casface;
@@ -8175,7 +8100,7 @@ struct Mesh {
     }
 
     // Flip every stacked face that is not locally Delaunay.
-    // A face no flip reaches is queued and retried once the round has made progress.
+    // Queues unrecovered faces for retry after a round makes progress.
     long lawsonflip3d(FlipConstraints *fc) {
         Triface fliptets[5], neightet, hulltet;
         Facet checksh, casingout;
@@ -8260,7 +8185,7 @@ struct Mesh {
                 for (; i < 3; ++i) {
                     ori = orient3d(P(org(fliptets[0])), P(dest(fliptets[0])), P(pd), P(pe));
                     if (ori > 0) {
-                        // Refuse a nearly degenerate new tet against the boundary.
+                        // Rejects a nearly degenerate replacement tetrahedron at the boundary.
                         esym(fliptets[0], fliptets[2]);
                         esym(fliptets[1], fliptets[3]);
                         if (issubface(fliptets[2]) || issubface(fliptets[3])) {
@@ -8328,7 +8253,7 @@ struct Mesh {
                         }
                         if (round_flag == 1) {
                             // The edge is only nearly coplanar.
-                            // Take it only when every new tet is valid and every new face is locally Delaunay, or this will not stop.
+                            // Accepts only configurations with valid tetrahedra and locally Delaunay faces to guarantee termination.
                             const int pb = org(fliptets[0]), pa = dest(fliptets[0]);
                             const int pc = apex(fliptets[1]), pf = apex(fliptets[3]);
                             if (is_collinear_at(pa, pd, pe) || is_collinear_at(pb, pd, pe)) continue;
@@ -8356,7 +8281,7 @@ struct Mesh {
                 }
 
                 // Nothing flips this face.
-                // Keep it for the next round.
+                // Defers it to the next round.
                 {
                     BadFace bface;
                     esymself(fliptets[0]);
@@ -8393,7 +8318,7 @@ struct Mesh {
         return totalcount + sliver_peels;
     }
 
-    // A Lawson sweep, then an edge-removal pass at climbing link level over what the sweep could not flip.
+    // Applies a Lawson sweep followed by increasing-link-level edge removal for remaining faces.
     // Both are gated on the lifted volume falling.
     void recoverdelaunay() {
         FlipConstraints fc;
@@ -8475,8 +8400,6 @@ struct Mesh {
         FlipLinkLevel = bak_fliplinklevel;
     }
 
-    //=== Element quality, encroachment and the small queue helpers ===
-
     double CosLargeDihed{0};
 
     // These maps are only built for refinement; with no map, nothing is adjacent.
@@ -8499,7 +8422,7 @@ struct Mesh {
     }
 
     // May a Steiner point be placed this close to an existing vertex?
-    // Only when the two do not already share the segment or facet they sit on.
+    // Applies only when the two vertices do not share their containing segment or facet.
     bool create_a_shorter_edge(int steinerpt, int nearpt) {
         const VertType nearpt_type = pointtype(nearpt);
         const VertType steiner_type = pointtype(steinerpt);
@@ -8633,7 +8556,7 @@ struct Mesh {
         return false;
     }
 
-    // No background mesh is read, so no size is interpolated and the point keeps the default.
+    // Absence of a background mesh preserves the default point size.
     double getpointmeshsize(int, Triface *, int) const { return 0.0; }
 
     // The aspect ratio, the extreme dihedral angles and the edge lengths of one tet, all read off the four inward face normals.
@@ -8716,7 +8639,7 @@ struct Mesh {
         return get_tetqual_at(P(pa), P(pb), P(pc), P(pd), bf);
     }
     // True when the tet's worst dihedral is an improvement on cosdihed_in, the angle a flip starts from.
-    // A relative change under Epsilon leaves the angle where it was, and a tet with no measurable quality improves nothing.
+    // Relative changes below Epsilon preserve the angle and reject tetrahedra without measurable improvement.
     bool improves_dihedral(int pa, int pb, int pc, int pd, double cosdihed_in, BadFace *bf) const {
         if (!get_tetqual(pa, pb, pc, pd, bf)) return false;
         const double diff = bf->cent[0] - cosdihed_in;
@@ -8750,11 +8673,9 @@ struct Mesh {
         return oppo(*searchtet) == pd;
     }
 
-    //=== Removing a vertex from the surface mesh ===
-
-    // Take delpt out of the surface triangulation by a sequence of 2-2 flips ending in a 3-1 flip.
+    // Removes `delpt` from the surface triangulation through 2-2 flips followed by a 3-1 flip.
     // With parentseg given, delpt is a Steiner point on a segment and the two half-segments merge back into one.
-    // A degenerate subface holds the merged segment while the face ring is rebuilt around it.
+    // A degenerate subface stores the merged segment during face-ring reconstruction.
     int sremovevertex(int delpt, Facet *parentsh, Facet *parentseg, int lawson) {
         Facet flipfaces[4], spinsh, fakesh;
 
@@ -8810,7 +8731,7 @@ struct Mesh {
                 startsh = CaveShList[i];
                 if (sorg(startsh) != delpt) sesymself(startsh);
                 // startsh is [p, b, #1].
-                // Find the subface [a, p, #2].
+                // Locates subface [a,p,#2].
                 neighsh = startsh;
                 while (true) {
                     senext2self(neighsh);
@@ -8823,7 +8744,7 @@ struct Mesh {
                 if (neighsh.sh != startsh.sh) {
                     ssdissolve(startsh);
                     ssdissolve(neighsh);
-                    // A degenerate subface [a,b,p] holds the new segment and joins [p,b,#1] to [a,p,#2].
+                    // Degenerate subface [a,b,p] stores the new segment and connects [p,b,#1] to [a,p,#2].
                     makesubface(&fakesh);
                     setshvertices(fakesh, pa, pb, delpt);
                     setshellmark(fakesh, shellmark(startsh));
@@ -8909,7 +8830,7 @@ struct Mesh {
                         const double ori2 = orient3d(P(pc), P(pd), P(DummyPoint), P(pb));
                         if (ori1 * ori2 < 0) {
                             flip22(flipfaces, lawson, 0);
-                            // flipfaces[1] holds p as its apex.
+                            // `flipfaces[1]` uses p as its apex.
                             senext2(flipfaces[1], cur);
                             CaveShBdList.push_back(flipfaces[0]);
                             break;
@@ -8934,8 +8855,6 @@ struct Mesh {
         if (lawson) lawsonflip();
         return 0;
     }
-
-    //=== Vertex smoothing ===
 
     bool BadTetsEnabled{false};
 
@@ -9001,7 +8920,7 @@ struct Mesh {
             CaveOldTetList.clear();
             return false;
         }
-        // Stay put when the target is already within the resolvable distance.
+        // Preserves the point when the target lies within the resolvable distance.
         if (distance(P(mesh_vert), target) < MinEdgeLength) {
             CaveOldTetList.clear();
             return false;
@@ -9015,7 +8934,7 @@ struct Mesh {
 
         if (CaveOldTetList.empty()) getvertexstar(1, mesh_vert, &CaveOldTetList, nullptr, nullptr);
 
-        // The vertex moves only when the full step keeps every tet of its star right side up.
+        // Accepts the full vertex step only when every incident tetrahedron preserves orientation.
         // Once a step is rejected the shortened steps are tried but can no longer be accepted.
         bool moveflag = true;
         for (int iter = 0; iter < 3; ++iter) {
@@ -9123,8 +9042,6 @@ struct Mesh {
         }
     }
 
-    //=== Mesh improvement ===
-
     double CosSmtDihed{0}, CosSliDihed{0}, OptMaxSliverAspRatio{0};
     long OptFlipsCount{0}, OptSmoothCount{0};
 
@@ -9175,7 +9092,7 @@ struct Mesh {
         BtQueueTail[queuenumber] = bt;
     }
 
-    // Queue a tet the improvement pass should look at, named by its four vertices so a later flip cannot lose it.
+    // Queues a tetrahedron by its four vertices to preserve its identity across later flips.
     void enqueue_if_bad(BadFace *bf) {
         if (bf->key > OptMaxAspRatio || bf->cent[0] < CosOptMaxDihedral) {
             bf->forg = org(bf->tt);
@@ -9210,8 +9127,8 @@ struct Mesh {
     }
 
     // Split the fattest tet around a sliver's edge with its barycentre, then requeue whatever the insertion made worse.
-    // The short edge a skinny tet holds, collapsed when it is shorter than the mesh can resolve.
-    // The edge is found by matching the recorded minimum length, and one of its ends has to be a Steiner point to move.
+    // Returns the short edge of a skinny tetrahedron when its length is below mesh resolution.
+    // Selects the recorded minimum-length edge only when at least one endpoint is a movable Steiner point.
     void shorten_skinny_edge(const BadFace *bf) {
         const double Lmin = bf->cent[3];
         Triface short_edge = bf->tt;
@@ -9242,7 +9159,7 @@ struct Mesh {
         splittet.tet = None;
 
         if (cosmaxd < CosSliDihed) {
-            // A sliver (flat), which may also hold a short edge.
+            // A flat sliver may also contain a short edge.
             char shape = 0;
             Triface sliver_edge;
             if (lcount == 2) {
@@ -9291,7 +9208,7 @@ struct Mesh {
 
         if (splittet.tet == None) return false;
 
-        // Leave it alone when the tet to split is itself a bad one.
+        // Preserve an encroached element when its splitting tetrahedron also fails quality checks.
         BadFace tmpbf;
         if (get_tetqual(&splittet, None, &tmpbf)) {
             if (tmpbf.cent[0] < CosSliDihed) return false;
@@ -9398,14 +9315,14 @@ struct Mesh {
         return false;
     }
 
-    // Try to remove one bad tet, by flipping the edge its shape names, and failing that by splitting it with a Steiner point.
+    // Repairs one bad tetrahedron through target-edge flipping or Steiner-point splitting.
     bool repair_tet(BadFace *bf, bool bFlips, bool bSmooth, bool bSteiners) {
         const double cosmaxd = bf->cent[0];
         const double eta = bf->cent[2];
         const int lcount = bf->ss.shver; // The number of large dihedral angles.
 
         if (cosmaxd < CosSmtDihed) {
-            // A sliver (flat), which may also hold a short edge.
+            // A flat sliver may also contain a short edge.
             char shape = '0';
             if (lcount == 2) shape = 'S'; // A square. Remove the edge [a,b].
             else if (lcount == 3) shape = 'T'; // A triangle. Remove the edge [c,d].
@@ -9417,7 +9334,7 @@ struct Mesh {
                         ++OptFlipsCount;
                         return true;
                     }
-                    // An unflipped flip may have moved the sliver, so find it again.
+                    // Relocates a sliver after reversing a flip.
                     if (get_tet(bf->forg, bf->fdest, bf->fapex, bf->foppo, &bf->tt)) {
                         edestoppo(bf->tt, sliver_edge); // Face [c,d,a].
                         if (flip_edge_to_improve(&sliver_edge, cosmaxd)) {
@@ -9439,7 +9356,7 @@ struct Mesh {
         }
 
         if (bSteiners && (bf->key > OptMaxSliverAspRatio || cosmaxd < CosSliDihed)) {
-            // The sliver is still there, and an unflipped flip may have moved it.
+            // Relocates a remaining sliver after reversing a flip may have changed its handle.
             if (get_tet(bf->forg, bf->fdest, bf->fapex, bf->foppo, &bf->tt)) {
                 if (add_steinerpt_to_repair(bf, bSmooth)) return true;
             }
@@ -9447,7 +9364,7 @@ struct Mesh {
         return false;
     }
 
-    // Drain the priority queue, requeueing what could not be repaired so a later pass at a higher flip level sees it again.
+    // Processes the priority queue and requeues failures for a later pass at a higher flip level.
     long repair_badqual_tets(bool bFlips, bool bSmooth, bool bSteiners) {
         long repaired_count = 0;
 
@@ -9544,8 +9461,6 @@ struct Mesh {
         clear_badtet_queue();
     }
 
-    //=== Delaunay refinement, reached only when quality is asked for ===
-
     std::vector<Triface> CheckTetsList;
     double SmallestInsRadius{1.0e+30};
 
@@ -9570,7 +9485,7 @@ struct Mesh {
 
         if (!lu_decmp(A, 3, indx, &D, 0)) {
             if (orient3d(P(pa), P(pb), P(pc), P(pd)) >= 0.0) bail(2); // A degenerate tet.
-            // Leave it to mesh improvement.
+            // Defers this tetrahedron to mesh improvement.
             return false;
         }
 
@@ -9583,7 +9498,7 @@ struct Mesh {
         const double rd = std::sqrt(rhs[0] * rhs[0] + rhs[1] * rhs[1] + rhs[2] * rhs[2]);
 
         // The volume bound.
-        // The factorisation above already carries the determinant, whose pivots multiply to six times the volume.
+        // The factorization pivots multiply to six times the volume.
         if (MaxVolume > 0) {
             const double vol = std::abs(A[indx[0]][0] * A[indx[1]][1] * A[indx[2]][2]) / 6.0;
             if (vol > MaxVolume) {
@@ -9632,7 +9547,7 @@ struct Mesh {
                 if (L[i] == 0) bail(2);
                 N[i] /= L[i];
             }
-            // Every pair of faces, so every one of the six edges: cd, bd, bc, then ad, ac, then ab.
+            // Tests the six edges in face-pair order: cd, bd, bc, ad, ac, and ab.
             const double cosd[6]{
                 -dot(N[0], N[1]), -dot(N[0], N[2]), -dot(N[0], N[3]),
                 -dot(N[1], N[2]), -dot(N[1], N[3]), -dot(N[2], N[3])
@@ -9643,7 +9558,7 @@ struct Mesh {
         return false;
     }
 
-    // Walk from the centre of searchtet toward searchpt, stopping at the first subface crossed or when the walk leaves the mesh.
+    // Traverses from the center of `searchtet` toward `searchpt` until crossing a subface or exiting the mesh.
     int locate_point_walk(int searchpt, Triface *searchtet, int chkencflag) {
         const dvec3 startpt = [&] {
             const Tet &e = Tets[searchtet->tet];
@@ -9666,7 +9581,7 @@ struct Mesh {
                 break;
             }
 
-            // Which face does the line (startpt -> searchpt) leave through?
+            // Select the face crossed by line (startpt -> searchpt).
             const double oriorg = orient3d(P(tdest), P(tapex), P(toppo), P(searchpt));
             const double oridest = orient3d(P(tapex), P(torg), P(toppo), P(searchpt));
             const double oriapex = orient3d(P(torg), P(tdest), P(toppo), P(searchpt));
@@ -9746,14 +9661,14 @@ struct Mesh {
         return loc;
     }
 
-    // Put a Steiner point at the circumcentre of a bad tet.
+    // Inserts a Steiner point at a bad tetrahedron's circumcenter.
     // It is rejected when it is not visible from inside the tet or encroaches on the boundary.
-    // The boundary is never split, so a rejected point is dropped.
+    // Discards rejected points because the boundary remains fixed.
     bool split_tetrahedron(Triface *splittet, double *param, int qflag, int chkencflag, InsertFlags &ivf) {
         const int newpt = makepoint(FreeVolVertex);
         Pts[newpt].Pos = dvec3{param[0], param[1], param[2]};
 
-        // Walk from inside splittet to the new point, stopping at a subface or outside.
+        // Traverses from inside `splittet` to the new point until reaching a subface or the exterior.
         Triface searchtet = *splittet;
         ivf.iloc = locate_point_walk(newpt, &searchtet, 1);
 
@@ -9797,15 +9712,14 @@ struct Mesh {
         }
 
         // The point is not inserted.
-        // The encroached boundary is left alone, since it is never split.
+        // Preserve the fixed encroached boundary.
         pointdealloc(newpt);
         if (ivf.iloc == EncSegment) EncSegList.clear();
         else if (ivf.iloc == EncSubface) EncShList.clear();
         return false;
     }
 
-    // Drain the queue of tets to check, splitting the badly shaped ones.
-    // The ones that resisted are kept for the caller's next round.
+    // Processes queued tetrahedra and retains unsuccessful splits for the next round.
     void repairbadtets(double queratio, int chkencflag) {
         double param[6]{};
         int qflag = 0;
@@ -9817,7 +9731,7 @@ struct Mesh {
             }
             if (SteinerLeft == 0) break;
 
-            // Take a tet at random and fill its place with the last one.
+            // Replaces a randomly selected tetrahedron with the final pool entry.
             const size_t i = Rng() % CheckTetsList.size();
             const Triface checktet = CheckTetsList[i];
             CheckTetsList[i] = CheckTetsList.back();
@@ -9851,8 +9765,8 @@ struct Mesh {
         CheckTetsList.clear();
     }
 
-    // The boundary is fixed, so refinement only adds interior points.
-    // Bad-quality tets are split until none is left that can be.
+    // Refinement adds only interior points because the boundary remains fixed.
+    // Splits every bad-quality tetrahedron accepted by the insertion checks.
     void delaunayrefinement() {
         CosFacetSepAngTol = std::cos(FacetSepAngTol / 180.0 * PI);
         CosCollinearAngTol = std::cos(CollinearAngTol / 180.0 * PI);
@@ -9879,7 +9793,7 @@ struct Mesh {
             if (!LaterUnflipQueue.empty()) recoverdelaunay();
             if (UnsplitBadTets.empty()) break;
 
-            // Split the tets that resisted, at their barycentre.
+            // Splits previously unsuccessful tetrahedra at their barycenters.
             long splitcount = 0;
             std::vector<BadFace> pending;
             pending.swap(UnsplitBadTets);
@@ -9915,14 +9829,12 @@ struct Mesh {
         BadTetsEnabled = false;
     }
 
-    //=== Input, the driver and output ===
-
     // Copy the input points into the point pool, measure the bounding box and derive every length and angle tolerance from it.
     void transfernodes(std::span<const dvec3> points) {
         NumInputPoints = int(points.size());
         Pts.clear();
         // The input plus room for the Steiner points recovery and refinement add.
-        // The pool is laid down once rather than copied forward as it grows.
+        // Preallocates the pool to avoid copies during expansion.
         Pts.reserve(points.size() + points.size() / 4 + 16);
         makepoint(UnusedVertex);
         for (const dvec3 &pos : points) {
@@ -9949,7 +9861,7 @@ struct Mesh {
 
         Rng.seed(unsigned(NumInputPoints));
 
-        // A piecewise-linear input keeps the insertion radius of every Steiner point.
+        // Piecewise-linear input preserves every Steiner-point insertion radius.
         UseInsertRadius = 1;
 
         CosMinDihedral = std::cos(MinDihedral / 180.0 * PI);
@@ -9973,7 +9885,7 @@ struct Mesh {
         transfernodes(points);
         // A Delaunay triangulation of n points runs to about 7n tets.
         // The surface contributes one subface per input triangle, plus its subsegments.
-        // Both pools are laid down at that size so a run does not spend its time copying them forward.
+        // Preallocates both pools to avoid copies during the run.
         Tets.reserve(points.size() * 7 + 32);
         Shells.reserve(InTris.size() * 2 + 32);
 
@@ -10022,7 +9934,7 @@ struct Mesh {
     }
 
     // The live interior tets, with input point i mapped back to i - 1 and the Steiner points that survived appended after them.
-    // A tet is stored with Orient3D < 0, so one pair of vertices is swapped to meet TetMesh's positive convention.
+    // Swaps one vertex pair to convert internal Orient3D < 0 storage to TetMesh's positive convention.
     TetMesh out(tetra::Profile &prof) const {
         TetMesh mesh;
         mesh.Points.reserve(size_t(NumInputPoints));
@@ -10060,7 +9972,7 @@ std::expected<Result, std::string> Tetrahedralize(std::span<const dvec3> points,
     Mesh m;
     m.MaxVolume = options.MaxVolume;
     m.HoleSeeds = options.Holes;
-    // A volume bound turns the quality pass on, so the radius-edge and dihedral targets apply alongside it.
+    // A volume bound enables the quality pass with its radius-edge and dihedral targets.
     m.Quality = options.Quality || options.MaxVolume > 0;
     // Without a quality bound the dihedral target relaxes.
     if (!m.Quality) m.OptMaxDihedral = 179.9;

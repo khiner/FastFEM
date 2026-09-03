@@ -1,12 +1,3 @@
-// Solve a surface mesh's modal model and print it as JSON on stdout.
-// The sample generator calls this so its scenes carry modes from the real solver chain (tetrahedralize + FEM eigensolve) rather than hand-written mode tables.
-// Usage: MeshEditorModalSolve <mesh.obj> [options]
-//   --young E --poisson v --density rho --alpha a --beta b   material (SI)
-//   --min-freq f --max-freq f --modes n                      solve window
-//   --quality                                                tet quality refinement
-// The mesh is in meters.
-// Every welded vertex becomes an excitation position, so the output holds one sample point per distinct tet point the vertices land on, with the mesh's triangles relabeled onto those points.
-
 #include "LoadObj.h"
 #include "audio/AcousticMaterialProperties.h"
 #include "audio/mesh2modes.h"
@@ -93,8 +84,7 @@ int main(int argc, char **argv) {
         indices.insert(indices.end(), {a, b, c});
     }
 
-    // A T60 is the time to fall 60 dB, so the decay rate it states is this over it.
-    static constexpr float Ln1000 = 3 * std::numbers::ln10_v<float>;
+    static constexpr float Ln1000 = 3 * std::numbers::ln10_v<float>; // Converts T60 to exponential decay rate.
     std::vector<float> decay_rates(modes.T60s.size());
     for (size_t k = 0; k < modes.T60s.size(); ++k) decay_rates[k] = modes.T60s[k] > 0 ? Ln1000 / modes.T60s[k] : 0.f;
 
@@ -107,7 +97,7 @@ int main(int argc, char **argv) {
         std::print("{}[{},{},{}]", i ? "," : "", p.x, p.y, p.z);
     }
     std::println("],");
-    // Mode-major, matching the model schema: every sample point of mode 0, then of mode 1, and so on.
+    // Stores every sample point for each successive mode to match the model schema.
     std::print("  \"shapes\": [");
     for (size_t k = 0; k < modes.Freqs.size(); ++k) {
         for (size_t i = 0; i < modes.Shapes.size(); ++i) {

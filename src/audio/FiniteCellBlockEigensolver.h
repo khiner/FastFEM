@@ -3,9 +3,9 @@
 #include "FiniteCell.h"
 
 namespace modal {
-// Wall-clock seconds per solve phase. `Other` is the remainder outside actions, preconditioning,
-// and Rayleigh-Ritz. The FallbackAttempt fields describe a factor-free attempt that failed
-// certification and handed the solve to the assembled Cholesky route.
+// Records wall-clock seconds and convergence diagnostics for each solve phase.
+// Other measures time outside actions, preconditioning, and Rayleigh-Ritz.
+// FallbackAttempt fields describe an uncertified factor-free result before assembled Cholesky runs.
 struct FiniteCellBlockProfile {
     double Total{}, Actions{}, ActionSetup{}, Initialization{}, PreconditionerSetup{}, Preconditioner{},
         RayleighRitz{}, Residuals{}, Recurrence{}, Certification{}, Other{};

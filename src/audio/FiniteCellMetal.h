@@ -56,8 +56,7 @@ struct FiniteCellMetal {
     void LinearCombination(const Block &left, float left_scale, const Block &right, float right_scale, Block &output) const;
     void ConfigurePackedPatch(SharedFloats inverse_matrices, std::span<const double> element_matrices) const;
     void ApplyElement(const Block &input, Block &output) const;
-    // Colored multiplicative patch sweep: `correction` accumulates the patch solves and
-    // `remaining` carries the residual left after each color's exact local action.
+    // Writes accumulated patch solves to `correction` and the post-color residual to `remaining`.
     void ApplyPackedLocalizedMultiplicativePatchSweep(
         const Block &input, Block &correction, Block &remaining,
         bool reverse = false, bool final_residual = true

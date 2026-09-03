@@ -1,4 +1,4 @@
-// Run Eigen's large dense products (Lanczos orthogonalization) on Accelerate's BLAS.
+// Eigen delegates large dense products used by Lanczos orthogonalization to Accelerate BLAS.
 #define EIGEN_USE_BLAS
 
 #include "mesh2modes.h"
@@ -110,8 +110,8 @@ auto Timed(double &seconds, auto &&compute) {
     return result;
 }
 
-// Degenerate elements contribute nothing physically, but their inverse-determinant basis
-// gradients poison the stiffness matrix. Copy the mesh without them.
+// Degenerate elements have zero physical contribution.
+// Removing them prevents inverse-determinant basis gradients from producing non-finite stiffness entries.
 TetMesh FilterDegenerate(const TetMesh &tets) {
     TetMesh clean;
     clean.Points = tets.Points;
@@ -184,7 +184,8 @@ MassProperties ComputeMassProperties(const TetMesh &tets, double density, vec3 s
     if (total <= 0) return {};
     com /= total;
 
-    // Point-mass inertia about the center of mass, sum of vol * (|r|^2 I - r r^T), scaled to SI (inertia integral ~ length^5).
+    // Point-mass inertia sums vol*(|r|^2*I - r*r^T) about the center of mass.
+    // Conversion to SI scales this volume-length-squared integral by length_to_si^5.
     const double s = length_to_si;
     Eigen::Matrix3d inertia = Eigen::Matrix3d::Zero();
     for (size_t i = 0; i < nverts; ++i) {
@@ -216,10 +217,7 @@ MassProperties ComputeMassProperties(const TetMesh &tets, double density, vec3 s
     };
 }
 
-// Block subspace iteration on the shifted pencil, seeded with a prior solve's eigenvector basis.
-// Each iteration solves (K - sigma*M) Xbar = M X across the whole panel in one pass over the
-// Cholesky factor, then Rayleigh-Ritz projects the pencil onto span(Xbar). Ritz vectors are
-// M-orthonormal by construction. Converges the leading `nev` pairs, ascending.
+// Returns the leading `nev` eigenpairs from a prior eigenvector basis and a shifted block solve.
 struct SubspaceResult {
     Eigen::VectorXd Eigenvalues;
     Eigen::MatrixXd Eigenvectors;
@@ -313,14 +311,14 @@ template<class ShiftInvert>
 SubspaceResult SubspaceIterate(
     const ShiftInvert &op, const Eigen::SparseMatrix<double> &M,
     uint nev, uint p, double sigma, double tol, uint max_iters,
-    const Eigen::MatrixXf &x0, // warm-start basis, its columns seed the leading panel columns
+    const Eigen::MatrixXf &x0,
     modal::SolveMonitor *monitor = nullptr
 ) {
     const uint n = M.rows();
     const auto Msa = M.selfadjointView<Eigen::Lower>();
 
-    // The iteration carries M X rather than X itself: the panel solve, the projections, and the
-    // deflation all consume M-products, and Ritz vectors are only materialized when locked.
+    // Storing M*X avoids repeated mass actions in panel solves, projections, and deflation.
+    // The iteration materializes Ritz vectors when they become locked.
     Eigen::MatrixXd MX(n, p);
     {
         Eigen::MatrixXd X(n, p);
@@ -334,8 +332,8 @@ SubspaceResult SubspaceIterate(
     }
 
     SubspaceResult result;
-    // Locked (converged) leading Ritz pairs, ascending. Locked vectors leave the iterated
-    // panel: the active block is deflated against them instead of re-solved.
+    // Locked Ritz pairs remain in ascending order.
+    // Deflation removes locked vectors from subsequent panel solves.
     Eigen::MatrixXd XL(n, nev), MXL(n, nev);
     Eigen::VectorXd theta_locked(nev);
     uint c = 0;
@@ -348,12 +346,12 @@ SubspaceResult SubspaceIterate(
         op.solve_panel(MX.data(), Xbar.data(), int(w));
         result.OpApplications += w;
 
-        // Kr = Xbar^T (K - sigma*M) Xbar = Xbar^T M X, corrected below for deflation.
+        // Kr = Xbar^T*(K - sigma*M)*Xbar = Xbar^T*M*X before the deflation correction.
         Eigen::MatrixXd Kr = Xbar.transpose() * MX;
         Eigen::MatrixXd MXbar = Msa * Xbar;
 
-        // Deflate against locked pairs. Locked pairs satisfy (K - sigma*M) x = theta M x to
-        // within tol, which reduces the deflated projection to the -C^T theta C correction.
+        // Locked pairs satisfy (K - sigma*M)*x = theta*M*x within tolerance.
+        // This identity reduces the deflated projection to the -C^T*theta*C correction.
         if (c > 0) {
             const Eigen::MatrixXd C = XL.leftCols(c).transpose() * MXbar;
             Xbar.noalias() -= XL.leftCols(c) * C;
@@ -362,7 +360,7 @@ SubspaceResult SubspaceIterate(
         }
         Eigen::MatrixXd Mr = Xbar.transpose() * MXbar;
 
-        // Rescale columns to unit M-norm to keep the small GEVP well-conditioned.
+        // Unit M-norm columns improve conditioning of the projected generalized eigenproblem.
         Kr = (0.5 * (Kr + Kr.transpose())).eval();
         Mr = (0.5 * (Mr + Mr.transpose())).eval();
         const Eigen::VectorXd dscale = Mr.diagonal().cwiseSqrt().cwiseInverse();
@@ -493,8 +491,7 @@ ModalModes ComputeModes(
     const uint n = num_vertices * vertex_dim;
     const uint fem_n_modes = std::min(config.NumFemModes, n - 1);
     const uint basis_size = std::min(std::max(fem_n_modes + 20, 20u), n); // Lanczos basis vector count (ncv)
-    // Negative shift: K - sigma*M is positive definite, and the smallest
-    // eigenvalues sit nearest the shift, so they still converge first.
+    // A negative shift makes K - sigma*M positive definite and places the smallest eigenvalues nearest the shift.
     const double shift_omega = 2 * std::numbers::pi * config.MinModeFreq;
     const double sigma = -shift_omega * shift_omega;
     auto *monitor = opts.Monitor;
@@ -518,7 +515,7 @@ ModalModes ComputeModes(
         profile.OpApplications += RefineSubspace(op, M, K, config.Tolerance, -sigma * 1e-4, WarmRefinementIterations, eigenvalues, subspace.Eigenvectors);
     } else {
         if (monitor && monitor->Cancelled()) return {};
-        // Spectra's compute runs to completion, so a cold solve reports no progress and cancels only at stage boundaries.
+        // Cold solves update progress and cancellation only at stage boundaries because Spectra provides no callback.
         eigs.emplace(op, Bop, fem_n_modes, basis_size, sigma);
         eigs->init();
         eigs->compute(
@@ -531,7 +528,7 @@ ModalModes ComputeModes(
         eigenvalues = eigs->eigenvalues();
     }
     profile.Iterate = SecondsSince(eig_start) - profile.Factorize;
-    // The eigenvectors are M-orthonormal, so shapes are already mass-normalized (kg^-1/2).
+    // M-orthonormal eigenvectors provide mass-normalized shapes in kg^-1/2.
     const Eigen::MatrixXd eigenvectors = Timed(profile.Extract, [&]() -> Eigen::MatrixXd {
         return use_subspace ? std::move(subspace.Eigenvectors) : eigs->eigenvectors();
     });
@@ -566,7 +563,7 @@ ModalModes modal::PostprocessModes(std::span<const double> eigenvalues, const st
     const uint fem_n_modes = eigenvalues.size();
     std::vector<float> mode_freqs(fem_n_modes), mode_t60s(fem_n_modes);
     std::vector<double> omega_undamped(fem_n_modes);
-    // Scale-aware near-zero cutoff, relative to the eigensolver shift.
+    // The eigensolver shift scales the near-zero eigenvalue cutoff.
     const double shift_omega = 2 * std::numbers::pi * config.MinModeFreq;
     const double lambda_eps = shift_omega * shift_omega * 1e-10;
     for (uint mode = 0; mode < fem_n_modes; ++mode) {
@@ -589,8 +586,7 @@ ModalModes modal::PostprocessModes(std::span<const double> eigenvalues, const st
             continue;
         }
         mode_freqs[mode] = damped_hz(omega_i, c_from_omega(omega_i));
-        // Rigid-body modes carry numerically tiny but nonzero eigenvalues, so a mode is valid
-        // only at or above the audible floor.
+        // The audible-frequency floor excludes numerically nonzero rigid-body modes.
         if (lowest_mode_i == fem_n_modes && mode_freqs[mode] >= config.MinModeFreq) {
             lowest_mode_i = mode;
             lowest_mode_freq_orig = mode_freqs[mode];
@@ -606,8 +602,7 @@ ModalModes modal::PostprocessModes(std::span<const double> eigenvalues, const st
         mode_freqs[mode] = damped_hz(omega_s, c);
         mode_t60s[mode] = c > 0 ? (2 * ln_1000) / c : 0;
     }
-    // Keep modes that are only above the max frequency because of scaling.
-    // This allows changing the fundamental without losing the higher modes.
+    // Applying the upper frequency cutoff before fundamental scaling preserves higher modes after retuning.
     const float max_mode_freq = config.MaxModeFreq * std::max(1.f, freq_scale);
     uint highest_mode_i = fem_n_modes;
     while (highest_mode_i > lowest_mode_i && mode_freqs[highest_mode_i - 1] > max_mode_freq) --highest_mode_i;
@@ -661,8 +656,8 @@ modal::ModalResult modal::mesh2modes(const TetMesh &input_tets, const AcousticMa
     profile.StiffnessNonZeros = K.nonZeros();
     if (monitor && monitor->Cancelled()) return {};
 
-    // Sample each excitation position at its nearest tet point, recovering node-local coordinates.
-    // A point reached by more than one position carries one shape vector, so those positions become one sample point.
+    // Sample each excitation position at its nearest tetrahedral point and convert the result to node-local coordinates.
+    // Excitation positions mapped to one tetrahedral point share one shape vector and sample point.
     auto [excite_points, positions, sample_point_of] = Timed(profile.SampleExcite, [&] {
         const dvec3 inv_scale{1.0 / baked_scale.x, 1.0 / baked_scale.y, 1.0 / baked_scale.z};
         std::vector<uint> points;

@@ -2,12 +2,12 @@
 
 #include "mesh/Tetrahedralize.h"
 
-// Quadric edge-collapse the surface to `ratio` of its triangles in place, then drop unreferenced vertices.
-// A no-op when ratio >= 1. A non-self-intersecting input stays non-self-intersecting: collapses that fold the surface through itself are found and retried with that neighbourhood frozen, so a region that cannot be coarsened safely keeps its resolution.
+// Simplifies the surface in place to `ratio` of its triangles with quadric edge collapse and removes unreferenced vertices.
+// A ratio greater than or equal to one preserves the input.
+// The function retries folds with their neighborhoods fixed and preserves resolution where every collapse causes an intersection.
 void SimplifySurface(std::vector<vec3> &positions, std::vector<uint32_t> &triangle_indices, float ratio);
 
-// Fill the closed triangle surface with tetrahedra.
-// The surface appears exactly in the output.
-// The error string names the failure (e.g. a self-intersecting input surface).
-// Simplify the surface first with SimplifySurface if a lower resolution is wanted.
+// Returns a tetrahedral mesh whose boundary contains the closed input triangle surface exactly.
+// Returns an error string for invalid or unrecoverable input.
+// Call SimplifySurface first to reduce surface resolution.
 std::expected<tetra::Result, std::string> GenerateTets(std::vector<vec3> positions, std::vector<uint32_t> triangle_indices, tetra::Options options = {});

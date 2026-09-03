@@ -10,21 +10,15 @@
 #include <unordered_map>
 
 namespace {
-// Geometric steps the staged rebuild takes to reach the target.
-constexpr int Stages{4};
-// Freeze-and-retry attempts per stage, after which the stage's input is kept.
-constexpr int MaxRounds{6};
-// Frozen ball radius around a defect, in multiples of the length the defect measures.
-constexpr double LockRadius{0.5};
-// The collinearity tolerance the tetrahedralizer starts an edge recovery from.
-constexpr double CollinearAngTol{179.9};
-// The tetrahedralizer loosens that tolerance once, by a 180th of the angle's excess over it.
-// A vertex inside an edge within this many degrees of straight carries the loosened tolerance past 180 degrees, and the surface comes back rejected.
-constexpr double StraightTol{(180 - CollinearAngTol) / 181};
+constexpr int Stages{4}; // Limits the resolution restored after a failed collapse.
+constexpr int MaxRounds{6}; // Bounds repeated simplification of one stage.
+constexpr double LockRadius{0.5}; // Multiplies the defect size to define each fixed neighborhood.
+constexpr double CollinearAngTol{179.9}; // Initial edge-recovery tolerance in degrees.
+constexpr double StraightTol{(180 - CollinearAngTol) / 181}; // Detects configurations beyond the permitted tolerance relaxation.
 const double SinStraightTol{std::sin(StraightTol * std::numbers::pi / 180)};
 
-// True when segment (p, q) passes through triangle (a, b, c).
-// Strict rejects contact at a shared vertex, for triangles that meet at one corner.
+// Returns true when segment (p, q) crosses triangle (a, b, c).
+// `strict` excludes contact at a shared vertex.
 bool SegmentCrossesTriangle(const dvec3 &p, const dvec3 &q, const dvec3 &a, const dvec3 &b, const dvec3 &c, bool strict) {
     const double sp = geom::Orient3D(a, b, c, p), sq = geom::Orient3D(a, b, c, q);
     if (strict ? !((sp > 0 && sq < 0) || (sp < 0 && sq > 0)) : ((sp > 0 && sq > 0) || (sp < 0 && sq < 0) || (sp == 0 && sq == 0))) return false;
@@ -33,8 +27,7 @@ bool SegmentCrossesTriangle(const dvec3 &p, const dvec3 &q, const dvec3 &a, cons
     return (s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0);
 }
 
-// Triangles sharing an edge always meet cleanly.
-// Triangles sharing one vertex intersect when the edges opposite that vertex pass through them.
+// Returns true when two triangles have an intersection beyond their shared vertices or edge.
 bool TrianglesIntersect(const uint32_t *ta, const uint32_t *tb, const dvec3 *p) {
     int shared = 0, corner_a = 0, corner_b = 0;
     for (int i = 0; i < 3; ++i) {
@@ -59,7 +52,6 @@ bool TrianglesIntersect(const uint32_t *ta, const uint32_t *tb, const dvec3 *p) 
     return false;
 }
 
-// Uniform spatial hash over cells of a fixed size.
 struct Grid {
     double Cell;
     dvec3 Min;
@@ -77,22 +69,21 @@ struct Grid {
     }
 };
 
-// A neighbourhood of the simplified surface to freeze, as a center and the length its lock radius scales with.
+// Identifies a fixed neighborhood by center and scale.
 struct Defect {
     dvec3 Center;
     double Scale;
 };
 
-// A triangle, centred on its centroid and measured by its longest edge.
+// Returns a triangle neighborhood centered at its centroid and scaled by its longest edge.
 Defect TriangleDefect(const dvec3 &v0, const dvec3 &v1, const dvec3 &v2) {
     return {(v0 + v1 + v2) / 3.0, std::max({numeric::Length(v1 - v0), numeric::Length(v2 - v1), numeric::Length(v0 - v2)})};
 }
 
-// Triangles that pass through each other.
 void FindFolds(const std::vector<dvec3> &points, const std::vector<uint32_t> &tris, std::vector<Defect> &out) {
     const uint32_t n = uint32_t(tris.size() / 3);
     if (n == 0) return;
-    // Triangle bounds stay in float, which halves what the candidate scan reads and is exact because the points came from float positions.
+    // Float bounds halve candidate-scan bandwidth and exactly represent the source float positions.
     std::vector<vec3> tri_min(n), tri_max(n);
     dvec3 min = points[tris[0]], max = min;
     double diagonal_sum = 0;
@@ -108,9 +99,9 @@ void FindFolds(const std::vector<dvec3> &points, const std::vector<uint32_t> &tr
         max = numeric::Max(max, hi);
         diagonal_sum += numeric::Length(hi - lo);
     }
-    // Cells the size of an average triangle keep each bucket to a handful of candidates.
+    // Average-triangle cell size bounds the expected candidate count per bucket.
     Grid grid{std::max(diagonal_sum / n, 1e-12), min, {}};
-    // A triangle spanning several cells meets the same candidate in each of them, so each one is stamped with the triangle it was last weighed against.
+    // Epoch stamps suppress duplicate triangle pairs from overlapping grid cells.
     std::vector<uint32_t> stamp(n, 0);
     uint32_t epoch = 0;
     for (uint32_t t = 0; t < n; ++t) {
@@ -120,7 +111,7 @@ void FindFolds(const std::vector<dvec3> &points, const std::vector<uint32_t> &tr
             for (const uint32_t other : bucket) {
                 if (stamp[other] == epoch) continue;
                 stamp[other] = epoch;
-                // Nearly every candidate shares a cell without overlapping, and disjoint bounds settle it without a predicate.
+                // Disjoint bounds reject most candidates before exact intersection predicates.
                 if (lo.x > tri_max[other].x || hi.x < tri_min[other].x || lo.y > tri_max[other].y || hi.y < tri_min[other].y || lo.z > tri_max[other].z || hi.z < tri_min[other].z) continue;
                 if (!TrianglesIntersect(&tris[t * 3], &tris[other * 3], points.data())) continue;
                 for (const uint32_t f : {t, other}) {
@@ -132,8 +123,7 @@ void FindFolds(const std::vector<dvec3> &points, const std::vector<uint32_t> &tr
     }
 }
 
-// Vertices that sit inside an edge they are not part of, so nearly straight that the tetrahedralizer
-// gives up on recovering that edge and reports the surface as intersecting itself.
+// Reports vertices inside unrelated edges whose near-collinearity exceeds the edge-recovery tolerance.
 void FindVerticesInsideEdges(const std::vector<dvec3> &points, const std::vector<uint32_t> &tris, std::vector<Defect> &out) {
     std::vector<uint64_t> edges;
     edges.reserve(tris.size());
@@ -154,9 +144,9 @@ void FindVerticesInsideEdges(const std::vector<dvec3> &points, const std::vector
         min = numeric::Min(min, numeric::Min(a, b));
         edge_sum += numeric::Length(b - a);
     }
-    // Cells the size of an average edge keep each bucket to a handful of candidates.
+    // Average-edge cell size bounds the expected candidate count per bucket.
     Grid grid{std::max(edge_sum / double(edges.size()), 1e-12), min, {}};
-    // A vertex lands in one cell, so an edge meets each candidate once.
+    // Assigning each vertex to one cell produces one candidate entry per intersecting edge.
     std::vector<unsigned char> used(points.size(), 0);
     for (const uint32_t v : tris) used[v] = 1;
     for (uint32_t v = 0; v < points.size(); ++v) {
@@ -169,12 +159,12 @@ void FindVerticesInsideEdges(const std::vector<dvec3> &points, const std::vector
         grid.ForCellsIn(numeric::Min(pa, pb), numeric::Max(pa, pb), [&](std::vector<uint32_t> &bucket) {
             for (const uint32_t v : bucket) {
                 if (v == a || v == b) continue;
-                // A negative dot puts the vertex between the two ends, where the sine of the angle
-                // it makes there falls as that angle approaches straight.
+                // A negative dot places the vertex between the endpoints.
+                // The normalized cross-product magnitude approaches zero as the endpoint angle approaches 180 degrees.
                 const dvec3 u = pa - points[v], w = pb - points[v];
                 if (numeric::Dot(u, w) >= 0) continue;
                 if (numeric::Length(numeric::Cross(u, w)) <= numeric::Length(u) * numeric::Length(w) * SinStraightTol) {
-                    // Half the edge length around its midpoint reaches every vertex the edge was collapsed over.
+                    // The edge length defines a neighborhood containing every vertex collapsed across the edge.
                     out.emplace_back(0.5 * (pa + pb), numeric::Length(pb - pa));
                 }
             }
@@ -182,7 +172,6 @@ void FindVerticesInsideEdges(const std::vector<dvec3> &points, const std::vector
     }
 }
 
-// Everything about a simplified surface that stops it tetrahedralizing, as neighbourhoods to freeze.
 std::vector<Defect> FindDefects(const std::vector<dvec3> &points, const std::vector<uint32_t> &tris) {
     std::vector<Defect> defects;
     FindFolds(points, tris, defects);
@@ -190,8 +179,8 @@ std::vector<Defect> FindDefects(const std::vector<dvec3> &points, const std::vec
     return defects;
 }
 
-// Rebuild the simplification in stages, retrying any stage that leaves a defect with the neighbourhood of each defect frozen.
-// A stage only has to undo its own defects, so a frozen region costs the resolution of one stage rather than of the whole simplification.
+// Retries each simplification stage with the neighborhoods of detected defects fixed.
+// Each failed stage restores only that stage's resolution.
 std::vector<uint32_t> SimplifyWithoutDefects(const std::vector<dvec3> &points, const std::vector<vec3> &positions, const std::vector<uint32_t> &triangle_indices, float ratio) {
     dvec3 min = points[0], max = points[0];
     for (const auto &p : points) {
@@ -211,7 +200,7 @@ std::vector<uint32_t> SimplifyWithoutDefects(const std::vector<dvec3> &points, c
         const double stage_ratio = std::pow(double(ratio), double(stage) / Stages);
         const auto target_indices = std::max<size_t>(size_t(base_indices * stage_ratio) / 3 * 3, 12);
         if (target_indices >= tris.size()) continue;
-        // Vertices frozen here keep this stage's collapses out of a region that came back defective.
+        // Fixed vertices exclude subsequent collapses from detected defect neighborhoods.
         std::vector<unsigned char> locks(points.size(), 0);
         size_t locked = 0;
         double radius = LockRadius;
@@ -223,7 +212,7 @@ std::vector<uint32_t> SimplifyWithoutDefects(const std::vector<dvec3> &points, c
                 tris = std::move(simplified);
                 break;
             }
-            // Out of attempts: keep the finer mesh this stage started from and let the next stage try.
+            // The retry limit preserves the stage input before continuing to the next stage.
             if (round == MaxRounds) break;
             for (const auto &[center, scale] : defects) {
                 const double r = radius * scale;
@@ -233,7 +222,7 @@ std::vector<uint32_t> SimplifyWithoutDefects(const std::vector<dvec3> &points, c
                     }
                 });
             }
-            // A round that freezes nothing new repeats itself, so widen the neighbourhood.
+            // An unchanged fixed-vertex set requires a larger neighborhood before the next retry.
             const auto now_locked = size_t(std::ranges::count(locks, 1));
             if (now_locked == locked) radius *= 2;
             locked = now_locked;
@@ -246,10 +235,11 @@ std::vector<uint32_t> SimplifyWithoutDefects(const std::vector<dvec3> &points, c
 void SimplifySurface(std::vector<vec3> &positions, std::vector<uint32_t> &triangle_indices, float ratio) {
     if (ratio >= 1) return;
 
-    // Simplified indices address the original vertices, so all defects are measured against these points.
+    // Original double-precision positions provide consistent defect measurements after index simplification.
     const std::vector<dvec3> points(positions.begin(), positions.end());
 
-    // Only a thin-walled surface comes out defective from collapsing straight to the target, so try that first and pay for the staged rebuild where it does.
+    // The direct target collapse provides the common fast path.
+    // Detected defects trigger the staged rebuild.
     const auto target_indices = std::max<size_t>(size_t(triangle_indices.size() * ratio) / 3 * 3, 12);
     std::vector<uint32_t> tris(triangle_indices.size());
     tris.resize(meshopt_simplify(tris.data(), triangle_indices.data(), triangle_indices.size(), &positions[0].x, positions.size(), sizeof(vec3), target_indices, 0.05f, 0, nullptr));

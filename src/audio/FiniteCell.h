@@ -76,7 +76,6 @@ struct FiniteCellOperator {
     struct PackedCutOperators {
         std::vector<uint32_t> InteriorCells, CutCells;
         std::vector<double> Mass, Shifted;
-        // Per-cell action destinations, grown on demand and reused across applications.
         std::vector<double> MassCells, ShiftedCells;
         double Alpha{}, BuildSeconds{};
     };
@@ -104,7 +103,7 @@ struct FiniteCellOperator {
     void RestrictP1(const double *input, double *output, uint32_t width) const;
     void ProlongP1(const double *input, double *output, uint32_t width) const;
     Eigen::VectorXd ShiftedDiagonal(double alpha) const;
-    // Lower triangle of the cell's `K + alpha*M`, packed row by row over its `3 * NodesPerCell` rows.
+    // Writes the lower triangle of cell `K + alpha*M` in row-packed order over `3 * NodesPerCell` rows.
     void PackCellShiftedLower(uint32_t cell, double alpha, std::span<double> packed) const;
     PackedCutOperators BuildPackedCutOperators(double alpha) const;
     PackedCutOperators BuildPackedCutOperators(double alpha, std::span<const double> packed_shifted_elements) const;

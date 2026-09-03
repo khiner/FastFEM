@@ -108,8 +108,7 @@ void RotateTallTriple(
     c_future.get();
 }
 
-// Replaces `vectors` with an M-orthonormal basis of its span, dropping directions whose mass
-// is at roundoff. Fails when fewer than `required` directions survive.
+// Replaces `vectors` with an M-orthonormal basis and returns false when fewer than `required` independent directions remain.
 bool MOrthonormalize(Actions &actions, Eigen::MatrixXd &vectors, Eigen::MatrixXd &mass_vectors, uint32_t required) {
     mass_vectors.resize(actions.Fem.Dofs(), vectors.cols());
     actions.ApplyMass(vectors.data(), mass_vectors.data(), uint32_t(vectors.cols()));
@@ -155,8 +154,7 @@ bool Ritz(
     return true;
 }
 
-// Rayleigh-Ritz over a space whose mass and shifted actions are already known. The mass-orthonormalizing
-// transform is folded into the eigenvector rotation, so each tall matrix is rotated once.
+// Returns Rayleigh-Ritz pairs from a subspace and its precomputed mass and shifted actions.
 bool RitzFromActions(
     Eigen::MatrixXd &space, Eigen::MatrixXd &mass_space, Eigen::MatrixXd &shifted_space,
     uint32_t count, Eigen::MatrixXd &vectors, Eigen::MatrixXd &mass_vectors,
@@ -193,6 +191,7 @@ bool RitzFromActions(
     projected = (0.5 * (projected + projected.transpose())).eval();
     const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> decomposition{projected};
     if (decomposition.info() != Eigen::Success) return false;
+    // Combining mass orthonormalization with Ritz rotation applies one transform to each tall matrix.
     const Eigen::MatrixXd rotation = transform * decomposition.eigenvectors().leftCols(count);
     RotateTallTriple(space, mass_space, shifted_space, rotation, vectors, mass_vectors, shifted_vectors);
     values = decomposition.eigenvalues().head(count);
@@ -200,7 +199,7 @@ bool RitzFromActions(
     return true;
 }
 
-// Gaussian columns whose leading block is a prolonged P1 eigenbasis: the four-guard seed.
+// Returns a Gaussian basis whose leading columns contain the prolonged P1 eigenbasis and four guard vectors.
 Eigen::MatrixXd InitialSpace(
     const modal::FiniteCellOperator &fem, uint32_t width, double alpha,
     const modal::FiniteCellOperator::AssembledLower &p1
@@ -330,8 +329,7 @@ MetalPatchData BuildMetalPatchData(const modal::FiniteCellOperator &fem, double 
     return result;
 }
 
-// One packed localized multiplicative patch sweep, a resident P1 multigrid coarse correction,
-// and a reverse sweep, applied in FP32 on the GPU and relaxed back into FP64.
+// Applies forward and reverse FP32 patch sweeps around a resident P1 multigrid correction and converts the result to FP64.
 struct MetalMultiplicativePreconditioner {
     std::unique_ptr<modal::FiniteCellMetal> Metal;
     modal::FiniteCellOperator::PackedCutOperators CutActions;
@@ -415,7 +413,7 @@ modal::FiniteCellBlockResult SolvePreferred(
     if (count == 0 || count > fem.Dofs()) return finish();
 
     const auto initialization_start = Clock::now();
-    // The P1 assembly seeds the initial space and the multigrid hierarchy, then is released.
+    // The initial space and multigrid hierarchy share one temporary P1 assembly.
     std::optional p1_assembly{fem.AssembleP1Lower()};
     auto preconditioner_setup_future = std::async(std::launch::async, [&] {
         return MetalMultiplicativePreconditioner{fem, alpha, *p1_assembly};
@@ -451,7 +449,7 @@ modal::FiniteCellBlockResult SolvePreferred(
         const double scale = (shifted - alpha * mass).norm() + std::abs(shifted_value - alpha) * mass.norm();
         return scale == 0 ? residual.norm() : residual.norm() / scale;
     };
-    // The six rigid-body modes sit at the shift and carry no convergence requirement.
+    // The six rigid-body eigenvalues equal the shift within the configured relative threshold.
     const auto rigid = [&](uint32_t mode) { return std::abs(shifted_values[mode] - alpha) <= alpha * 1e-4; };
     const auto accept = [&](const Eigen::VectorXd &active_relative) {
         result.Eigenvalues.resize(requested_count);

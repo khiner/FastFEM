@@ -41,7 +41,6 @@ inline dvec3 Rotate(dvec3 point, dvec3 center, double az, double ay) {
     return point + center;
 }
 
-// Outward-facing triangles of a box whose eight corners are indexed in (x, y, z) bit order.
 inline constexpr std::array<uint32_t, 36> BoxTriangles{
     0,
     2,
@@ -450,9 +449,8 @@ inline TetMesh TaperedKeyReference(uint32_t nx, uint32_t ny, uint32_t nz) { retu
 inline TetMesh NarrowWaistReference(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralReference(NarrowWaistSurface(), nx, ny, nz); }
 inline TetMesh CupReference(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralReference(CupSurface(), nx, ny, nz); }
 
-// Grid extent and physical volume are derived from the boundary surface unless the entry
-// overrides them: the historical `bar` keeps an axis-aligned grid, and the polyhedral bars and
-// bracket have exact analytical volumes.
+// Derives grid extent and physical volume from the boundary surface unless an entry overrides them.
+// The `bar` preserves an axis-aligned grid, while the polyhedral bars and bracket use exact analytical volumes.
 struct GeometrySpec {
     std::string_view Name, Description;
     Surface (*Boundary)();

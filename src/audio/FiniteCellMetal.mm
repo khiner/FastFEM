@@ -309,7 +309,7 @@ std::runtime_error MetalError(NSString *context, NSError *error = nil) {
     return std::runtime_error{message};
 }
 
-// Dispatches encoded on one compute pass execute in order, so an operation needs one encoder.
+// One encoder preserves dispatch order for every kernel in an operation.
 template<typename Params>
 void Bind(
     id<MTLComputeCommandEncoder> encoder, id<MTLComputePipelineState> pipeline,
@@ -1071,8 +1071,7 @@ void modal::FiniteCellMetal::ApplyPackedLocalizedMultiplicativePatchSweep(
                 AlgebraParams{elements, input.Rows, left_scale, right_scale}, elements
             );
         };
-        // A patch solve is the packed cell-matrix action against the stored inverses, over the
-        // identity cell order so each color writes its own cells' scratch slots.
+        // Identity cell order maps each color's packed inverse action to its corresponding scratch slots.
         const auto encode_patch = [&](id<MTLBuffer> residual, uint8_t color) {
             const uint32_t first = Impl->ColorOffsets[color], cells = Impl->ColorOffsets[color + 1] - first;
             if (!cells) return;

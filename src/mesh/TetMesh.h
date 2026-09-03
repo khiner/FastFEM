@@ -6,7 +6,8 @@
 #include <cstdint>
 #include <vector>
 
-// Tetrahedral volume mesh. Every tet (a, b, c, d) is positively oriented: det[a-d, b-d, c-d] > 0.
+// Stores a tetrahedral volume mesh.
+// Every tetrahedron (a, b, c, d) satisfies det[a-d, b-d, c-d] > 0.
 struct TetMesh {
     std::vector<dvec3> Points;
     std::vector<std::array<uint32_t, 4>> Tets;

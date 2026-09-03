@@ -33,7 +33,7 @@ inline std::optional<SurfaceMesh> LoadObj(const std::filesystem::path &path) {
         if (inserted) mesh.Positions.emplace_back(p[0], p[1], p[2]);
         remap[i] = it->second;
     }
-    // tinyobj triangulates as it reads, so every face is already three corners.
+    // tinyobj produces three corners for every face during parsing.
     for (const auto &shape : shapes) {
         for (const auto &index : shape.mesh.indices) mesh.TriangleIndices.push_back(remap[size_t(index.vertex_index)]);
     }

@@ -139,7 +139,7 @@ bool TriangleIntersectsBox(const std::array<dvec3, 3> &triangle, const dvec3 &ce
     return true;
 }
 
-// Three generic directions whose parity votes decide inside/outside for a closed surface.
+// Three non-axis-aligned ray directions provide independent parity classifications for a closed surface.
 const std::array<dvec3, 3> InsideTestDirections{
     numeric::Normalize(dvec3{1, 0.3713906763541037, 0.6947465906068658}),
     numeric::Normalize(dvec3{0.217347184, 1, 0.513938221}),
@@ -769,10 +769,9 @@ Tensor TensorProduct(
     return result;
 }
 
-// Evaluates the combined `stiffness_scale * K + mass_scale * M` action and, when a mass destination
-// is given, the plain `M` action alongside it. Each action goes to its per-cell buffer when one is
-// supplied, otherwise it is scattered into the matching global destination. A pair of null
-// destinations skips that action entirely.
+// Evaluates `stiffness_scale*K + mass_scale*M` and an optional independent M action in one cell traversal.
+// Cell destinations receive local actions, while global destinations receive accumulated nodal actions.
+// Null destinations omit their corresponding actions.
 void ApplyTensorSerial(
     const modal::FiniteCellOperator &operation, const double *input, double *output,
     uint32_t width, double stiffness_scale, double mass_scale, double *independent_mass_output = nullptr,
@@ -943,7 +942,7 @@ void ApplyTensorColumn(void *raw_context, size_t column) {
     );
 }
 
-// One task per right-hand side: every column touches every cell, so the columns are independent.
+// Assigns each independent right-hand side to one task.
 void ApplyTensorParallel(
     const modal::FiniteCellOperator &operation, const double *input, double *output,
     uint32_t width, double stiffness_scale, double mass_scale, double *independent_mass_output = nullptr
@@ -957,10 +956,10 @@ void ApplyTensorParallel(
     dispatch_apply_f(width, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &context, ApplyTensorColumn);
 }
 
-// Local mass and shifted `K + alpha*M` matrices over one cell's quadrature. `mass` receives the
-// lower triangle of the column-major node mass matrix. `shifted` receives either the full
-// column-major local matrix or, when `Packed`, its lower triangle packed row by row. Nulls skip
-// that operator.
+// Writes local mass and shifted `K + alpha*M` matrices for one cell.
+// `mass` receives the lower triangle of the column-major nodal mass matrix.
+// `shifted` receives a full column-major matrix or a row-packed lower triangle when `Packed` is true.
+// A null output omits that matrix.
 template<uint32_t Order, bool Packed>
 void CellOperators(
     const modal::FiniteCellOperator &operation, uint32_t cell_index, double alpha,
@@ -999,8 +998,8 @@ void CellOperators(
     }
 }
 
-// Lower triangles of the mass and stiffness matrices over either the cell basis or its nested P1
-// corners. Each cell owns a fixed triplet slot, so the parallel emission order is the serial one.
+// Returns assembled lower-triangle mass and stiffness matrices over the cell basis or nested P1 corners.
+// Fixed per-cell triplet slots make parallel and serial emission orders identical.
 template<bool P1>
 modal::FiniteCellOperator::AssembledLower Assemble(const modal::FiniteCellOperator &operation) {
     constexpr uint32_t Basis{P1 ? 1 : BasisOrder}, Nodes{(Basis + 1) * (Basis + 1) * (Basis + 1)}, Dofs{3 * Nodes};
@@ -1180,8 +1179,7 @@ void ApplyMassShiftedCut(
                         for (uint32_t component = 0; component < 3; ++component)
                             local_input[size_t(block) * LocalDofs + 3 * node + component] =
                                 context.Input[size_t(block) * context.Operation.Dofs() + 3 * cell.Nodes[node] + component];
-                // Accelerate has no packed symmetric matrix-matrix product, so mirror the stored
-                // lower triangle into a dense column-major operand first.
+                // Expand the lower triangle because Accelerate matrix-matrix multiplication requires a dense column-major operand.
                 const auto expand = [&](const double *packed, uint32_t size) {
                     for (uint32_t column = 0; column < size; ++column)
                         for (uint32_t row = 0; row < size; ++row) {
@@ -1468,7 +1466,7 @@ modal::FiniteCellCertification modal::CertifyFiniteCellEigenpairs(
     FiniteCellCertification result;
     if (eigenvectors.rows() != operation.Dofs() || eigenvectors.cols() != eigenvalues.size()) return result;
     Eigen::MatrixXd mass(operation.Dofs(), eigenvectors.cols()), stiffness(operation.Dofs(), eigenvectors.cols());
-    // A zero shift makes the paired action the plain mass and stiffness in one traversal.
+    // Alpha zero computes independent mass and stiffness actions in one traversal.
     operation.ApplyMassShifted(eigenvectors.data(), mass.data(), stiffness.data(), uint32_t(eigenvectors.cols()), 0);
     const Eigen::MatrixXd residual = stiffness - mass * eigenvalues.asDiagonal();
     result.RelativeResiduals.resize(eigenvalues.size());

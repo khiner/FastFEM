@@ -5,8 +5,9 @@
 #include <cmath>
 #include <memory>
 
-// Exact evaluation uses floating-point expansions: nonoverlapping doubles in increasing magnitude, so the last component carries the sign.
-// Filter bounds are conservative multiples of the machine epsilon, so the expansion path runs only near degeneracy.
+// Implements adaptive robust predicates from Jonathan Richard Shewchuk, Discrete & Computational Geometry 18(3), 1997.
+// Exact evaluation stores nonoverlapping doubles in increasing magnitude, with the highest-magnitude component determining the sign.
+// Conservative machine-epsilon bounds restrict expansion evaluation to near-degenerate inputs.
 namespace {
 constexpr double Eps = 0x1p-53;
 
@@ -29,7 +30,7 @@ Two FastTwoSum(double a, double b) {
     return {s, b - (s - a)};
 }
 
-// h = e + f, all nonoverlapping increasing-magnitude expansions with zeros eliminated. h needs capacity elen + flen.
+// Writes h = e + f as a zero-eliminated nonoverlapping expansion and requires capacity elen + flen.
 // Returns the count written (>= 1, h = {0} for a zero sum).
 int ExpSum(int elen, const double *e, int flen, const double *f, double *h) {
     double enow = e[0], fnow = f[0], Q, hh;
@@ -83,7 +84,7 @@ int ExpSum(int elen, const double *e, int flen, const double *f, double *h) {
     return hn;
 }
 
-// h = e * b. h needs capacity 2 * elen.
+// Writes h = e*b and requires capacity 2*elen.
 int ExpScale(int elen, const double *e, double b, double *h) {
     int hn = 0;
     auto [Q, hh] = TwoProd(e[0], b);
@@ -313,7 +314,7 @@ void TwoTwoDiff(Two a, Two b, double *x) {
 }
 
 // The two refinement stages between the filter and the exact determinant.
-// Stage B evaluates the determinant exactly in the rounded differences, and stage C adds what the difference tails contribute.
+// Stage B evaluates the determinant in rounded differences, and stage C adds the difference-tail contribution.
 // The permanent is the one the filter already computed.
 double Orient3DAdapt(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d, double permanent) {
     const double adx = a.x - d.x, bdx = b.x - d.x, cdx = c.x - d.x;
@@ -340,7 +341,7 @@ double Orient3DAdapt(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3
     const double adxtail = TwoDiff(a.x, d.x).Lo, bdxtail = TwoDiff(b.x, d.x).Lo, cdxtail = TwoDiff(c.x, d.x).Lo;
     const double adytail = TwoDiff(a.y, d.y).Lo, bdytail = TwoDiff(b.y, d.y).Lo, cdytail = TwoDiff(c.y, d.y).Lo;
     const double adztail = TwoDiff(a.z, d.z).Lo, bdztail = TwoDiff(b.z, d.z).Lo, cdztail = TwoDiff(c.z, d.z).Lo;
-    // Every difference was exact, so stage B already held the whole determinant.
+    // Exact coordinate differences make stage B the complete determinant.
     if (adxtail == 0 && bdxtail == 0 && cdxtail == 0 && adytail == 0 && bdytail == 0 && cdytail == 0 &&
         adztail == 0 && bdztail == 0 && cdztail == 0) {
         return det;
@@ -358,8 +359,8 @@ double Orient3DAdapt(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3
 }
 
 // The two refinement stages between the filter and the exact determinant.
-// Stage B is exact in the rounded differences, and stage C adds what the difference tails contribute.
-// Each returns as soon as its own error bound clears, so the exact expansion runs only for points that really are cospherical.
+// Stage B evaluates rounded differences, and stage C adds the difference-tail contribution.
+// Each stage returns after satisfying its error bound, reserving exact expansion evaluation for near-cospherical inputs.
 // The permanent is the one the filter already computed.
 double InSphereAdapt(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d, const dvec3 &e, double permanent) {
     const double aex = a.x - e.x, bex = b.x - e.x, cex = c.x - e.x, dex = d.x - e.x;
@@ -378,8 +379,8 @@ double InSphereAdapt(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3
     double temp8a[8], temp8b[8], temp8c[8], temp16[16], temp24[24], temp48[48];
     double xdet[96], ydet[96], zdet[96], xydet[192];
     // One row's contribution: the 3x3 minor of the other three rows, times that row's lift.
-    // The lift is a pair of scalings by each of the row's own coordinates, so the product stays a single expansion.
-    // The lift carries the cofactor sign, alternating down the rows.
+    // Two coordinate scalings represent the row lift as one expansion.
+    // Alternating row signs encode the cofactor sign in the lift.
     const auto row = [&](const double *m1, double s1, const double *m2, double s2, const double *m3, double s3,
                          double x, double y, double z, double lift_sign, double *out) {
         const int n8a = ExpScale(4, m1, s1, temp8a);
@@ -413,7 +414,7 @@ double InSphereAdapt(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3
     const double bextail = TwoDiff(b.x, e.x).Lo, beytail = TwoDiff(b.y, e.y).Lo, beztail = TwoDiff(b.z, e.z).Lo;
     const double cextail = TwoDiff(c.x, e.x).Lo, ceytail = TwoDiff(c.y, e.y).Lo, ceztail = TwoDiff(c.z, e.z).Lo;
     const double dextail = TwoDiff(d.x, e.x).Lo, deytail = TwoDiff(d.y, e.y).Lo, deztail = TwoDiff(d.z, e.z).Lo;
-    // Every difference was exact, so stage B already held the whole determinant.
+    // Exact coordinate differences make stage B the complete determinant.
     if (aextail == 0 && aeytail == 0 && aeztail == 0 && bextail == 0 && beytail == 0 && beztail == 0 &&
         cextail == 0 && ceytail == 0 && ceztail == 0 && dextail == 0 && deytail == 0 && deztail == 0) {
         return det;
@@ -440,7 +441,7 @@ double InSphereAdapt(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3
 }
 
 // The 3x3 determinant, built from the six 2x2 minors of x and y and scaled by z.
-// The value is the expansion's leading component, not the rounded sum, so the pipeline order is part of the result.
+// Returns the leading expansion component to preserve the pipeline evaluation order.
 double Orient3DCofactor(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d) {
     double ab[4], bc[4], cd[4], da[4], ac[4], bd[4];
     TwoTwoDiff(TwoProd(a.x, b.y), TwoProd(b.x, a.y), ab);
@@ -540,7 +541,7 @@ double Orient4DCofactor(
 }
 
 // The two refinement stages between orient4d's filter and the exact determinant.
-// Built like InSphereAdapt, with the heights in place of the lifts, so each row is a single scaling rather than a squared pair.
+// Replacing squared lifts with supplied heights reduces each InSphereAdapt row to one scaling.
 double Orient4DAdapt(
     const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d, const dvec3 &e,
     double aheight, double bheight, double cheight, double dheight, double eheight, double permanent
@@ -590,7 +591,7 @@ double Orient4DAdapt(
     const double dextail = TwoDiff(d.x, e.x).Lo, deytail = TwoDiff(d.y, e.y).Lo, deztail = TwoDiff(d.z, e.z).Lo;
     const double aeheighttail = TwoDiff(aheight, eheight).Lo, beheighttail = TwoDiff(bheight, eheight).Lo;
     const double ceheighttail = TwoDiff(cheight, eheight).Lo, deheighttail = TwoDiff(dheight, eheight).Lo;
-    // Every difference was exact, so stage B already held the whole determinant.
+    // Exact coordinate differences make stage B the complete determinant.
     if (aextail == 0 && aeytail == 0 && aeztail == 0 && bextail == 0 && beytail == 0 && beztail == 0 &&
         cextail == 0 && ceytail == 0 && ceztail == 0 && dextail == 0 && deytail == 0 && deztail == 0 &&
         aeheighttail == 0 && beheighttail == 0 && ceheighttail == 0 && deheighttail == 0) {
@@ -652,7 +653,7 @@ double Orient3D(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d) 
 
 // The difference-form determinant in a fixed expression order.
 // The approximate value is returned whenever it clears the first error bound.
-// Anything below that bound goes to the refinement stages, which reach the exact expansion only near cospherical.
+// Values within the first error bound use refinement stages and reserve exact expansion evaluation for near-cospherical inputs.
 double InSphere(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d, const dvec3 &e) {
     const double aex = a.x - e.x, bex = b.x - e.x, cex = c.x - e.x, dex = d.x - e.x;
     const double aey = a.y - e.y, bey = b.y - e.y, cey = c.y - e.y, dey = d.y - e.y;
@@ -692,7 +693,8 @@ double InSphere(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d, 
 
 int InSphereSoS(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d, const dvec3 &e, uint32_t ia, uint32_t ib, uint32_t ic, uint32_t id, uint32_t ie) {
     if (const double det = InSphere(a, b, c, d, e); det != 0) return det > 0 ? 1 : -1;
-    // Cospherical: perturb each lift by an amount that shrinks with the point's index, so the smallest index dominates.
+    // Cospherical ties use lift perturbations whose magnitude decreases with point index.
+    // The smallest point index determines the sign.
     // The perturbation term of row r is (-1)^(r + 3) * orient3d of the remaining rows in order.
     const dvec3 pts[5]{a, b, c, d, e};
     std::array<uint32_t, 5> order{0, 1, 2, 3, 4};

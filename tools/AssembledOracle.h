@@ -15,8 +15,8 @@ struct ReferenceModes {
     uint32_t Applications{};
 };
 
-// Same-discretization FP64 oracle: assemble the finite-cell pencil and solve it with Spectra over
-// an Accelerate block Cholesky shift-invert. Empty when Spectra does not converge.
+// Returns same-discretization FP64 eigenpairs from an assembled finite-cell pencil and Accelerate Cholesky shift-invert.
+// Spectra convergence failure returns an empty result.
 inline ReferenceModes AssembledOracle(const modal::FiniteCellOperator &operation, uint32_t count, double shift) {
     const auto assembled = operation.AssembleLower();
     double factor_seconds{}, solve_seconds{};
