@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -61,6 +62,12 @@ struct FiniteCellOperator {
         uint8_t Fictitious{};
     };
 
+    struct InterpolationStencil {
+        std::array<uint32_t, NodesPerCell> Nodes{};
+        std::array<double, NodesPerCell> Weights{};
+        uint8_t Count{NodesPerCell};
+    };
+
     struct Cell {
         std::array<uint32_t, NodesPerCell> Nodes{};
         dvec3 InverseHalf{};
@@ -86,11 +93,15 @@ struct FiniteCellOperator {
     std::vector<P1Stencil> P1Stencils;
     std::vector<uint32_t> NodeOccurrenceOffsets;
     std::vector<uint32_t> NodeOccurrences;
+    std::vector<int32_t> CellAtBackgroundIndex;
     FiniteCellProfile Profile;
+    uvec3 GridCells{};
+    dvec3 GridMin{}, CellStep{};
     uint32_t NumP1Nodes{};
     double Density{}, Lambda{}, Mu{}, FictitiousScale{};
 
     uint32_t Dofs() const { return 3 * uint32_t(Nodes.size()); }
+    std::optional<InterpolationStencil> InterpolationAt(dvec3 point) const;
     void ApplyMass(const double *input, double *output, uint32_t width) const;
     void ApplyMassShifted(
         const double *input, double *mass_output, double *shifted_output, uint32_t width, double alpha

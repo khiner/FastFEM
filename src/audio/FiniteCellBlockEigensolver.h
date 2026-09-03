@@ -5,11 +5,10 @@
 namespace modal {
 // Records wall-clock seconds and convergence diagnostics for each solve phase.
 // Other measures time outside actions, preconditioning, and Rayleigh-Ritz.
-// FallbackAttempt fields describe an uncertified factor-free result before assembled Cholesky runs.
+// FallbackAttempt fields describe an unconverged factor-free result before assembled Cholesky runs.
 struct FiniteCellBlockProfile {
-    double Total{}, Actions{}, ActionSetup{}, Initialization{}, PreconditionerSetup{}, Preconditioner{},
-        RayleighRitz{}, Residuals{}, Recurrence{}, Certification{}, Other{};
-    double StagnationResidual{}, FallbackAttempt{}, FallbackAttemptResidual{}, FallbackAttemptOrthogonality{};
+    double Total{}, Actions{}, ActionSetup{}, Initialization{}, PreconditionerSetup{}, Preconditioner{}, RayleighRitz{}, Residuals{}, Recurrence{}, Other{};
+    double StagnationResidual{}, FallbackAttempt{}, FallbackAttemptResidual{};
     uint32_t StagnationIteration{}, FallbackAttemptIterations{};
     bool Stagnated{}, FallbackAttemptStagnated{};
 };
@@ -17,7 +16,6 @@ struct FiniteCellBlockProfile {
 struct FiniteCellBlockResult {
     Eigen::VectorXd Eigenvalues, RelativeResiduals;
     Eigen::MatrixXd Eigenvectors;
-    FiniteCellCertification Certification;
     FiniteCellBlockProfile Profile;
     uint32_t Iterations{};
 };

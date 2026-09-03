@@ -401,6 +401,7 @@ SampledFinite SolveFiniteAndSample(
     const auto modes = modal::SolveFiniteCellBlock(finite, count, shift, 1e-8, 300);
     expect(modes.Eigenvalues.size() == count);
     if (modes.Eigenvalues.size() != count) return {};
+    const auto modes_certification = modal::CertifyFiniteCellEigenpairs(finite, modes.Eigenvalues, modes.Eigenvectors);
     std::vector<finite_cell_benchmark::InterpolationStencil> stencils;
     for (const dvec3 point : samples) {
         const auto stencil = finite_cell_benchmark::FiniteCellStencil(finite, point);
@@ -410,7 +411,7 @@ SampledFinite SolveFiniteAndSample(
     return {
         .Values = modes.Eigenvalues,
         .Modes = finite_cell_benchmark::SampleModes(stencils, modes.Eigenvectors, 6),
-        .Residual = modes.Certification.RelativeResiduals.tail(count - 6).maxCoeff(),
+        .Residual = modes_certification.RelativeResiduals.tail(count - 6).maxCoeff(),
         .Volume = finite.Profile.PhysicalVolume,
         .Dofs = finite.Dofs(),
         .Iterations = modes.Iterations,

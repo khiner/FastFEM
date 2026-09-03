@@ -19,38 +19,10 @@ struct ModeShapeComparison {
     double PairedMacMinimum{}, BestMacMinimum{}, ClusterMacMinimum{};
 };
 
-struct InterpolationStencil {
-    std::array<uint32_t, 27> Nodes{};
-    std::array<double, 27> Weights{};
-    uint32_t Count{};
-};
+using InterpolationStencil = modal::FiniteCellOperator::InterpolationStencil;
 
 inline std::optional<InterpolationStencil> FiniteCellStencil(const modal::FiniteCellOperator &operation, const dvec3 &point) {
-    constexpr uint32_t width{3};
-    for (const auto &cell : operation.Cells) {
-        const dvec3 half = 1.0 / cell.InverseHalf;
-        const dvec3 center = operation.Nodes[cell.Nodes[0]] + half;
-        const dvec3 reference = (point - center) / half;
-        const dvec3 absolute = numeric::Abs(reference);
-        if (absolute.x > 1 + 1e-10 || absolute.y > 1 + 1e-10 || absolute.z > 1 + 1e-10) continue;
-        double basis[3][3]{};
-        for (uint32_t axis = 0; axis < 3; ++axis) {
-            const double x = reference[axis];
-            basis[axis][0] = 0.5 * x * (x - 1);
-            basis[axis][1] = 1 - x * x;
-            basis[axis][2] = 0.5 * x * (x + 1);
-        }
-        InterpolationStencil result{.Count = modal::FiniteCellOperator::NodesPerCell};
-        for (uint32_t z = 0; z < width; ++z)
-            for (uint32_t y = 0; y < width; ++y)
-                for (uint32_t x = 0; x < width; ++x) {
-                    const uint32_t node = x + width * (y + width * z);
-                    result.Nodes[node] = cell.Nodes[node];
-                    result.Weights[node] = basis[0][x] * basis[1][y] * basis[2][z];
-                }
-        return result;
-    }
-    return std::nullopt;
+    return operation.InterpolationAt(point);
 }
 
 inline std::optional<InterpolationStencil> Tet10Stencil(

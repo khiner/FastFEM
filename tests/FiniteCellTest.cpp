@@ -265,8 +265,9 @@ suite FiniteCellTests = [] {
             expect(tet_modes.Eigenvalues.size() == Count) << level;
             expect(finite_modes.Eigenvalues.size() == Count) << level;
             if (tet_modes.Eigenvalues.size() != Count || finite_modes.Eigenvalues.size() != Count) continue;
+            const auto finite_certification = modal::CertifyFiniteCellEigenpairs(finite, finite_modes.Eigenvalues, finite_modes.Eigenvectors);
             expect(tet_modes.RelativeResidual < 1e-7) << level;
-            expect(finite_modes.Certification.RelativeResiduals.tail(Count - 6).maxCoeff() < 1e-7) << level;
+            expect(finite_certification.RelativeResiduals.tail(Count - 6).maxCoeff() < 1e-7) << level;
             const auto [finite_frequencies, tet_frequencies] =
                 SampleBarFrequencies(finite, finite_modes, mesh, tet, tet_modes, extent);
             finite_frequencies_by_level[level] = finite_frequencies;
@@ -319,20 +320,21 @@ suite FiniteCellTests = [] {
             expect(reference.Eigenvalues.size() == Count) << name;
             expect(preferred.Eigenvalues.size() == Count) << name;
             if (reference.Eigenvalues.size() != Count || preferred.Eigenvalues.size() != Count) continue;
+            const auto preferred_certification = modal::CertifyFiniteCellEigenpairs(operation, preferred.Eigenvalues, preferred.Eigenvectors);
             const double spectrum_error = (preferred.Eigenvalues.tail(Count - 6) - reference.Eigenvalues.tail(Count - 6)).norm() /
                 reference.Eigenvalues.tail(Count - 6).norm();
-            const double residual = preferred.Certification.RelativeResiduals.tail(Count - 6).maxCoeff();
+            const double residual = preferred_certification.RelativeResiduals.tail(Count - 6).maxCoeff();
             const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
                 operation, reference.Eigenvalues, reference.Eigenvectors, preferred.Eigenvectors
             );
             std::println(
                 "audio geometry {}: dofs={} cut={} iterations={} spectrum={:.3e} residual={:.3e} orthogonality={:.3e} paired_mac={:.6f} cluster_mac={:.6f}",
                 name, operation.Dofs(), operation.Profile.CutCells, preferred.Iterations, spectrum_error, residual,
-                preferred.Certification.MassOrthogonalityError, shapes.PairedMacMinimum, shapes.ClusterMacMinimum
+                preferred_certification.MassOrthogonalityError, shapes.PairedMacMinimum, shapes.ClusterMacMinimum
             );
             expect(spectrum_error < 1e-10) << name;
             expect(residual < 1e-8) << name;
-            expect(preferred.Certification.MassOrthogonalityError < 1e-10) << name;
+            expect(preferred_certification.MassOrthogonalityError < 1e-10) << name;
             expect(shapes.ClusterMacMinimum > 0.999999) << name;
         }
     };
@@ -450,8 +452,9 @@ suite FiniteCellTests = [] {
         expect(scaled_error < 1e-9);
         expect(spectrum_error < 1e-10);
         if (fitted_modes.Eigenvalues.size() == ModeCount) {
-            expect(fitted_modes.Certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff() < 1e-8);
-            expect(fitted_modes.Certification.MassOrthogonalityError < 1e-10);
+            const auto fitted_certification = modal::CertifyFiniteCellEigenpairs(fitted, fitted_modes.Eigenvalues, fitted_modes.Eigenvectors);
+            expect(fitted_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff() < 1e-8);
+            expect(fitted_certification.MassOrthogonalityError < 1e-10);
         }
     };
 
@@ -519,8 +522,11 @@ suite FiniteCellTests = [] {
         expect(operation.Profile.CutCells == 0_u);
         expect(std::abs(operation.Profile.PhysicalVolume / (extent.x * extent.y * extent.z) - 1) < 1e-12);
         expect(result.Eigenvalues.head(6).cwiseAbs().maxCoeff() < 1e-3);
-        expect(result.Certification.RelativeResiduals.tail(6).maxCoeff() < 1e-8);
-        expect(result.Certification.MassOrthogonalityError < 1e-8);
+        const auto certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
+        expect(certification.RelativeResiduals.tail(6).maxCoeff() < 1e-8);
+        expect(certification.MassOrthogonalityError < 1e-8);
+        const double residual_difference = (certification.RelativeResiduals.tail(6) - result.RelativeResiduals.tail(6)).norm();
+        expect(residual_difference < 1e-12) << residual_difference;
     };
 
     "finite cells recover free bar volume and longitudinal frequency"_test = [] {
@@ -536,8 +542,9 @@ suite FiniteCellTests = [] {
         const double volume_error = std::abs(operation.Profile.PhysicalVolume / exact_volume - 1);
         expect(volume_error < 0.015);
         expect(operation.Profile.CutCells > 0_u);
-        expect(result.Certification.RelativeResiduals.tail(14).maxCoeff() < 1e-7);
-        expect(result.Certification.MassOrthogonalityError < 1e-8);
+        const auto result_certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
+        expect(result_certification.RelativeResiduals.tail(14).maxCoeff() < 1e-7);
+        expect(result_certification.MassOrthogonalityError < 1e-8);
 
         double longitudinal = std::numeric_limits<double>::infinity();
         for (Eigen::Index mode = 6; mode < result.Eigenvalues.size(); ++mode) {

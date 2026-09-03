@@ -1,7 +1,6 @@
 #include "LoadObj.h"
 #include "audio/AcousticMaterialProperties.h"
-#include "audio/mesh2modes.h"
-#include "mesh/Tets.h"
+#include "audio/surface2modes.h"
 
 #include <charconv>
 #include <cstdio>
@@ -28,6 +27,12 @@ bool HasFlag(int argc, char **argv, std::string_view name) {
     return false;
 }
 
+std::string_view ArgValue(int argc, char **argv, std::string_view name, std::string_view fallback) {
+    for (int i = 1; i + 1 < argc; ++i)
+        if (argv[i] == name) return argv[i + 1];
+    return fallback;
+}
+
 void PrintScalars(std::string_view key, const auto &values) {
     std::print("  \"{}\": [", key);
     for (size_t i = 0; i < values.size(); ++i) std::print("{}{}", i ? "," : "", values[i]);
@@ -37,7 +42,7 @@ void PrintScalars(std::string_view key, const auto &values) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        std::println(stderr, "Usage: {} <mesh.obj> [--young E] [--poisson v] [--density rho] [--alpha a] [--beta b] [--min-freq f] [--max-freq f] [--modes n] [--quality]", argv[0]);
+        std::println(stderr, "Usage: {} <mesh.obj> [--discretization tet10|finite-cell] [--young E] [--poisson v] [--density rho] [--alpha a] [--beta b] [--min-freq f] [--max-freq f] [--modes n] [--quality]", argv[0]);
         return 1;
     }
     const auto mesh = LoadObj(argv[1]);
@@ -53,22 +58,32 @@ int main(int argc, char **argv) {
         .Alpha = ArgValue(argc, argv, "--alpha", 5),
         .Beta = ArgValue(argc, argv, "--beta", 2e-8),
     };
-    const modal::SolverConfig config{
-        .MinModeFreq = float(ArgValue(argc, argv, "--min-freq", 20)),
-        .MaxModeFreq = float(ArgValue(argc, argv, "--max-freq", 16'000)),
-        .NumModes = uint32_t(ArgValue(argc, argv, "--modes", 30)),
-        .NumFemModes = uint32_t(ArgValue(argc, argv, "--modes", 30)) + 15,
-    };
-
-    auto tets = GenerateTets(mesh->Positions, mesh->TriangleIndices, {.Quality = HasFlag(argc, argv, "--quality")});
-    if (!tets) {
-        std::println(stderr, "Tetrahedralization failed: {}", tets.error());
+    const auto discretization_name = ArgValue(argc, argv, "--discretization", "tet10");
+    modal::Discretization discretization;
+    if (discretization_name == "tet10") discretization = modal::Discretization::Tet10;
+    else if (discretization_name == "finite-cell") discretization = modal::Discretization::FiniteCell;
+    else {
+        std::println(stderr, "Unknown discretization: {}", discretization_name);
         return 1;
     }
-    const auto result = modal::mesh2modes(tets->Mesh, material, mesh->Positions, vec3{1}, config);
-    const auto &modes = result.Modes;
+    const modal::SurfaceSolveConfig config{
+        .Modal = {
+            .MinModeFreq = float(ArgValue(argc, argv, "--min-freq", 20)),
+            .MaxModeFreq = float(ArgValue(argc, argv, "--max-freq", 16'000)),
+            .NumModes = uint32_t(ArgValue(argc, argv, "--modes", 30)),
+            .NumFemModes = uint32_t(ArgValue(argc, argv, "--modes", 30)) + 15,
+        },
+        .Tetrahedralization = {.Quality = HasFlag(argc, argv, "--quality")},
+    };
+
+    const auto result = modal::surface2modes(mesh->Positions, mesh->TriangleIndices, material, mesh->Positions, vec3{1}, discretization, config);
+    if (!result) {
+        std::println(stderr, "Modal solve failed: {}", result.error());
+        return 1;
+    }
+    const auto &modes = result->Modes;
     if (modes.Freqs.empty()) {
-        std::println(stderr, "Solve produced no modes in [{} Hz, {} Hz]", config.MinModeFreq, config.MaxModeFreq);
+        std::println(stderr, "Solve produced no modes in [{} Hz, {} Hz]", config.Modal.MinModeFreq, config.Modal.MaxModeFreq);
         return 1;
     }
 
@@ -77,9 +92,9 @@ int main(int argc, char **argv) {
     std::vector<uint32_t> indices;
     indices.reserve(mesh->TriangleIndices.size());
     for (size_t t = 0; t + 2 < mesh->TriangleIndices.size(); t += 3) {
-        const auto a = result.SamplePointOfExcitation[mesh->TriangleIndices[t]];
-        const auto b = result.SamplePointOfExcitation[mesh->TriangleIndices[t + 1]];
-        const auto c = result.SamplePointOfExcitation[mesh->TriangleIndices[t + 2]];
+        const auto a = result->SamplePointOfExcitation[mesh->TriangleIndices[t]];
+        const auto b = result->SamplePointOfExcitation[mesh->TriangleIndices[t + 1]];
+        const auto c = result->SamplePointOfExcitation[mesh->TriangleIndices[t + 2]];
         if (a == b || b == c || a == c) continue;
         indices.insert(indices.end(), {a, b, c});
     }
@@ -107,9 +122,9 @@ int main(int argc, char **argv) {
     }
     std::println("],");
     PrintScalars("indices", indices);
-    std::println("  \"mass\": {},", result.MassProps.Mass);
-    std::println("  \"centerOfMass\": [{},{},{}],", result.MassProps.CenterOfMass.x, result.MassProps.CenterOfMass.y, result.MassProps.CenterOfMass.z);
-    std::println("  \"inertiaDiagonal\": [{},{},{}]", result.MassProps.InertiaDiagonal.x, result.MassProps.InertiaDiagonal.y, result.MassProps.InertiaDiagonal.z);
+    std::println("  \"mass\": {},", result->MassProps.Mass);
+    std::println("  \"centerOfMass\": [{},{},{}],", result->MassProps.CenterOfMass.x, result->MassProps.CenterOfMass.y, result->MassProps.CenterOfMass.z);
+    std::println("  \"inertiaDiagonal\": [{},{},{}]", result->MassProps.InertiaDiagonal.x, result->MassProps.InertiaDiagonal.y, result->MassProps.InertiaDiagonal.z);
     std::println("}}");
     return 0;
 }

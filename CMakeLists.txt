@@ -42,7 +42,9 @@ add_library(FastFEM
     src/audio/FiniteCell.cpp
     src/audio/FiniteCellBlockEigensolver.cpp
     src/audio/FiniteCellMetal.mm
+    src/audio/MassProperties.cpp
     src/audio/SparseCholesky.cpp
+    src/audio/surface2modes.cpp
     src/audio/Tet10Assembler.cpp
     src/audio/mesh2modes.cpp
     src/mesh/Tetrahedralize.cpp
@@ -189,6 +191,11 @@ if(FASTFEM_BUILD_TESTS)
         ${FASTFEM_TINYOBJLOADER_TARGET}
     )
     add_test(NAME FastFEMModalSolver COMMAND FastFEMModalSolverTest)
+
+    add_executable(FastFEMSurfaceModesTest tests/SurfaceModesTest.cpp)
+    target_include_directories(FastFEMSurfaceModesTest PRIVATE tests tools)
+    target_link_libraries(FastFEMSurfaceModesTest PRIVATE FastFEM::FastFEM Boost::ut)
+    add_test(NAME FastFEMSurfaceModes COMMAND FastFEMSurfaceModesTest)
 
     add_executable(FastFEMFiniteCellTest tests/FiniteCellTest.cpp)
     target_include_directories(FastFEMFiniteCellTest PRIVATE tests tools)

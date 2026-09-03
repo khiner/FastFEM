@@ -620,11 +620,15 @@ modal::FiniteCellOperator Build(
     const dvec3 grid_min = domain.Min + (config.GridOffsetCells - config.PaddingCells) * nominal_step;
     const dvec3 grid_max = domain.Max + (config.GridOffsetCells + config.PaddingCells) * nominal_step;
     const dvec3 step = (grid_max - grid_min) / dvec3{config.Cells};
+    result.GridCells = config.Cells;
+    result.GridMin = grid_min;
+    result.CellStep = step;
     const dvec3 node_step = step / double(BasisOrder), half = 0.5 * step;
     const uvec3 node_dimensions = BasisOrder * config.Cells + uvec3{1};
     const size_t background_nodes = size_t(node_dimensions.x) * node_dimensions.y * node_dimensions.z;
     std::vector<int32_t> compact(background_nodes, -1);
     result.Profile.BackgroundCells = config.Cells.x * config.Cells.y * config.Cells.z;
+    result.CellAtBackgroundIndex.resize(result.Profile.BackgroundCells, -1);
 
     const auto acquire_node = [&](uvec3 point) {
         const uint32_t background = BackgroundNode(point, node_dimensions);
@@ -667,6 +671,7 @@ modal::FiniteCellOperator Build(
                         }
                     }
                 }
+                result.CellAtBackgroundIndex[(x * config.Cells.y + y) * config.Cells.z + z] = int32_t(result.Cells.size());
                 result.Cells.push_back(cell);
             }
         }
@@ -1454,6 +1459,49 @@ modal::FiniteCellOperator BuildOperator(
 
 modal::FiniteCellOperator modal::BuildFiniteCellOperator(const ImplicitDomain &domain, const AcousticMaterialProperties &material, FiniteCellConfig config) {
     return BuildOperator(domain, material, config, true);
+}
+
+std::optional<modal::FiniteCellOperator::InterpolationStencil> modal::FiniteCellOperator::InterpolationAt(dvec3 point) const {
+    if (Cells.empty() || GridCells.x == 0 || GridCells.y == 0 || GridCells.z == 0) return std::nullopt;
+    const dvec3 grid_coordinate = (point - GridMin) / CellStep;
+    const auto coordinate = [&](uint32_t axis) {
+        return std::clamp(int64_t(std::floor(grid_coordinate[axis])), int64_t{0}, int64_t(GridCells[axis]) - 1);
+    };
+    const std::array<int64_t, 3> base{coordinate(0), coordinate(1), coordinate(2)};
+    for (int64_t dx = -1; dx <= 1; ++dx) {
+        for (int64_t dy = -1; dy <= 1; ++dy) {
+            for (int64_t dz = -1; dz <= 1; ++dz) {
+                const std::array<int64_t, 3> candidate{base[0] + dx, base[1] + dy, base[2] + dz};
+                if (candidate[0] < 0 || candidate[1] < 0 || candidate[2] < 0 || candidate[0] >= GridCells.x || candidate[1] >= GridCells.y || candidate[2] >= GridCells.z)
+                    continue;
+                const uint32_t background = (uint32_t(candidate[0]) * GridCells.y + uint32_t(candidate[1])) * GridCells.z + uint32_t(candidate[2]);
+                const int32_t cell_index = CellAtBackgroundIndex[background];
+                if (cell_index < 0) continue;
+                const auto &cell = Cells[cell_index];
+                const dvec3 half = 1.0 / cell.InverseHalf;
+                const dvec3 center = Nodes[cell.Nodes[0]] + half;
+                const dvec3 reference = (point - center) / half;
+                const dvec3 absolute = numeric::Abs(reference);
+                if (absolute.x > 1 + 1e-10 || absolute.y > 1 + 1e-10 || absolute.z > 1 + 1e-10) continue;
+                double basis[3][3];
+                for (uint32_t axis = 0; axis < 3; ++axis) {
+                    const double x = reference[axis];
+                    basis[axis][0] = 0.5 * x * (x - 1);
+                    basis[axis][1] = 1 - x * x;
+                    basis[axis][2] = 0.5 * x * (x + 1);
+                }
+                InterpolationStencil result{.Nodes = cell.Nodes};
+                for (uint32_t z = 0; z < 3; ++z)
+                    for (uint32_t y = 0; y < 3; ++y)
+                        for (uint32_t x = 0; x < 3; ++x) {
+                            const uint32_t node = x + 3 * (y + 3 * z);
+                            result.Weights[node] = basis[0][x] * basis[1][y] * basis[2][z];
+                        }
+                return result;
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 modal::FiniteCellOperator modal::oracle::BuildOctree(const ImplicitDomain &domain, const AcousticMaterialProperties &material, FiniteCellConfig config) {

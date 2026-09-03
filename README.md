@@ -21,6 +21,30 @@ When `metal-tt` is available, CMake also loads a binary pipeline archive instead
 xcodebuild -downloadComponent MetalToolchain
 ```
 
+## Usage
+
+`surface2modes` runs the complete watertight-surface-to-modal-model pipeline with an explicit discretization:
+
+```cpp
+#include "audio/surface2modes.h"
+
+auto result = modal::surface2modes(
+    positions, triangleIndices, material, excitationPositions, vec3{1},
+    modal::Discretization::FiniteCell
+);
+```
+
+Select `modal::Discretization::Tet10` to tetrahedralize the same surface before solving.
+The result contains audible frequencies, damping times, mass-normalized shapes at the requested positions, rigid-body mass properties, and raw eigenpairs for material rescaling.
+The finite-cell path accepts `SolveReuse::KeepBasis`; Tet10 also accepts a seed basis and `SolveCache`.
+
+`FastFEMModalSolve` exposes the same choice from the command line:
+
+```sh
+./build/FastFEMModalSolve model.obj --discretization finite-cell
+./build/FastFEMModalSolve model.obj --discretization tet10
+```
+
 ## Solvers
 
 FastFEM provides two discretizations with independent accuracy and certification checks.
@@ -35,15 +59,6 @@ Pass a `SolveCache` to preserve the block pencil and symbolic factorization betw
 `mesh2modes` can seed a guarded block-subspace re-solve with modes from a geometry-compatible prior solution.
 Scalar Eigen matrices provide mass actions and independent certification.
 
-#### Usage
-
-`src/audio/mesh2modes.h` declares the C++ API.
-`FastFEMModalSolve` runs the complete watertight-surface-to-modal-model pipeline:
-
-```sh
-./build/FastFEMModalSolve model.obj
-```
-
 ### Finite cell
 
 `SolveFiniteCellBlock` operates on an implicit domain or a watertight triangle surface embedded in a Cartesian Q2 background grid.
@@ -55,13 +70,14 @@ Its matrix-free path combines:
 - one packed localized multiplicative Metal correction with cooperative batch-eight local matrices;
 - a degree-four resident P1 multigrid cycle;
 - compact FP32 recurrence history whose exact FP64 actions overlap the Metal correction;
-- FP64 Ritz algebra and independent certification;
+- FP64 Ritz algebra and convergence checks;
 - precompiled Metal kernels and a binary pipeline archive when the installed toolchain supports them.
 
-`SolveFiniteCellBlock` checks every result against physical FP64 residual and mass-orthogonality bounds.
+`SolveFiniteCellBlock` evaluates exact physical FP64 residuals from the action panels computed during iteration.
 It applies the same factor-free solver to every geometry and problem size.
-Certification failure selects assembled FP64 Cholesky shift-invert.
-If neither solver certifies within the supplied iteration budget, `SolveFiniteCellBlock` returns an error.
+An unconverged factor-free result selects assembled FP64 Cholesky shift-invert.
+If neither solver converges within the supplied iteration budget, `SolveFiniteCellBlock` returns an error.
+Validation code calls `CertifyFiniteCellEigenpairs` to recompute residuals and mass orthogonality independently.
 `src/audio/FiniteCellOracle.h` exposes the fixed four-guard Cholesky solver to validation code.
 
 ## Correctness corpus

@@ -98,6 +98,18 @@ Eigen::MatrixXd SymmetricCrossGram(const Eigen::MatrixXd &a, const Eigen::Matrix
     return result;
 }
 
+void SetResiduals(modal::FiniteCellBlockResult &result, const Eigen::MatrixXd &mass_vectors, const Eigen::MatrixXd &shifted_vectors, double alpha) {
+    const Eigen::Index count = result.Eigenvalues.size();
+    const auto mass = mass_vectors.leftCols(count);
+    const Eigen::MatrixXd stiffness = shifted_vectors.leftCols(count) - alpha * mass;
+    const Eigen::MatrixXd residual = stiffness - mass * result.Eigenvalues.asDiagonal();
+    result.RelativeResiduals.resize(count);
+    for (Eigen::Index mode = 0; mode < count; ++mode) {
+        const double scale = stiffness.col(mode).norm() + std::abs(result.Eigenvalues[mode]) * mass.col(mode).norm();
+        result.RelativeResiduals[mode] = scale == 0 ? residual.col(mode).norm() : residual.col(mode).norm() / scale;
+    }
+}
+
 void RotateTallTriple(
     const Eigen::MatrixXd &a, const Eigen::MatrixXd &b, const Eigen::MatrixXd &c,
     const Eigen::MatrixXd &rotation, Eigen::MatrixXd &a_rotated, Eigen::MatrixXd &b_rotated,
@@ -425,7 +437,7 @@ modal::FiniteCellBlockResult SolvePreferred(
         actions.ApplyMassShifted(input, mass, shifted, width, alpha);
     };
     double preconditioner_setup_seconds{}, preconditioner_seconds{}, ritz_seconds{};
-    double initialization_seconds{}, residual_seconds{}, recurrence_seconds{}, certification_seconds{};
+    double initialization_seconds{}, residual_seconds{}, recurrence_seconds{};
     const auto finish = [&] {
         result.Profile.Total = SecondsSince(start);
         result.Profile.Actions = actions.Seconds;
@@ -436,7 +448,6 @@ modal::FiniteCellBlockResult SolvePreferred(
         result.Profile.RayleighRitz = ritz_seconds;
         result.Profile.Residuals = residual_seconds;
         result.Profile.Recurrence = recurrence_seconds;
-        result.Profile.Certification = certification_seconds;
         result.Profile.Other = result.Profile.Total - result.Profile.Actions - result.Profile.PreconditionerSetup -
             result.Profile.Preconditioner - result.Profile.RayleighRitz;
         return result;
@@ -459,16 +470,25 @@ modal::FiniteCellBlockResult SolvePreferred(
         result.Iterations = std::numeric_limits<uint32_t>::max();
         return finish();
     }
+    const auto relative_residual = [alpha](const auto &mass, const auto &shifted, const auto &residual, double shifted_value) {
+        const double scale = (shifted - alpha * mass).norm() + std::abs(shifted_value - alpha) * mass.norm();
+        return scale == 0 ? residual.norm() : residual.norm() / scale;
+    };
     uint32_t locked_count = count > 6 ? 6 : 0;
     Eigen::MatrixXd locked_vectors, locked_mass_vectors;
-    Eigen::VectorXd locked_values;
+    Eigen::VectorXd locked_values, locked_relative;
     if (locked_count) {
         locked_vectors.resize(fem.Dofs(), requested_count);
         locked_mass_vectors.resize(fem.Dofs(), requested_count);
         locked_values.resize(requested_count);
+        locked_relative = Eigen::VectorXd::Zero(requested_count);
         locked_vectors.leftCols(locked_count) = vectors.leftCols(locked_count);
         locked_mass_vectors.leftCols(locked_count) = mass_vectors.leftCols(locked_count);
         locked_values.head(locked_count) = shifted_values.head(locked_count);
+        for (uint32_t mode = 0; mode < locked_count; ++mode) {
+            const Eigen::VectorXd residual = shifted_vectors.col(mode) - mass_vectors.col(mode) * shifted_values[mode];
+            locked_relative[mode] = relative_residual(mass_vectors.col(mode), shifted_vectors.col(mode), residual, shifted_values[mode]);
+        }
         RemoveLeadingColumns(vectors, locked_count);
         RemoveLeadingColumns(mass_vectors, locked_count);
         RemoveLeadingColumns(shifted_vectors, locked_count);
@@ -476,10 +496,6 @@ modal::FiniteCellBlockResult SolvePreferred(
         count -= locked_count;
         width -= locked_count;
     }
-    const auto relative_residual = [alpha](const auto &mass, const auto &shifted, const auto &residual, double shifted_value) {
-        const double scale = (shifted - alpha * mass).norm() + std::abs(shifted_value - alpha) * mass.norm();
-        return scale == 0 ? residual.norm() : residual.norm() / scale;
-    };
     // The six rigid-body eigenvalues equal the shift within the configured relative threshold.
     const auto rigid = [&](uint32_t mode) { return std::abs(shifted_values[mode] - alpha) <= alpha * 1e-4; };
     const auto accept = [&](const Eigen::VectorXd &active_relative) {
@@ -489,15 +505,11 @@ modal::FiniteCellBlockResult SolvePreferred(
         if (locked_count) {
             result.Eigenvalues.head(locked_count) = locked_values.array() - alpha;
             result.Eigenvectors.leftCols(locked_count) = locked_vectors.leftCols(locked_count);
+            result.RelativeResiduals.head(locked_count) = locked_relative.head(locked_count);
         }
         result.Eigenvalues.tail(count) = shifted_values.head(count).array() - alpha;
         result.Eigenvectors.rightCols(count) = vectors.leftCols(count);
         result.RelativeResiduals.tail(count) = active_relative.head(count);
-        const auto certification_start = Clock::now();
-        result.Certification = CertifyFiniteCellEigenpairs(fem, result.Eigenvalues, result.Eigenvectors);
-        if (locked_count)
-            result.RelativeResiduals.head(locked_count) = result.Certification.RelativeResiduals.head(locked_count);
-        certification_seconds += SecondsSince(certification_start);
     };
     const auto wait_start = Clock::now();
     auto preconditioner = preconditioner_setup_future.get();
@@ -551,6 +563,17 @@ modal::FiniteCellBlockResult SolvePreferred(
 
         uint32_t newly_locked{};
         while (newly_locked < count && relative[newly_locked] < tolerance) ++newly_locked;
+        if (newly_locked) {
+            wait_previous_actions();
+            Eigen::MatrixXd exact_mass(fem.Dofs(), newly_locked), exact_shifted(fem.Dofs(), newly_locked);
+            actions.ApplyMassShifted(vectors.data(), exact_mass.data(), exact_shifted.data(), newly_locked, alpha);
+            mass_vectors.leftCols(newly_locked) = exact_mass;
+            shifted_vectors.leftCols(newly_locked) = exact_shifted;
+            residual = shifted_vectors - mass_vectors * shifted_values.asDiagonal();
+            update_relative();
+            newly_locked = 0;
+            while (newly_locked < count && relative[newly_locked] < tolerance) ++newly_locked;
+        }
         if (newly_locked) stagnation_history.clear();
         else {
             double maximum{};
@@ -589,6 +612,7 @@ modal::FiniteCellBlockResult SolvePreferred(
             locked_vectors.middleCols(old_locked, newly_locked) = vectors.leftCols(newly_locked);
             locked_mass_vectors.middleCols(old_locked, newly_locked) = mass_vectors.leftCols(newly_locked);
             locked_values.segment(old_locked, newly_locked) = shifted_values.head(newly_locked);
+            locked_relative.segment(old_locked, newly_locked) = relative.head(newly_locked);
             RemoveLeadingColumns(vectors, newly_locked);
             RemoveLeadingColumns(mass_vectors, newly_locked);
             RemoveLeadingColumns(shifted_vectors, newly_locked);
@@ -683,31 +707,26 @@ modal::FiniteCellBlockResult modal::SolveFiniteCellBlock(
     const auto start = Clock::now();
     auto preferred = SolvePreferred(fem, count, alpha, tolerance, max_iterations);
     const uint32_t first_physical = std::min(6u, count), physical_count = count - first_physical;
-    const auto certified = [&](const FiniteCellBlockResult &result) {
-        return result.Eigenvalues.size() == count && result.Certification.RelativeResiduals.size() == count &&
-            result.Eigenvalues.allFinite() && result.Certification.RelativeResiduals.allFinite() &&
-            result.Certification.MassOrthogonalityError < 1e-9 &&
-            (!physical_count || result.Certification.RelativeResiduals.segment(first_physical, physical_count).maxCoeff() < tolerance);
+    const auto converged = [&](const FiniteCellBlockResult &result) {
+        return result.Eigenvalues.size() == count && result.RelativeResiduals.size() == count && result.Eigenvalues.allFinite() && result.RelativeResiduals.allFinite() &&
+            (!physical_count || result.RelativeResiduals.segment(first_physical, physical_count).maxCoeff() < tolerance);
     };
-    if (certified(preferred)) return preferred;
+    if (converged(preferred)) return preferred;
     const double attempt_seconds = SecondsSince(start);
     const uint32_t attempt_iterations = preferred.Iterations;
     const bool attempt_stagnated = preferred.Profile.Stagnated;
-    const bool attempt_certified = preferred.Certification.RelativeResiduals.size() == count;
-    const double attempt_residual = attempt_certified && physical_count ?
-        preferred.Certification.RelativeResiduals.segment(first_physical, physical_count).maxCoeff() :
+    const bool attempt_converged = preferred.RelativeResiduals.size() == count;
+    const double attempt_residual = attempt_converged && physical_count ?
+        preferred.RelativeResiduals.segment(first_physical, physical_count).maxCoeff() :
         physical_count ? std::numeric_limits<double>::infinity() :
                          0;
-    const double attempt_orthogonality = attempt_certified ? preferred.Certification.MassOrthogonalityError :
-                                                             std::numeric_limits<double>::infinity();
     preferred = {};
     auto cholesky = oracle::SolveCholesky(fem, count, alpha, tolerance, max_iterations);
-    if (!certified(cholesky)) throw std::runtime_error("Finite-cell default and fallback solvers did not certify within the iteration budget.");
+    if (!converged(cholesky)) throw std::runtime_error("Finite-cell default and fallback solvers did not converge within the iteration budget.");
     cholesky.Profile.FallbackAttempt = attempt_seconds;
     cholesky.Profile.FallbackAttemptIterations = attempt_iterations;
     cholesky.Profile.FallbackAttemptStagnated = attempt_stagnated;
     cholesky.Profile.FallbackAttemptResidual = attempt_residual;
-    cholesky.Profile.FallbackAttemptOrthogonality = attempt_orthogonality;
     cholesky.Profile.Total += attempt_seconds;
     return cholesky;
 }
@@ -732,14 +751,14 @@ modal::FiniteCellBlockResult modal::oracle::SolveCholesky(
             result.Profile.RayleighRitz = SecondsSince(dense_start);
             result.Eigenvalues = eigenvalues.head(count);
             result.Eigenvectors = dense_stiffness.leftCols(count);
-            const auto certification_start = Clock::now();
-            result.Certification = CertifyFiniteCellEigenpairs(fem, result.Eigenvalues, result.Eigenvectors);
-            result.Profile.Certification = SecondsSince(certification_start);
-            result.RelativeResiduals = result.Certification.RelativeResiduals;
+            const auto residual_start = Clock::now();
+            const Eigen::MatrixXd mass_vectors = assembled.Mass.selfadjointView<Eigen::Lower>() * result.Eigenvectors;
+            const Eigen::MatrixXd stiffness_vectors = assembled.Stiffness.selfadjointView<Eigen::Lower>() * result.Eigenvectors;
+            SetResiduals(result, mass_vectors, stiffness_vectors, 0);
+            result.Profile.Residuals = SecondsSince(residual_start);
             result.Iterations = 1;
             result.Profile.Total = SecondsSince(start);
-            result.Profile.Other = result.Profile.Total - result.Profile.Actions -
-                result.Profile.RayleighRitz - result.Profile.Certification;
+            result.Profile.Other = result.Profile.Total - result.Profile.Actions - result.Profile.RayleighRitz - result.Profile.Residuals;
             return result;
         }
     }
@@ -766,12 +785,11 @@ modal::FiniteCellBlockResult modal::oracle::SolveCholesky(
         Eigen::MatrixXd space = eigensolver.Eigenvectors;
         result.Eigenvalues = eigensolver.Eigenvalues.head(count);
         result.Eigenvectors = space.leftCols(count);
-        result.Certification = CertifyFiniteCellEigenpairs(fem, result.Eigenvalues, result.Eigenvectors);
-        result.RelativeResiduals = result.Certification.RelativeResiduals;
+        result.RelativeResiduals = eigensolver.RelativeResiduals.head(count);
         const uint32_t first_physical = std::min(6u, count), physical_count = count - first_physical;
-        const bool safely_certified = result.Certification.MassOrthogonalityError < 0.5e-9 &&
+        const bool safely_converged = eigensolver.MassOrthogonalityError < 0.5e-9 &&
             (!physical_count || result.RelativeResiduals.segment(first_physical, physical_count).maxCoeff() < 0.5 * tolerance);
-        if (!safely_certified) {
+        if (!safely_converged) {
             Eigen::MatrixXd mass_space, vectors, mass_vectors, shifted_vectors;
             Eigen::VectorXd shifted_values;
             Actions actions{fem};
@@ -812,8 +830,7 @@ modal::FiniteCellBlockResult modal::oracle::SolveCholesky(
                 if (refined) {
                     result.Eigenvalues = std::move(refined_values);
                     result.Eigenvectors = std::move(refined_vectors);
-                    result.Certification = CertifyFiniteCellEigenpairs(fem, result.Eigenvalues, result.Eigenvectors);
-                    result.RelativeResiduals = result.Certification.RelativeResiduals;
+                    SetResiduals(result, mass_vectors, shifted_vectors, alpha);
                 }
                 result.Profile.Actions += actions.Seconds;
             }

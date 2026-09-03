@@ -138,31 +138,9 @@ double GetTetVolume(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 
     return std::abs(GetTetDeterminant(a, b, c, d)) / 6.0;
 }
 
-quat QuaternionFromRotation(const Eigen::Matrix3f &rotation) {
-    const auto m = [&](int column, int row) { return rotation(row, column); };
-    const std::array candidates{
-        m(0, 0) + m(1, 1) + m(2, 2),
-        m(0, 0) - m(1, 1) - m(2, 2),
-        m(1, 1) - m(0, 0) - m(2, 2),
-        m(2, 2) - m(0, 0) - m(1, 1),
-    };
-    const auto biggest = std::ranges::max_element(candidates) - candidates.begin();
-    const float value = std::sqrt(candidates[biggest] + 1.f) * .5f;
-    const float scale = .25f / value;
-    quat result;
-    switch (biggest) {
-        case 0: result = {value, (m(1, 2) - m(2, 1)) * scale, (m(2, 0) - m(0, 2)) * scale, (m(0, 1) - m(1, 0)) * scale}; break;
-        case 1: result = {(m(1, 2) - m(2, 1)) * scale, value, (m(0, 1) + m(1, 0)) * scale, (m(2, 0) + m(0, 2)) * scale}; break;
-        case 2: result = {(m(2, 0) - m(0, 2)) * scale, (m(0, 1) + m(1, 0)) * scale, value, (m(1, 2) + m(2, 1)) * scale}; break;
-        case 3: result = {(m(0, 1) - m(1, 0)) * scale, (m(2, 0) + m(0, 2)) * scale, (m(1, 2) + m(2, 1)) * scale, value}; break;
-    }
-    const float norm = std::sqrt(result.w * result.w + result.x * result.x + result.y * result.y + result.z * result.z);
-    return {result.w / norm, result.x / norm, result.y / norm, result.z / norm};
-}
-
 // Assigns one quarter of each tetrahedron's volume to each vertex for rigid-body mass properties.
 // `scale` maps tet coordinates to node-local space; `length_to_si` maps lengths to meters.
-MassProperties ComputeMassProperties(const TetMesh &tets, double density, vec3 scale, double length_to_si) {
+MassProperties ComputeTetMassProperties(const TetMesh &tets, double density, vec3 scale, double length_to_si) {
     const size_t nverts = tets.Points.size();
     const dvec3 inv_scale{1.0 / scale.x, 1.0 / scale.y, 1.0 / scale.z};
     std::vector<dvec3> pos(nverts);
@@ -174,52 +152,11 @@ MassProperties ComputeMassProperties(const TetMesh &tets, double density, vec3 s
         for (int c = 0; c < 4; ++c) vol[t[c]] += quarter;
     }
 
-    double total = 0;
-    dvec3 com{0};
-    for (size_t i = 0; i < nverts; ++i) {
-        total += vol[i];
-        com += vol[i] * pos[i];
-    }
-    if (total <= 0) return {};
-    com /= total;
-
-    // Point-mass inertia sums vol*(|r|^2*I - r*r^T) about the center of mass.
-    // Conversion to SI scales this volume-length-squared integral by length_to_si^5.
-    const double s = length_to_si;
-    Eigen::Matrix3d inertia = Eigen::Matrix3d::Zero();
-    for (size_t i = 0; i < nverts; ++i) {
-        const dvec3 r = pos[i] - com;
-        const double rr = numeric::Dot(r, r);
-        inertia(0, 0) += vol[i] * (rr - r.x * r.x);
-        inertia(1, 1) += vol[i] * (rr - r.y * r.y);
-        inertia(2, 2) += vol[i] * (rr - r.z * r.z);
-        inertia(0, 1) -= vol[i] * r.x * r.y;
-        inertia(0, 2) -= vol[i] * r.x * r.z;
-        inertia(1, 2) -= vol[i] * r.y * r.z;
-    }
-    inertia(1, 0) = inertia(0, 1);
-    inertia(2, 0) = inertia(0, 2);
-    inertia(2, 1) = inertia(1, 2);
-    inertia *= density * s * s * s * s * s;
-
-    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(inertia);
-    const auto &evals = es.eigenvalues();
-    const auto &evecs = es.eigenvectors();
-    Eigen::Matrix3f axes = evecs.cast<float>();
-    if (axes.determinant() < 0) axes.col(0) = -axes.col(0);
-
-    return {
-        density * total * s * s * s,
-        vec3{com},
-        vec3{float(evals[0]), float(evals[1]), float(evals[2])},
-        QuaternionFromRotation(axes),
-    };
+    return modal::detail::ComputeMassProperties(pos, vol, density, length_to_si);
 }
 
-struct ComputeModesOpts {
+struct Tet10SolveOptions {
     modal::SolverConfig Config{};
-    std::vector<uint> ExPos{}; // Excitation positions
-    std::vector<vec3> Positions{}; // Node-local positions of each excitation position, parallel to ExPos
     AcousticMaterialProperties Material{};
     modal::SolveReuse Reuse{};
     modal::SolveMonitor *Monitor{};
@@ -294,18 +231,16 @@ struct Tet10BlockShiftInvert {
     }
 };
 
-ModalModes ComputeModes(
+modal::detail::GeneralizedEigenResult SolveTet10Eigenpairs(
     const modal::Tet10Assembler &fem,
     const Eigen::SparseMatrix<double> &M,
     const Eigen::SparseMatrix<double> &K,
-    uint num_vertices, uint vertex_dim,
-    ComputeModesOpts opts,
-    modal::SolveProfile &profile,
-    ModalEigenSummary &summary_out, Eigen::MatrixXf *basis_out
+    Tet10SolveOptions opts,
+    modal::SolveProfile &profile
 ) {
     using OpType = Tet10BlockShiftInvert;
     const auto &config = opts.Config;
-    const uint n = num_vertices * vertex_dim;
+    const uint n = fem.Dofs();
     const uint fem_n_modes = std::min(config.NumFemModes, n - 1);
     const uint basis_size = std::min(std::max(fem_n_modes + (n >= 100000 ? 30u : 20u), 20u), n);
     // A negative shift makes K - sigma*M positive definite and places the smallest eigenvalues nearest the shift.
@@ -349,34 +284,9 @@ ModalModes ComputeModes(
             profile.PhysicalResidual = subspace.RelativeResiduals.tail(fem_n_modes - first_physical).maxCoeff();
         profile.MassOrthogonality = subspace.MassOrthogonalityError;
     }
-    if (!subspace.Converged) return {};
+    if (!subspace.Converged) return subspace;
     profile.Iterate = SecondsSince(eig_start) - profile.Factorize;
-    const Eigen::VectorXd &eigenvalues = subspace.Eigenvalues;
-    const Eigen::MatrixXd &eigenvectors = subspace.Eigenvectors;
-    std::vector<std::vector<vec3>> shapes(opts.ExPos.size(), std::vector<vec3>(fem_n_modes));
-    for (size_t ex_pos = 0; ex_pos < shapes.size(); ++ex_pos) {
-        const uint ev_i = vertex_dim * opts.ExPos[ex_pos];
-        for (uint mode = 0; mode < fem_n_modes; ++mode) {
-            for (uint vi = 0; vi < vertex_dim; ++vi) shapes[ex_pos][mode][vi] = eigenvectors(ev_i + vi, mode);
-        }
-    }
-    summary_out.Eigenvalues = {eigenvalues.begin(), eigenvalues.end()};
-    summary_out.Shapes = shapes;
-    summary_out.SolvedMaterial = opts.Material;
-    if (basis_out) {
-        const Eigen::MatrixXd mass_vectors = M.selfadjointView<Eigen::Lower>() * eigenvectors;
-        const Eigen::MatrixXd stiffness_vectors = K.selfadjointView<Eigen::Lower>() * eigenvectors;
-        const Eigen::MatrixXd residual = stiffness_vectors - mass_vectors * eigenvalues.asDiagonal();
-        for (uint32_t mode = 0; mode < fem_n_modes; ++mode) {
-            if (std::abs(eigenvalues[mode]) <= -sigma * 1e-4) continue;
-            const double scale = stiffness_vectors.col(mode).norm() + std::abs(eigenvalues[mode]) * mass_vectors.col(mode).norm();
-            profile.PhysicalResidual = std::max(profile.PhysicalResidual, residual.col(mode).norm() / scale);
-        }
-        profile.MassOrthogonality = (eigenvectors.transpose() * mass_vectors - Eigen::MatrixXd::Identity(fem_n_modes, fem_n_modes)).norm();
-        *basis_out = eigenvectors.cast<float>();
-    }
-
-    return modal::PostprocessModes(summary_out.Eigenvalues, shapes, 1.f, opts.Material, config, std::move(opts.Positions));
+    return subspace;
 }
 } // namespace
 
@@ -461,12 +371,23 @@ std::optional<ModalModes> modal::RescaleModes(const ModalEigenSummary &summary, 
     return modes;
 }
 
+modal::ModalResult modal::detail::MakeModalResult(std::vector<double> eigenvalues, std::vector<std::vector<vec3>> shapes, const AcousticMaterialProperties &material, const SolverConfig &config, std::vector<vec3> positions, vec3 baked_scale, MassProperties mass_properties, SolveProfile profile, Eigen::MatrixXf basis, std::vector<uint32_t> sample_point_of) {
+    ModalEigenSummary summary{
+        .Eigenvalues = std::move(eigenvalues),
+        .Shapes = std::move(shapes),
+        .SolvedMaterial = material,
+    };
+    auto modes = PostprocessModes(summary.Eigenvalues, summary.Shapes, 1, material, config, std::move(positions));
+    modes.BakedScale = baked_scale;
+    return {std::move(modes), std::move(mass_properties), profile, std::move(summary), std::move(basis), std::move(sample_point_of)};
+}
+
 modal::ModalResult modal::mesh2modes(const TetMesh &input_tets, const AcousticMaterialProperties &material, const std::vector<vec3> &excite_positions, vec3 baked_scale, SolverConfig config, SolveReuse reuse, SolveMonitor *monitor) {
     const TetMesh tets = FilterDegenerate(input_tets);
     SolveProfile profile;
     auto &cache = reuse.Cache ? *reuse.Cache : DefaultSolveCache();
     const double length_to_si = (double(baked_scale.x) + baked_scale.y + baked_scale.z) / 3.0;
-    auto mass_props = Timed(profile.MassProps, [&] { return ComputeMassProperties(tets, material.Density, baked_scale, length_to_si); });
+    auto mass_props = Timed(profile.MassProps, [&] { return ComputeTetMassProperties(tets, material.Density, baked_scale, length_to_si); });
 
     if (monitor) monitor->Progress.store(0.1f, std::memory_order_relaxed);
     const auto topology = Timed(profile.QuadMesh, [&] { return AcquireTopology(cache, tets, profile.TopologyReuse); });
@@ -505,16 +426,24 @@ modal::ModalResult modal::mesh2modes(const TetMesh &input_tets, const AcousticMa
         }
         return std::tuple{std::move(points), std::move(local), std::move(remap)};
     });
-    ModalEigenSummary summary;
+    const auto eigenpairs = SolveTet10Eigenpairs(
+        fem, M, K,
+        {
+            .Config = config,
+            .Material = material,
+            .Reuse = reuse,
+            .Monitor = monitor,
+        },
+        profile
+    );
+    if (!eigenpairs.Converged) return {.MassProps = std::move(mass_props), .Profile = profile};
+
+    std::vector<std::vector<vec3>> shapes(excite_points.size(), std::vector<vec3>(eigenpairs.Eigenvalues.size()));
+    for (size_t point = 0; point < excite_points.size(); ++point)
+        for (Eigen::Index mode = 0; mode < eigenpairs.Eigenvalues.size(); ++mode)
+            for (uint component = 0; component < 3; ++component)
+                shapes[point][size_t(mode)][component] = eigenpairs.Eigenvectors(3 * excite_points[point] + component, mode);
     Eigen::MatrixXf basis;
-    auto modes = ComputeModes(fem, M, K, fem.NumNodes, 3, {
-                                                              .Config = std::move(config),
-                                                              .ExPos = std::move(excite_points),
-                                                              .Positions = std::move(positions),
-                                                              .Material = material,
-                                                              .Reuse = reuse,
-                                                              .Monitor = monitor,
-                                                          },
-                              profile, summary, reuse.KeepBasis ? &basis : nullptr);
-    return {std::move(modes), std::move(mass_props), profile, std::move(summary), std::move(basis), std::move(sample_point_of)};
+    if (reuse.KeepBasis) basis = eigenpairs.Eigenvectors.cast<float>();
+    return detail::MakeModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config, std::move(positions), baked_scale, std::move(mass_props), profile, std::move(basis), std::move(sample_point_of));
 }
