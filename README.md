@@ -1,6 +1,7 @@
 # FastFEM
 
-FastFEM is an Apple-Silicon finite-element library for tetrahedralization, modal analysis, and immersed finite-cell solves. Its first FEM code was [copied from MeshEditor at `b1dbf2c`](https://github.com/khiner/MeshEditor/commit/b1dbf2c94398e3287c4aa48e8e3c7786e5376829).
+FastFEM is an Apple-Silicon finite-element library for tetrahedralization, modal analysis, and immersed finite-cell solves.
+The project began with FEM code from [MeshEditor commit `b1dbf2c`](https://github.com/khiner/MeshEditor/commit/b1dbf2c94398e3287c4aa48e8e3c7786e5376829).
 
 ## Build
 
@@ -13,7 +14,8 @@ cmake --build build
 ctest --test-dir build --output-on-failure -j1
 ```
 
-The standalone Metal toolchain is optional. When it is available, CMake embeds a precompiled metallib and can load a binary pipeline archive instead of compiling production kernels at runtime:
+The optional standalone Metal toolchain lets CMake embed a precompiled metallib.
+When `metal-tt` is available, CMake also loads a binary pipeline archive instead of compiling production kernels at runtime:
 
 ```sh
 xcodebuild -downloadComponent MetalToolchain
@@ -25,9 +27,18 @@ FastFEM provides two discretizations with independent accuracy and certification
 
 ### Tet10
 
-`mesh2modes` accepts a quadratic tetrahedral mesh and solves the generalized elastic eigenproblem in FP64. It supports reusable solve state and geometry-compatible eigenvector seeds for repeated modal synthesis after material or geometry changes.
+`mesh2modes` accepts a quadratic tetrahedral volume mesh and assembles stiffness and mass directly into a 3-by-3 block pencil.
+It factors the pencil with relaxed-supernodal Cholesky and solves the FP64 generalized elastic eigenproblem.
+Spectra drives shift-invert iteration, while Accelerate supplies fill-reducing ordering and dense BLAS/LAPACK kernels.
 
-The public entry point and its supporting configuration live in `src/audio/mesh2modes.h`. `FastFEMModalSolve` runs the complete watertight-surface-to-modal-model chain:
+Pass a `SolveCache` to preserve the block pencil and symbolic factorization between compatible solve calls.
+`mesh2modes` can seed a guarded block-subspace re-solve with modes from a geometry-compatible prior solution.
+Scalar Eigen matrices provide mass actions and independent certification.
+
+#### Usage
+
+`src/audio/mesh2modes.h` declares the C++ API.
+`FastFEMModalSolve` runs the complete watertight-surface-to-modal-model pipeline:
 
 ```sh
 ./build/FastFEMModalSolve model.obj
@@ -35,7 +46,8 @@ The public entry point and its supporting configuration live in `src/audio/mesh2
 
 ### Finite cell
 
-`SolveFiniteCellBlock` operates directly on an implicit domain or a watertight triangle surface embedded in a Cartesian Q1/Q2 background grid. Its matrix-free path combines:
+`SolveFiniteCellBlock` operates on an implicit domain or a watertight triangle surface embedded in a Cartesian Q2 background grid.
+Its matrix-free path combines:
 
 - signed moment-fitted cut integration;
 - vectorized paired FP64 mass and shifted actions with exact packed cut operators;
@@ -45,9 +57,11 @@ The public entry point and its supporting configuration live in `src/audio/mesh2
 - compact FP32 recurrence history with FP64 Ritz algebra and certification;
 - precompiled Metal kernels and a binary pipeline archive when the installed toolchain supports them.
 
-Every returned result is checked with physical FP64 residuals and mass orthogonality. If the factor-free Metal attempt stagnates or misses that contract, the same API falls back to assembled FP64 Cholesky shift-invert. `SolveFiniteCellBlockCholesky` provides the assembled reference route used by correctness tests.
-
-The default route does not branch on geometry or problem size. It attempts the factor-free route first and routes only on measured certification. If neither stage certifies within the supplied iteration budget, it throws instead of returning an unverified spectrum.
+`SolveFiniteCellBlock` checks every result against physical FP64 residual and mass-orthogonality bounds.
+It applies the same factor-free solver to every geometry and problem size.
+Certification failure selects assembled FP64 Cholesky shift-invert.
+If neither solver certifies within the supplied iteration budget, `SolveFiniteCellBlock` returns an error.
+`src/audio/FiniteCellOracle.h` exposes the fixed four-guard Cholesky solver to validation code.
 
 ## Correctness corpus
 
@@ -63,12 +77,25 @@ The CTest suite includes:
 - 128-mode torus and 256-mode tapered-key fallback/determinism stresses;
 - the 110-object tetrahedralizer snapshot corpus when installed.
 
-Neither Tet10 nor finite cell is treated as ground truth for the other. Tests use analytical frequencies and sampled analytical eigenspaces where they exist. Other cases require independently evaluated physical residuals, mass orthogonality, agreement with a same-discretization assembled FP64 oracle, and cluster-aware sampled-subspace MAC. Cross-discretization agreement is a secondary diagnostic.
+The test suite evaluates Tet10 and finite cell independently.
+Tests use analytical frequencies and sampled analytical eigenspaces where they exist.
+Other cases measure physical residuals and mass orthogonality, compare against an assembled FP64 oracle, and evaluate cluster-aware sampled-subspace MAC.
+Cross-discretization agreement provides a secondary diagnostic.
 
-The audio-scale corpus can also be run directly:
+### Audio-scale corpus
 
 ```sh
 ./build/FastFEMFiniteCellAudioCorpus 6 128 all
+```
+
+### Sparse-backend benchmark
+
+The benchmark accepts structured or tetrahedralized Tet10 inputs, repetition counts, backend selection, and panel widths.
+`/usr/bin/time -l` reports peak memory for one backend process:
+
+```sh
+./build/FastFEMBlockSparseBenchmark --tet 34 17 11 5 native 16
+./build/FastFEMBlockSparseBenchmark --obj model.obj 5 all 16
 ```
 
 The dedicated resolution-eight 256-mode tapered-key stress is part of `FastFEMFiniteCellConsolidationTest`.
@@ -81,14 +108,17 @@ cmake -S . -B build -DFASTFEM_TET_CORPUS_DIR="$PWD/external/TetCorpus"
 ctest --test-dir build -R 'FastFEMTetCorpus|FastFEMFiniteCellRealMeshConsolidation' --output-on-failure -j1
 ```
 
-`FASTFEM_REALIMPACT_DATASET_DIR` enables optional RealImpact cases. Missing external corpora report a skip rather than silently reducing a selected corpus.
+Set `FASTFEM_REALIMPACT_DATASET_DIR` to enable optional RealImpact cases.
+Tests report missing external corpora as skipped cases.
 
 ## Determinism
 
-FastFEM sets `VECLIB_MAXIMUM_THREADS=1` before the first Accelerate sparse factor. This makes spectra, eigenspaces, certification, and routing repeatable for the same inputs on the same machine. A host that explicitly accepts nondeterministic sparse reductions may opt in only at configure time:
+FastFEM constrains Accelerate sparse work to one thread before the first factorization.
+Single-threaded sparse execution produces repeatable spectra, eigenspaces, certification, and solver selection for identical inputs on one machine.
 
 ```sh
 cmake -S . -B build -DFASTFEM_PARALLEL_SPARSE=ON
 ```
 
-There is no late mutable C++ switch, so a process cannot accidentally change factorization policy after Accelerate has initialized.
+The C++ API fixes the factorization policy before Accelerate initializes.
+Enable parallel sparse execution only when throughput takes priority over bitwise repeatability across processes.
