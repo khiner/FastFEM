@@ -5,6 +5,7 @@
 #include "audio/CholeskyShiftInvert.h"
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellBlockEigensolver.h"
+#include "audio/FiniteCellOracle.h"
 
 #include <boost/ut.hpp>
 
@@ -37,7 +38,6 @@ suite ConsolidationTests = [] {
             domain, {.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19},
             {
                 .Cells = finite_cell_benchmark::GridResolution(geometry, 8),
-                .Order = 2,
                 .CutDepth = 2,
                 .FictitiousScale = 1e-8,
                 .PaddingCells = 0.25,
@@ -102,7 +102,6 @@ suite ConsolidationTests = [] {
             domain, {.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19},
             {
                 .Cells = finite_cell_benchmark::GridResolution(geometry, 6),
-                .Order = 2,
                 .CutDepth = 2,
                 .FictitiousScale = 1e-8,
                 .PaddingCells = 0.25,
@@ -146,13 +145,12 @@ suite ConsolidationTests = [] {
             domain, {.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19},
             {
                 .Cells = finite_cell_benchmark::GridResolution(geometry, 48),
-                .Order = 2,
                 .CutDepth = 2,
                 .FictitiousScale = 1e-8,
                 .PaddingCells = 0.25,
             }
         );
-        const auto result = modal::SolveFiniteCellBlockCholesky(operation, ModeCount, Shift, 1e-8, 100);
+        const auto result = modal::oracle::SolveCholesky(operation, ModeCount, Shift, 1e-8, 100);
         expect(result.Eigenvalues.size() == Eigen::Index(ModeCount));
         if (result.Eigenvalues.size() != ModeCount) return;
         const double residual = result.Certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();
@@ -180,7 +178,6 @@ suite ConsolidationTests = [] {
                 domain, material,
                 {
                     .Cells = finite_cell_benchmark::GridResolution(geometry, entry.Resolution),
-                    .Order = 2,
                     .CutDepth = 2,
                     .FictitiousScale = entry.FictitiousScale,
                     .PaddingCells = 0.25,

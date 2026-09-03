@@ -359,7 +359,6 @@ struct modal::FiniteCellMetal::Implementation {
         uint32_t Rows{}, CoarseRows{};
         float Maximum{};
     };
-
     id<MTLDevice> Device;
     id<MTLCommandQueue> Queue;
     id<MTLComputePipelineState> ClearPipeline, SmootherPipeline, JacobiUpdatePipeline;
@@ -368,14 +367,16 @@ struct modal::FiniteCellMetal::Implementation {
     id<MTLComputePipelineState> CooperativeWideBatchedPackedCellMatrixPipeline, CellMatrixScatterPipeline;
     id<MTLBuffer> Cells, CellIndices, LocalizedCells, P1Stencils, P1Offsets, P1Occurrences;
     mutable std::vector<MultigridLevel> Multigrid;
+    mutable std::vector<id<MTLBuffer>> MultigridScratch;
     mutable id<MTLBuffer> PackedPatchInverses, PackedElementMatrices, Scratch;
-    mutable size_t ScratchCapacity{};
+    mutable id<MTLBuffer> PatchDelta, PatchAction;
+    mutable size_t ScratchCapacity{}, MultigridScratchCursor{};
     // Upload and download delimit one command buffer, amortizing submission across a preconditioner application.
     mutable id<MTLCommandBuffer> PendingCommand;
     std::array<uint32_t, 9> ColorOffsets{};
     std::array<std::array<uint32_t, 9>, 8> LocalizedOffsets{};
     std::vector<uint32_t> CellOrder;
-    uint32_t NumNodes{}, NumP1Nodes{}, NodesPerCell{};
+    uint32_t NumNodes{}, NumP1Nodes{};
 
     id<MTLCommandBuffer> Command() const {
         if (!PendingCommand) {
@@ -386,11 +387,19 @@ struct modal::FiniteCellMetal::Implementation {
     }
 
     void ReserveScratch(uint32_t width) const {
-        const size_t bytes = CellOrder.size() * width * 3 * NodesPerCell * sizeof(float);
+        const size_t bytes = CellOrder.size() * width * 3 * FiniteCellOperator::NodesPerCell * sizeof(float);
         if (bytes <= ScratchCapacity) return;
         Scratch = [Device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
         if (!Scratch) throw MetalError(@"Allocating finite-cell Metal cell scratch failed");
         ScratchCapacity = bytes;
+    }
+
+    void ReservePatchBlocks(uint32_t rows, uint32_t width) const {
+        const size_t bytes = size_t(rows) * width * sizeof(float);
+        if (PatchDelta.length >= bytes && PatchAction.length >= bytes) return;
+        PatchDelta = [Device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+        PatchAction = [Device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+        if (!PatchDelta || !PatchAction) throw MetalError(@"Allocating finite-cell Metal patch blocks failed");
     }
 };
 
@@ -501,13 +510,13 @@ modal::FiniteCellMetal::FiniteCellMetal(const FiniteCellOperator &operation) : I
         for (uint8_t source_color = 0; source_color < 8; ++source_color) {
             std::fill(source_nodes.begin(), source_nodes.end(), uint8_t{});
             for (uint32_t source = Impl->ColorOffsets[source_color]; source < Impl->ColorOffsets[source_color + 1]; ++source)
-                for (uint32_t local = 0; local < operation.NodesPerCell; ++local)
+                for (uint32_t local = 0; local < FiniteCellOperator::NodesPerCell; ++local)
                     source_nodes[cells[source].Nodes[local]] = 1;
             for (uint8_t output_color = 0; output_color < 8; ++output_color) {
                 Impl->LocalizedOffsets[source_color][output_color] = uint32_t(localized_cells.size());
                 for (uint32_t target = Impl->ColorOffsets[output_color]; target < Impl->ColorOffsets[output_color + 1]; ++target) {
                     bool affected{};
-                    for (uint32_t local = 0; local < operation.NodesPerCell; ++local)
+                    for (uint32_t local = 0; local < FiniteCellOperator::NodesPerCell; ++local)
                         affected |= source_nodes[cells[target].Nodes[local]];
                     if (affected) localized_cells.push_back(target);
                 }
@@ -546,7 +555,6 @@ modal::FiniteCellMetal::FiniteCellMetal(const FiniteCellOperator &operation) : I
         Impl->P1Occurrences = buffer(p1_occurrences.data(), p1_occurrences.size() * sizeof(P1Occurrence));
         Impl->NumNodes = uint32_t(operation.Nodes.size());
         Impl->NumP1Nodes = operation.NumP1Nodes;
-        Impl->NodesPerCell = operation.NodesPerCell;
     }
 }
 
@@ -791,6 +799,7 @@ void modal::FiniteCellMetal::ConfigureP1Multigrid(P1Multigrid &&prepared) const 
     const auto &hierarchy = prepared.Impl->Levels;
     Synchronize();
     Impl->Multigrid.clear();
+    Impl->MultigridScratch.clear();
     Impl->Multigrid.resize(hierarchy.size());
     @autoreleasepool {
         const auto buffer = [&](const void *bytes, size_t size) {
@@ -843,13 +852,20 @@ void modal::FiniteCellMetal::ApplyP1Multigrid(
     if (Impl->Multigrid.empty() || input.Rows != Impl->Multigrid.front().Rows)
         throw std::runtime_error("Finite-cell Metal P1 hierarchy is not configured for these blocks.");
     if (!input.Width) return;
+    Impl->MultigridScratchCursor = 0;
     const auto create = [&](uint32_t rows) {
         Block result;
         result.Rows = rows;
         result.Width = input.Width;
         const size_t bytes = size_t(rows) * input.Width * sizeof(float);
-        result.Impl->Buffer = [Impl->Device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
-        if (!result.Impl->Buffer) throw MetalError(@"Allocating finite-cell Metal multigrid block failed");
+        if (Impl->MultigridScratchCursor == Impl->MultigridScratch.size())
+            Impl->MultigridScratch.emplace_back();
+        auto &buffer = Impl->MultigridScratch[Impl->MultigridScratchCursor++];
+        if (buffer.length < bytes) {
+            buffer = [Impl->Device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+            if (!buffer) throw MetalError(@"Allocating finite-cell Metal multigrid block failed");
+        }
+        result.Impl->Buffer = buffer;
         return result;
     };
     @autoreleasepool {
@@ -965,7 +981,7 @@ void modal::FiniteCellMetal::LinearCombination(
 void modal::FiniteCellMetal::ConfigurePackedPatch(
     SharedFloats inverse_matrices, std::span<const double> element_matrices
 ) const {
-    const uint32_t local_dofs = 3 * Impl->NodesPerCell;
+    constexpr uint32_t local_dofs = 3 * FiniteCellOperator::NodesPerCell;
     const size_t values_per_cell = size_t(local_dofs) * (local_dofs + 1) / 2;
     const size_t matrix_values = Impl->CellOrder.size() * values_per_cell;
     if (inverse_matrices.Size != matrix_values || element_matrices.size() != matrix_values)
@@ -992,7 +1008,7 @@ void modal::FiniteCellMetal::ApplyElement(const Block &input, Block &output) con
         throw std::logic_error("Finite-cell Metal element operators have not been configured.");
     if (!input.Width) return;
     @autoreleasepool {
-        const uint32_t local_dofs = 3 * Impl->NodesPerCell;
+        constexpr uint32_t local_dofs = 3 * FiniteCellOperator::NodesPerCell;
         Impl->ReserveScratch(input.Width);
         id<MTLCommandBuffer> command = Impl->Command();
         id<MTLComputeCommandEncoder> pass = [command computeCommandEncoder];
@@ -1032,10 +1048,10 @@ void modal::FiniteCellMetal::ApplyPackedLocalizedMultiplicativePatchSweep(
         throw std::invalid_argument("Finite-cell Metal multiplicative sweep requires distinct blocks.");
     if (!input.Width) return;
     @autoreleasepool {
-        const uint32_t local_dofs = 3 * Impl->NodesPerCell;
+        constexpr uint32_t local_dofs = 3 * FiniteCellOperator::NodesPerCell;
         Impl->ReserveScratch(input.Width);
-        const auto delta_block = CreateBlock(input.Width), action_block = CreateBlock(input.Width);
-        id<MTLBuffer> delta = delta_block.Impl->Buffer, action = action_block.Impl->Buffer;
+        Impl->ReservePatchBlocks(input.Rows, input.Width);
+        id<MTLBuffer> delta = Impl->PatchDelta, action = Impl->PatchAction;
         id<MTLCommandBuffer> command = Impl->Command();
         id<MTLBlitCommandEncoder> copy = [command blitCommandEncoder];
         [copy copyFromBuffer:input.Impl->Buffer

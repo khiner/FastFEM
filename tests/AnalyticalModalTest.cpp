@@ -395,7 +395,7 @@ SampledFinite SolveFiniteAndSample(
 ) {
     const auto finite = modal::BuildFiniteCellOperator(
         domain, Material,
-        {.Cells = cells, .Order = 2, .CutDepth = cut_depth, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
+        {.Cells = cells, .CutDepth = cut_depth, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
     );
     const double shift = std::pow(2 * std::numbers::pi * 20, 2);
     const auto modes = modal::SolveFiniteCellBlock(finite, count, shift, 1e-8, 300);

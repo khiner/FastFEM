@@ -26,8 +26,4 @@ FiniteCellBlockResult SolveFiniteCellBlock(
     const FiniteCellOperator &, uint32_t count, double alpha,
     double tolerance = 1e-8, uint32_t max_iterations = 100
 );
-FiniteCellBlockResult SolveFiniteCellBlockCholesky(
-    const FiniteCellOperator &, uint32_t count, double alpha,
-    double tolerance = 1e-8, uint32_t max_iterations = 100
-);
 } // namespace modal

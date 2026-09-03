@@ -30,7 +30,7 @@ bool Run(std::string_view name, uint32_t longitudinal, uint32_t count) {
     const uvec3 cells = finite_cell_benchmark::GridResolution(geometry, longitudinal);
     const auto operation = modal::BuildFiniteCellOperator(
         domain, Material,
-        {.Cells = cells, .Order = 2, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
+        {.Cells = cells, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
     );
     if (count + 4 >= operation.Dofs())
         throw std::invalid_argument("Audio-corpus mode count leaves no guard-vector space for " + std::string{name} + ".");

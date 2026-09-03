@@ -20,10 +20,7 @@ struct ReferenceModes {
 inline ReferenceModes AssembledOracle(const modal::FiniteCellOperator &operation, uint32_t count, double shift) {
     const auto assembled = operation.AssembleLower();
     double factor_seconds{}, solve_seconds{};
-    CholeskyShiftInvert inverse{
-        assembled.Stiffness, assembled.Mass, factor_seconds, solve_seconds,
-        SparseOrdering::Metis, SparseStorage::Block3
-    };
+    CholeskyShiftInvert inverse{assembled.Stiffness, assembled.Mass, factor_seconds, solve_seconds};
     Spectra::SparseSymMatProd<double> mass{assembled.Mass};
     const uint32_t basis = std::min<uint32_t>(operation.Dofs(), std::max(2 * count + 20, count + 40));
     Spectra::SymGEigsShiftSolver<CholeskyShiftInvert, Spectra::SparseSymMatProd<double>, Spectra::GEigsMode::ShiftInvert> eigensolver{

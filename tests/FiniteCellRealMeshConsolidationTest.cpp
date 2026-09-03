@@ -124,7 +124,7 @@ RunResult Run(const fs::path &path, uint32_t resolution, uint32_t max_iterations
     const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
     const auto operation = modal::BuildFiniteCellOperator(
         domain, Material,
-        {.Cells = cells, .Order = 2, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
+        {.Cells = cells, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
     );
     if (operation.Dofs() <= SolvedModeCount + 4) throw std::runtime_error("grid has insufficient degrees of freedom");
     const auto reference = finite_cell_benchmark::AssembledOracle(operation, SolvedModeCount, Shift);

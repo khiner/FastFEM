@@ -13,16 +13,13 @@
 #include <vector>
 
 namespace modal {
-// Negative inside, positive outside. Triangle surfaces must be closed and non-self-intersecting.
-// Bounds tightly enclose the physical domain; the background grid adds a fractional-cell margin.
 enum struct DomainRegion { Inside,
                            Outside,
                            Cut };
-enum struct TriangleQuery { Hierarchy,
-                            Linear };
-enum struct CutQuadrature { Octree,
-                            MomentFitted };
 
+// Signed distances are negative inside and positive outside.
+// Min and Max tightly bound the physical domain before PaddingCells expands the background grid.
+// Triangle surfaces must be watertight and non-self-intersecting.
 struct ImplicitDomain {
     dvec3 Min{}, Max{};
     std::function<double(const dvec3 &)> SignedDistance;
@@ -33,19 +30,14 @@ ImplicitDomain MakeBoxDomain(dvec3 min, dvec3 max);
 ImplicitDomain MakeSphereDomain(dvec3 center, double radius);
 ImplicitDomain MakeSphericalShellDomain(dvec3 center, double inner_radius, double outer_radius);
 ImplicitDomain MakeCylinderDomain(dvec3 center, double radius, double length);
-ImplicitDomain MakeTriangleSurfaceDomain(
-    std::span<const dvec3> points, std::span<const uint32_t> triangle_indices,
-    TriangleQuery query = TriangleQuery::Hierarchy
-);
+ImplicitDomain MakeTriangleSurfaceDomain(std::span<const dvec3> points, std::span<const uint32_t> triangle_indices);
 
 struct FiniteCellConfig {
     uvec3 Cells{12, 12, 12};
-    uint32_t Order{1}; // Tensor-product Q1 or Q2 basis
     uint32_t CutDepth{3};
     double FictitiousScale{1e-8};
     double PaddingCells{0.25};
     dvec3 GridOffsetCells{};
-    CutQuadrature CutQuadratureRule{CutQuadrature::MomentFitted};
 };
 
 struct FiniteCellProfile {
@@ -55,7 +47,7 @@ struct FiniteCellProfile {
 };
 
 struct FiniteCellOperator {
-    static constexpr uint32_t MaximumNodesPerCell{27};
+    static constexpr uint32_t NodesPerCell{27};
 
     struct P1Stencil {
         std::array<uint32_t, 8> Nodes{};
@@ -70,7 +62,7 @@ struct FiniteCellOperator {
     };
 
     struct Cell {
-        std::array<uint32_t, MaximumNodesPerCell> Nodes{};
+        std::array<uint32_t, NodesPerCell> Nodes{};
         dvec3 InverseHalf{};
         uint32_t QuadratureOffset{}, QuadratureCount{}, OracleQuadratureCount{};
         uint8_t Color{}, Cut{}, MomentFitted{}, MomentFitFallback{};
@@ -96,7 +88,7 @@ struct FiniteCellOperator {
     std::vector<uint32_t> NodeOccurrenceOffsets;
     std::vector<uint32_t> NodeOccurrences;
     FiniteCellProfile Profile;
-    uint32_t Order{}, NodesPerCell{}, NumP1Nodes{};
+    uint32_t NumP1Nodes{};
     double Density{}, Lambda{}, Mu{}, FictitiousScale{};
 
     uint32_t Dofs() const { return 3 * uint32_t(Nodes.size()); }
@@ -122,20 +114,12 @@ struct FiniteCellOperator {
     Eigen::SparseMatrix<double> AssembleP1ShiftedLower(double alpha) const;
 };
 
-struct FiniteCellSystem {
-    Eigen::SparseMatrix<double> Mass;
-    Eigen::SparseMatrix<double> Stiffness;
-    std::vector<dvec3> Nodes;
-    FiniteCellProfile Profile;
-};
-
 struct FiniteCellCertification {
     Eigen::VectorXd RelativeResiduals;
     double MassOrthogonalityError{};
 };
 
 FiniteCellOperator BuildFiniteCellOperator(const ImplicitDomain &, const AcousticMaterialProperties &, FiniteCellConfig = {});
-FiniteCellSystem AssembleFiniteCells(const ImplicitDomain &, const AcousticMaterialProperties &, FiniteCellConfig = {});
 FiniteCellCertification CertifyFiniteCellEigenpairs(
     const FiniteCellOperator &, const Eigen::VectorXd &eigenvalues, const Eigen::MatrixXd &eigenvectors
 );

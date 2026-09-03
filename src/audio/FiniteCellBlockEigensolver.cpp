@@ -4,6 +4,7 @@
 
 #include "CholeskyShiftInvert.h"
 #include "FiniteCellMetal.h"
+#include "FiniteCellOracle.h"
 #include "SparseCholesky.h"
 #include "numeric/Accelerate.h"
 
@@ -30,7 +31,8 @@
 
 namespace {
 using Clock = std::chrono::steady_clock;
-constexpr uint32_t P1MetisDofs{8192};
+constexpr uint32_t LocalDofs{3 * modal::FiniteCellOperator::NodesPerCell};
+constexpr size_t PackedLocalValues{size_t(LocalDofs) * (LocalDofs + 1) / 2};
 
 double SecondsSince(Clock::time_point start) {
     return std::chrono::duration<double>(Clock::now() - start).count();
@@ -211,14 +213,9 @@ Eigen::MatrixXd InitialSpace(
     const uint32_t count = std::min<uint32_t>(width, 3 * fem.NumP1Nodes - 1);
     if (count == 0 || count >= p1.Mass.rows()) return result;
 
-    const bool large = p1.Mass.rows() >= P1MetisDofs;
     const uint32_t basis_size = std::min<uint32_t>(p1.Mass.rows(), std::max<uint32_t>(count + 20, 20));
     double factor_seconds{}, solve_seconds{};
-    CholeskyShiftInvert operation{
-        p1.Stiffness, p1.Mass, factor_seconds, solve_seconds,
-        large ? SparseOrdering::Metis : SparseOrdering::Default,
-        large ? SparseStorage::Block3 : SparseStorage::Scalar
-    };
+    CholeskyShiftInvert operation{p1.Stiffness, p1.Mass, factor_seconds, solve_seconds};
     Spectra::SparseSymMatProd<double> mass{p1.Mass};
     Spectra::SymGEigsShiftSolver<CholeskyShiftInvert, Spectra::SparseSymMatProd<double>, Spectra::GEigsMode::ShiftInvert> eigensolver{
         operation, mass, int(count), int(basis_size), -alpha
@@ -238,25 +235,21 @@ struct MetalPatchData {
 
 MetalPatchData BuildMetalPatchData(const modal::FiniteCellOperator &fem, double alpha) {
     MetalPatchData result;
-    const uint32_t local_dofs = 3 * fem.NodesPerCell;
-    const size_t matrix_values = size_t(local_dofs) * (local_dofs + 1) / 2;
-    std::vector<double> elements(fem.Cells.size() * matrix_values);
+    std::vector<double> elements(fem.Cells.size() * PackedLocalValues);
     struct ElementContext {
         const modal::FiniteCellOperator &Fem;
         std::vector<double> &Elements;
-        uint32_t LocalDofs;
         double Alpha;
-    } element_context{fem, elements, local_dofs, alpha};
+    } element_context{fem, elements, alpha};
     dispatch_apply_f(
         fem.Cells.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &element_context,
         [](void *raw, size_t cell) {
             auto &context = *static_cast<ElementContext *>(raw);
-            const size_t values = size_t(context.LocalDofs) * (context.LocalDofs + 1) / 2;
-            context.Fem.PackCellShiftedLower(uint32_t(cell), context.Alpha, {context.Elements.data() + cell * values, values});
+            context.Fem.PackCellShiftedLower(uint32_t(cell), context.Alpha, {context.Elements.data() + cell * PackedLocalValues, PackedLocalValues});
         }
     );
     result.CutActions = fem.BuildPackedCutOperators(alpha, elements);
-    result.Inverses = modal::FiniteCellMetal::SharedFloats{fem.Cells.size() * matrix_values};
+    result.Inverses = modal::FiniteCellMetal::SharedFloats{fem.Cells.size() * PackedLocalValues};
     std::vector<uint32_t> destination(fem.Cells.size());
     uint32_t next{};
     for (uint8_t color = 0; color < 8; ++color)
@@ -268,17 +261,16 @@ MetalPatchData BuildMetalPatchData(const modal::FiniteCellOperator &fem, double 
         const std::vector<double> &Elements;
         MetalPatchData &Result;
         std::span<const uint32_t> Destination;
-        uint32_t LocalDofs;
         std::atomic<bool> Failed{}, InvalidNeighborhood{};
-    } context{fem, elements, result, destination, local_dofs};
+    } context{fem, elements, result, destination};
     dispatch_apply_f(
         fem.Cells.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &context,
         [](void *raw, size_t cell) {
             auto &context = *static_cast<PatchContext *>(raw);
             const auto &target = context.Fem.Cells[cell];
-            std::array<uint32_t, modal::FiniteCellOperator::MaximumNodesPerCell> neighbors;
+            std::array<uint32_t, modal::FiniteCellOperator::NodesPerCell> neighbors;
             uint32_t neighbor_count{};
-            for (uint32_t local = 0; local < context.Fem.NodesPerCell; ++local) {
+            for (uint32_t local = 0; local < modal::FiniteCellOperator::NodesPerCell; ++local) {
                 const uint32_t node = target.Nodes[local];
                 for (uint32_t entry = context.Fem.NodeOccurrenceOffsets[node];
                      entry < context.Fem.NodeOccurrenceOffsets[node + 1]; ++entry) {
@@ -292,21 +284,20 @@ MetalPatchData BuildMetalPatchData(const modal::FiniteCellOperator &fem, double 
                     neighbors[neighbor_count++] = neighbor;
                 }
             }
-            Eigen::MatrixXd principal = Eigen::MatrixXd::Zero(context.LocalDofs, context.LocalDofs);
+            Eigen::MatrixXd principal = Eigen::MatrixXd::Zero(LocalDofs, LocalDofs);
             for (const uint32_t neighbor : std::span{neighbors}.first(neighbor_count)) {
                 const auto &source = context.Fem.Cells[neighbor];
-                std::array<int32_t, modal::FiniteCellOperator::MaximumNodesPerCell> target_local;
+                std::array<int32_t, modal::FiniteCellOperator::NodesPerCell> target_local;
                 target_local.fill(-1);
-                for (uint32_t source_local = 0; source_local < context.Fem.NodesPerCell; ++source_local) {
-                    const auto first = target.Nodes.begin(), last = first + context.Fem.NodesPerCell;
+                for (uint32_t source_local = 0; source_local < modal::FiniteCellOperator::NodesPerCell; ++source_local) {
+                    const auto first = target.Nodes.begin(), last = target.Nodes.end();
                     const auto found = std::find(first, last, source.Nodes[source_local]);
                     if (found != last) target_local[source_local] = int32_t(found - first);
                 }
-                const size_t element_offset = size_t(neighbor) * context.LocalDofs *
-                    (context.LocalDofs + 1) / 2;
-                for (uint32_t a = 0; a < context.Fem.NodesPerCell; ++a) {
+                const size_t element_offset = size_t(neighbor) * PackedLocalValues;
+                for (uint32_t a = 0; a < modal::FiniteCellOperator::NodesPerCell; ++a) {
                     if (target_local[a] < 0) continue;
-                    for (uint32_t c = 0; c < context.Fem.NodesPerCell; ++c) {
+                    for (uint32_t c = 0; c < modal::FiniteCellOperator::NodesPerCell; ++c) {
                         if (target_local[c] < 0) continue;
                         for (uint32_t p = 0; p < 3; ++p)
                             for (uint32_t q = 0; q < 3; ++q) {
@@ -324,12 +315,9 @@ MetalPatchData BuildMetalPatchData(const modal::FiniteCellOperator &fem, double 
                 context.Failed = true;
                 return;
             }
-            const Eigen::MatrixXd inverse = factor.solve(
-                Eigen::MatrixXd::Identity(context.LocalDofs, context.LocalDofs)
-            );
-            const size_t inverse_offset = size_t(context.Destination[cell]) * context.LocalDofs *
-                (context.LocalDofs + 1) / 2;
-            for (uint32_t row = 0; row < context.LocalDofs; ++row)
+            const Eigen::MatrixXd inverse = factor.solve(Eigen::MatrixXd::Identity(LocalDofs, LocalDofs));
+            const size_t inverse_offset = size_t(context.Destination[cell]) * PackedLocalValues;
+            for (uint32_t row = 0; row < LocalDofs; ++row)
                 for (uint32_t column = 0; column <= row; ++column)
                     context.Result.Inverses.Values()[inverse_offset + size_t(row) * (row + 1) / 2 + column] = float(inverse(row, column));
         }
@@ -347,6 +335,8 @@ MetalPatchData BuildMetalPatchData(const modal::FiniteCellOperator &fem, double 
 struct MetalMultiplicativePreconditioner {
     std::unique_ptr<modal::FiniteCellMetal> Metal;
     modal::FiniteCellOperator::PackedCutOperators CutActions;
+    mutable modal::FiniteCellMetal::Block Fine, Remaining, Result, CoarseResidual, CoarseCorrection, Scratch;
+    mutable uint32_t Width{};
 
     MetalMultiplicativePreconditioner(
         const modal::FiniteCellOperator &fem, double alpha,
@@ -364,22 +354,28 @@ struct MetalMultiplicativePreconditioner {
     }
 
     void Apply(const double *input, double *output, uint32_t width) const {
-        auto coarse = Metal->CreateSharedBlock(width);
-        Metal->Upload(coarse, input);
-        auto remaining = Metal->CreateBlock(width), result = Metal->CreateBlock(width);
-        Metal->ApplyPackedLocalizedMultiplicativePatchSweep(coarse, result, remaining);
-        auto coarse_residual = Metal->CreateP1Block(width), coarse_correction = Metal->CreateP1Block(width);
-        Metal->RestrictP1(remaining, coarse_residual);
-        Metal->ApplyP1Multigrid(coarse_residual, coarse_correction);
-        Metal->ProlongP1(coarse_correction, coarse);
-        Metal->LinearCombination(result, 1, coarse, 1, result);
-        auto scratch = Metal->CreateBlock(width);
-        Metal->ApplyElement(coarse, scratch);
-        Metal->LinearCombination(remaining, 1, scratch, -1, remaining);
-        Metal->ApplyPackedLocalizedMultiplicativePatchSweep(remaining, scratch, coarse, true, false);
-        Metal->LinearCombination(result, 1, scratch, 1, result);
-        Metal->LinearCombination(result, 1.1f, coarse, 0, coarse);
-        Metal->Download(coarse, output);
+        if (!width) return;
+        if (Width != width) {
+            Fine = Metal->CreateSharedBlock(width);
+            Remaining = Metal->CreateBlock(width);
+            Result = Metal->CreateBlock(width);
+            CoarseResidual = Metal->CreateP1Block(width);
+            CoarseCorrection = Metal->CreateP1Block(width);
+            Scratch = Metal->CreateBlock(width);
+            Width = width;
+        }
+        Metal->Upload(Fine, input);
+        Metal->ApplyPackedLocalizedMultiplicativePatchSweep(Fine, Result, Remaining);
+        Metal->RestrictP1(Remaining, CoarseResidual);
+        Metal->ApplyP1Multigrid(CoarseResidual, CoarseCorrection);
+        Metal->ProlongP1(CoarseCorrection, Fine);
+        Metal->LinearCombination(Result, 1, Fine, 1, Result);
+        Metal->ApplyElement(Fine, Scratch);
+        Metal->LinearCombination(Remaining, 1, Scratch, -1, Remaining);
+        Metal->ApplyPackedLocalizedMultiplicativePatchSweep(Remaining, Scratch, Fine, true, false);
+        Metal->LinearCombination(Result, 1, Scratch, 1, Result);
+        Metal->LinearCombination(Result, 1.1f, Fine, 0, Fine);
+        Metal->Download(Fine, output);
     }
 };
 
@@ -655,7 +651,7 @@ modal::FiniteCellBlockResult modal::SolveFiniteCellBlock(
     const double attempt_orthogonality = attempt_certified ? preferred.Certification.MassOrthogonalityError :
                                                              std::numeric_limits<double>::infinity();
     preferred = {};
-    auto cholesky = SolveFiniteCellBlockCholesky(fem, count, alpha, tolerance, max_iterations);
+    auto cholesky = oracle::SolveCholesky(fem, count, alpha, tolerance, max_iterations);
     if (!certified(cholesky)) throw std::runtime_error("Finite-cell default and fallback solvers did not certify within the iteration budget.");
     cholesky.Profile.FallbackAttempt = attempt_seconds;
     cholesky.Profile.FallbackAttemptIterations = attempt_iterations;
@@ -666,7 +662,7 @@ modal::FiniteCellBlockResult modal::SolveFiniteCellBlock(
     return cholesky;
 }
 
-modal::FiniteCellBlockResult modal::SolveFiniteCellBlockCholesky(
+modal::FiniteCellBlockResult modal::oracle::SolveCholesky(
     const FiniteCellOperator &fem, uint32_t count, double alpha, double tolerance,
     uint32_t max_iterations
 ) {
@@ -677,10 +673,7 @@ modal::FiniteCellBlockResult modal::SolveFiniteCellBlockCholesky(
     const auto assembled = fem.AssembleLower();
     result.Profile.Actions = SecondsSince(assembly_start);
     double factor_seconds{}, solve_seconds{};
-    CholeskyShiftInvert inverse{
-        assembled.Stiffness, assembled.Mass, factor_seconds, solve_seconds,
-        SparseOrdering::Metis, SparseStorage::Block3
-    };
+    CholeskyShiftInvert inverse{assembled.Stiffness, assembled.Mass, factor_seconds, solve_seconds};
     Spectra::SparseSymMatProd<double> mass{assembled.Mass};
     const uint32_t solve_count = std::min<uint32_t>(fem.Dofs() - 1, count + 4);
     const uint32_t basis = std::min<uint32_t>(

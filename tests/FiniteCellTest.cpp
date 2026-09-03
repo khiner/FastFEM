@@ -4,6 +4,7 @@
 #include "RunSuites.h"
 #include "TetReference.h"
 #include "audio/FiniteCellBlockEigensolver.h"
+#include "audio/FiniteCellOracle.h"
 #include "numeric/Accelerate.h"
 
 #include <boost/ut.hpp>
@@ -150,7 +151,7 @@ suite FiniteCellTests = [] {
     "cross-discretization mode-shape interpolation is affine exact"_test = [] {
         const auto finite = modal::BuildFiniteCellOperator(
             modal::MakeBoxDomain({}, {0.3, 0.05, 0.02}), Material,
-            {.Cells = {3, 2, 2}, .Order = 2, .CutDepth = 1, .FictitiousScale = 1e-8, .PaddingCells = 0}
+            {.Cells = {3, 2, 2}, .CutDepth = 1, .FictitiousScale = 1e-8, .PaddingCells = 0}
         );
         const TetMesh mesh = MakeStructuredBar(3, 2, 2);
         const modal::Tet10Assembler tet{mesh, Material};
@@ -257,7 +258,7 @@ suite FiniteCellTests = [] {
             const modal::Tet10Assembler tet{mesh, Material};
             const auto finite = modal::BuildFiniteCellOperator(
                 domain, Material,
-                {.Cells = cells, .Order = 2, .CutDepth = 3, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
+                {.Cells = cells, .CutDepth = 3, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
             );
             const auto tet_modes = SolveTetReference(mesh, Material, Count, shift, 1e-8, 150);
             const auto finite_modes = modal::SolveFiniteCellBlock(finite, Count, shift, 1e-8, 150);
@@ -311,9 +312,9 @@ suite FiniteCellTests = [] {
             const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
             const auto operation = modal::BuildFiniteCellOperator(
                 domain, Material,
-                {.Cells = finite_cell_benchmark::GridResolution(geometry, 6), .Order = 2, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
+                {.Cells = finite_cell_benchmark::GridResolution(geometry, 6), .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
             );
-            const auto reference = modal::SolveFiniteCellBlockCholesky(operation, Count, shift, 5e-9, 150);
+            const auto reference = modal::oracle::SolveCholesky(operation, Count, shift, 5e-9, 150);
             const auto preferred = modal::SolveFiniteCellBlock(operation, Count, shift, 5e-9, 150);
             expect(reference.Eigenvalues.size() == Count) << name;
             expect(preferred.Eigenvalues.size() == Count) << name;
@@ -338,10 +339,10 @@ suite FiniteCellTests = [] {
 
     "matrix-free finite-cell actions match assembly"_test = [] {
         constexpr uint32_t Width{3};
-        for (const uint32_t order : {1u, 2u}) {
+        {
             const auto operation = modal::BuildFiniteCellOperator(
                 modal::MakeBoxDomain({}, {0.3, 0.08, 0.05}), Material,
-                {.Cells = {4, 3, 2}, .Order = order, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.27}
+                {.Cells = {4, 3, 2}, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.27}
             );
             const auto assembled = operation.AssembleLower();
             Eigen::MatrixXd input(operation.Dofs(), Width), mass(operation.Dofs(), Width);
@@ -366,8 +367,8 @@ suite FiniteCellTests = [] {
             const double shifted_error = (shifted - assembled_stiffness - 19 * assembled_mass).norm() /
                 (assembled_stiffness + 19 * assembled_mass).norm();
             std::println(
-                "Q{} finite-cell action error: mass {:.3e}, stiffness {:.3e}, shifted {:.3e}",
-                order, mass_error, stiffness_error, shifted_error
+                "Q2 finite-cell action error: mass {:.3e}, stiffness {:.3e}, shifted {:.3e}",
+                mass_error, stiffness_error, shifted_error
             );
             expect(mass_error < 2e-14);
             expect(stiffness_error < 2e-14);
@@ -391,17 +392,13 @@ suite FiniteCellTests = [] {
         const auto domain = modal::MakeSphereDomain({}, 0.1);
         const modal::FiniteCellConfig config{
             .Cells = {4, 4, 4},
-            .Order = 2,
             .CutDepth = 3,
             .FictitiousScale = 1e-8,
             .PaddingCells = 0.2,
-            .CutQuadratureRule = modal::CutQuadrature::Octree,
         };
-        const auto oracle = modal::BuildFiniteCellOperator(domain, Material, config);
-        auto fitted_config = config;
-        fitted_config.CutQuadratureRule = modal::CutQuadrature::MomentFitted;
-        const auto fitted = modal::BuildFiniteCellOperator(domain, Material, fitted_config);
-        const auto repeated = modal::BuildFiniteCellOperator(domain, Material, fitted_config);
+        const auto oracle = modal::oracle::BuildOctree(domain, Material, config);
+        const auto fitted = modal::BuildFiniteCellOperator(domain, Material, config);
+        const auto repeated = modal::BuildFiniteCellOperator(domain, Material, config);
         expect(repeated.Quadrature.size() == fitted.Quadrature.size());
         if (repeated.Quadrature.size() == fitted.Quadrature.size())
             for (uint32_t point = 0; point < fitted.Quadrature.size(); ++point) {
@@ -429,8 +426,8 @@ suite FiniteCellTests = [] {
 
         constexpr uint32_t ModeCount{18}, ComparedCount{12};
         const double shift = std::pow(2 * std::numbers::pi * 20, 2);
-        const auto oracle_modes = modal::SolveFiniteCellBlockCholesky(oracle, ModeCount, shift, 1e-8, 100);
-        const auto fitted_modes = modal::SolveFiniteCellBlockCholesky(fitted, ModeCount, shift, 1e-8, 100);
+        const auto oracle_modes = modal::oracle::SolveCholesky(oracle, ModeCount, shift, 1e-8, 100);
+        const auto fitted_modes = modal::oracle::SolveCholesky(fitted, ModeCount, shift, 1e-8, 100);
         expect(oracle_modes.Eigenvalues.size() == ModeCount);
         expect(fitted_modes.Eigenvalues.size() == ModeCount);
         double spectrum_error{std::numeric_limits<double>::infinity()};
@@ -461,10 +458,10 @@ suite FiniteCellTests = [] {
     "Cartesian P1 transfer is adjoint and Galerkin-consistent"_test = [] {
         constexpr uint32_t Width{3};
         constexpr double Alpha{19};
-        for (const uint32_t order : {1u, 2u}) {
+        {
             const auto operation = modal::BuildFiniteCellOperator(
                 modal::MakeBoxDomain({}, {0.3, 0.08, 0.05}), Material,
-                {.Cells = {4, 3, 2}, .Order = order, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.27}
+                {.Cells = {4, 3, 2}, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.27}
             );
             const auto stabilized = operation.WithFictitiousScale(1e-4);
             expect(stabilized.FictitiousScale == 1e-4);
@@ -500,8 +497,8 @@ suite FiniteCellTests = [] {
             const Eigen::VectorXd assembled_diagonal = assembled.Stiffness.diagonal() + Alpha * assembled.Mass.diagonal();
             const double diagonal_error = (diagonal - assembled_diagonal).norm() / assembled_diagonal.norm();
             std::println(
-                "Q{} P1 transfer: {} fine / {} coarse dofs, adjoint {:.3e}, Galerkin {:.3e}, diagonal {:.3e}",
-                order, operation.Dofs(), coarse_dofs, adjoint_error, galerkin_error, diagonal_error
+                "Q2 P1 transfer: {} fine / {} coarse dofs, adjoint {:.3e}, Galerkin {:.3e}, diagonal {:.3e}",
+                operation.Dofs(), coarse_dofs, adjoint_error, galerkin_error, diagonal_error
             );
             expect(adjoint_error < 2e-14);
             expect(galerkin_error < 2e-14);
@@ -514,7 +511,7 @@ suite FiniteCellTests = [] {
         const modal::ImplicitDomain full_grid{{}, extent, [](const dvec3 &) { return -1.0; }};
         const auto operation = modal::BuildFiniteCellOperator(
             full_grid, Material,
-            {.Cells = {4, 2, 2}, .Order = 2, .CutDepth = 1, .FictitiousScale = 1e-8, .PaddingCells = 0}
+            {.Cells = {4, 2, 2}, .CutDepth = 1, .FictitiousScale = 1e-8, .PaddingCells = 0}
         );
         const auto result = modal::SolveFiniteCellBlock(operation, 12, std::pow(2 * std::numbers::pi * 20, 2), 1e-8, 150);
         expect(result.Eigenvalues.size() == 12_i);
@@ -564,45 +561,34 @@ suite FiniteCellTests = [] {
         const dvec3 extent{0.3, 0.08, 0.05};
         const auto surface = finite_cell_benchmark::BoxSurface(extent, 0.29, -0.17);
         const auto domain = modal::MakeTriangleSurfaceDomain(surface.Points, surface.Triangles);
-        const auto linear_domain = modal::MakeTriangleSurfaceDomain(
-            surface.Points, surface.Triangles, modal::TriangleQuery::Linear
-        );
         expect(domain.SignedDistance(0.5 * extent) < 0);
         expect(domain.SignedDistance({1, 1, 1}) > 0);
         expect(domain.ClassifyBox(0.5 * extent, dvec3{1e-3}) == modal::DomainRegion::Inside);
         expect(domain.ClassifyBox({1, 1, 1}, dvec3{1e-3}) == modal::DomainRegion::Outside);
-        for (const dvec3 point : std::array{0.5 * extent, dvec3{1, 1, 1}, dvec3{0.11, 0.03, 0.02}})
-            expect(std::abs(domain.SignedDistance(point) - linear_domain.SignedDistance(point)) < 1e-14);
-        const auto system = modal::AssembleFiniteCells(
+        const auto operation = modal::BuildFiniteCellOperator(
             domain, Material, {.Cells = {12, 6, 5}, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
-        );
-        const auto linear = modal::AssembleFiniteCells(
-            linear_domain, Material, {.Cells = {12, 6, 5}, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
         );
         auto conservative_domain = domain;
         conservative_domain.ClassifyBox = {};
-        const auto conservative = modal::AssembleFiniteCells(
+        const auto conservative = modal::BuildFiniteCellOperator(
             conservative_domain, Material, {.Cells = {12, 6, 5}, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
         );
+        const auto assembled = operation.AssembleLower();
         const double exact_volume = extent.x * extent.y * extent.z;
-        const double volume_error = std::abs(system.Profile.PhysicalVolume / exact_volume - 1);
+        const double volume_error = std::abs(operation.Profile.PhysicalVolume / exact_volume - 1);
         std::println(
             "finite-cell surface: {} background / {} active / {} cut cells, {} / {} exact/conservative quadrature points, volume error {:.3e}",
-            system.Profile.BackgroundCells, system.Profile.ActiveCells, system.Profile.CutCells, system.Profile.QuadraturePoints,
+            operation.Profile.BackgroundCells, operation.Profile.ActiveCells, operation.Profile.CutCells, operation.Profile.QuadraturePoints,
             conservative.Profile.QuadraturePoints, volume_error
         );
-        expect(system.Profile.ActiveCells < system.Profile.BackgroundCells);
-        expect(system.Profile.CutCells > 0_u);
-        expect(system.Profile.Dofs > 0_u);
-        expect(system.Profile.ActiveCells <= conservative.Profile.ActiveCells);
-        expect(system.Profile.QuadraturePoints < conservative.Profile.QuadraturePoints);
-        expect(std::abs(system.Profile.PhysicalVolume - conservative.Profile.PhysicalVolume) < 1e-14);
-        expect(system.Profile.ActiveCells == linear.Profile.ActiveCells);
-        expect(system.Profile.CutCells == linear.Profile.CutCells);
-        expect(system.Profile.QuadraturePoints == linear.Profile.QuadraturePoints);
-        expect(std::abs(system.Profile.PhysicalVolume - linear.Profile.PhysicalVolume) < 1e-14);
+        expect(operation.Profile.ActiveCells < operation.Profile.BackgroundCells);
+        expect(operation.Profile.CutCells > 0_u);
+        expect(operation.Profile.Dofs > 0_u);
+        expect(operation.Profile.ActiveCells <= conservative.Profile.ActiveCells);
+        expect(operation.Profile.QuadraturePoints < conservative.Profile.QuadraturePoints);
+        expect(std::abs(operation.Profile.PhysicalVolume - conservative.Profile.PhysicalVolume) < 1e-14);
         expect(volume_error < 0.04);
-        expect((system.Mass.diagonal().array() > 0).all());
+        expect((assembled.Mass.diagonal().array() > 0).all());
     };
 };
 

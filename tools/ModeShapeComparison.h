@@ -26,7 +26,7 @@ struct InterpolationStencil {
 };
 
 inline std::optional<InterpolationStencil> FiniteCellStencil(const modal::FiniteCellOperator &operation, const dvec3 &point) {
-    const uint32_t width = operation.Order + 1;
+    constexpr uint32_t width{3};
     for (const auto &cell : operation.Cells) {
         const dvec3 half = 1.0 / cell.InverseHalf;
         const dvec3 center = operation.Nodes[cell.Nodes[0]] + half;
@@ -36,16 +36,11 @@ inline std::optional<InterpolationStencil> FiniteCellStencil(const modal::Finite
         double basis[3][3]{};
         for (uint32_t axis = 0; axis < 3; ++axis) {
             const double x = reference[axis];
-            if (operation.Order == 1) {
-                basis[axis][0] = 0.5 * (1 - x);
-                basis[axis][1] = 0.5 * (1 + x);
-            } else {
-                basis[axis][0] = 0.5 * x * (x - 1);
-                basis[axis][1] = 1 - x * x;
-                basis[axis][2] = 0.5 * x * (x + 1);
-            }
+            basis[axis][0] = 0.5 * x * (x - 1);
+            basis[axis][1] = 1 - x * x;
+            basis[axis][2] = 0.5 * x * (x + 1);
         }
-        InterpolationStencil result{.Count = operation.NodesPerCell};
+        InterpolationStencil result{.Count = modal::FiniteCellOperator::NodesPerCell};
         for (uint32_t z = 0; z < width; ++z)
             for (uint32_t y = 0; y < width; ++y)
                 for (uint32_t x = 0; x < width; ++x) {

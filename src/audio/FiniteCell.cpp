@@ -1,4 +1,5 @@
 #include "FiniteCell.h"
+#include "FiniteCellOracle.h"
 
 #include <dispatch/dispatch.h>
 
@@ -30,7 +31,11 @@ constexpr std::array<std::array<int, 3>, 8> CornerSigns{{
     {-1, 1, 1},
     {1, 1, 1},
 }};
-constexpr double Gauss{0.57735026918962576451};
+constexpr uint32_t BasisOrder{2}, BasisWidth{BasisOrder + 1}, NodeCount{modal::FiniteCellOperator::NodesPerCell}, LocalDofs{3 * NodeCount};
+static_assert(NodeCount == BasisWidth * BasisWidth * BasisWidth);
+constexpr double Gauss3{0.77459666924148337704};
+constexpr std::array QuadraturePositions{-Gauss3, 0.0, Gauss3};
+constexpr std::array QuadratureWeights{5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0};
 
 double SecondsSince(Clock::time_point start) {
     return std::chrono::duration<double>(Clock::now() - start).count();
@@ -55,7 +60,7 @@ std::pair<double, double> BoxRadialDistanceBounds(const dvec3 &center, const dve
 }
 
 dvec3 CellCenter(const modal::FiniteCellOperator &operation, const modal::FiniteCellOperator::Cell &cell) {
-    return 0.5 * (operation.Nodes[cell.Nodes[0]] + operation.Nodes[cell.Nodes[operation.NodesPerCell - 1]]);
+    return 0.5 * (operation.Nodes[cell.Nodes[0]] + operation.Nodes[cell.Nodes[modal::FiniteCellOperator::NodesPerCell - 1]]);
 }
 
 double PointTriangleDistanceSquared(const dvec3 &p, const dvec3 &a, const dvec3 &b, const dvec3 &c) {
@@ -150,8 +155,6 @@ struct TriangleSurface {
     std::vector<std::array<dvec3, 3>> Triangles;
     std::vector<uint32_t> Indices;
     std::vector<Node> Nodes;
-    modal::TriangleQuery Query{};
-
     static std::pair<dvec3, dvec3> TriangleBounds(const std::array<dvec3, 3> &triangle) {
         return {
             numeric::Min(triangle[0], numeric::Min(triangle[1], triangle[2])),
@@ -239,53 +242,36 @@ struct TriangleSurface {
 
     double SignedDistance(const dvec3 &point) const {
         double squared = std::numeric_limits<double>::infinity();
-        if (Query == modal::TriangleQuery::Linear) {
-            for (const auto &triangle : Triangles)
-                squared = std::min(squared, PointTriangleDistanceSquared(point, triangle[0], triangle[1], triangle[2]));
-        } else {
-            std::array<uint32_t, 64> stack{};
-            uint32_t size{1};
-            while (size) {
-                const Node &node = Nodes[stack[--size]];
-                if (BoxDistanceSquared(node, point) >= squared) continue;
-                if (node.Count) {
-                    for (uint32_t entry = node.Begin; entry < node.Begin + node.Count; ++entry) {
-                        const auto &triangle = Triangles[Indices[entry]];
-                        squared = std::min(squared, PointTriangleDistanceSquared(point, triangle[0], triangle[1], triangle[2]));
-                    }
-                    continue;
+        std::array<uint32_t, 64> stack{};
+        uint32_t size{1};
+        while (size) {
+            const Node &node = Nodes[stack[--size]];
+            if (BoxDistanceSquared(node, point) >= squared) continue;
+            if (node.Count) {
+                for (uint32_t entry = node.Begin; entry < node.Begin + node.Count; ++entry) {
+                    const auto &triangle = Triangles[Indices[entry]];
+                    squared = std::min(squared, PointTriangleDistanceSquared(point, triangle[0], triangle[1], triangle[2]));
                 }
-                const double left = BoxDistanceSquared(Nodes[node.Left], point), right = BoxDistanceSquared(Nodes[node.Right], point);
-                if (left < right) {
-                    stack[size++] = node.Right;
-                    stack[size++] = node.Left;
-                } else {
-                    stack[size++] = node.Left;
-                    stack[size++] = node.Right;
-                }
+                continue;
+            }
+            const double left = BoxDistanceSquared(Nodes[node.Left], point), right = BoxDistanceSquared(Nodes[node.Right], point);
+            if (left < right) {
+                stack[size++] = node.Right;
+                stack[size++] = node.Left;
+            } else {
+                stack[size++] = node.Left;
+                stack[size++] = node.Right;
             }
         }
         if (squared <= 1e-28) return 0;
 
         uint32_t inside_votes{};
-        for (const auto &direction : InsideTestDirections) {
-            uint32_t intersections{};
-            if (Query == modal::TriangleQuery::Linear)
-                for (const auto &triangle : Triangles) intersections += RayHitsTriangle(point, direction, triangle);
-            else
-                intersections = RayIntersections(point, direction);
-            inside_votes += intersections % 2;
-        }
+        for (const auto &direction : InsideTestDirections) inside_votes += RayIntersections(point, direction) % 2;
         const double distance = std::sqrt(squared);
         return inside_votes >= 2 ? -distance : distance;
     }
 
     modal::DomainRegion ClassifyBox(const dvec3 &center, const dvec3 &half) const {
-        if (Query == modal::TriangleQuery::Linear) {
-            for (const auto &triangle : Triangles)
-                if (TriangleIntersectsBox(triangle, center, half)) return modal::DomainRegion::Cut;
-            return SignedDistance(center) < 0 ? modal::DomainRegion::Inside : modal::DomainRegion::Outside;
-        }
         std::array<uint32_t, 64> stack{};
         uint32_t size{1};
         while (size) {
@@ -344,11 +330,7 @@ void EvaluateBasis(
     }
 }
 
-template<uint32_t Order>
 struct CellIntegrator {
-    static constexpr uint32_t MomentDegree{2 * Order}, MomentWidth{MomentDegree + 1};
-    using Moments = std::array<double, MomentWidth * MomentWidth * MomentWidth>;
-
     const modal::ImplicitDomain &Domain;
     const modal::FiniteCellConfig &Config;
     dvec3 CellCenter, CellHalf;
@@ -361,24 +343,15 @@ struct CellIntegrator {
     }
 
     void IntegrateQuadrature(const dvec3 &center, const dvec3 &half, double coefficient, bool classify_points) {
-        constexpr uint32_t Points{Order + 1};
-        const std::array<double, Points> positions = [] {
-            if constexpr (Order == 1) return std::array{-Gauss, Gauss};
-            else return std::array{-std::sqrt(3.0 / 5.0), 0.0, std::sqrt(3.0 / 5.0)};
-        }();
-        const std::array<double, Points> weights = [] {
-            if constexpr (Order == 1) return std::array{1.0, 1.0};
-            else return std::array{5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0};
-        }();
         const double jacobian = half.x * half.y * half.z;
-        for (uint32_t z = 0; z < Points; ++z) {
-            for (uint32_t y = 0; y < Points; ++y) {
-                for (uint32_t x = 0; x < Points; ++x) {
-                    const dvec3 point = center + dvec3{positions[x] * half.x, positions[y] * half.y, positions[z] * half.z};
+        for (uint32_t z = 0; z < BasisWidth; ++z) {
+            for (uint32_t y = 0; y < BasisWidth; ++y) {
+                for (uint32_t x = 0; x < BasisWidth; ++x) {
+                    const dvec3 point = center + dvec3{QuadraturePositions[x] * half.x, QuadraturePositions[y] * half.y, QuadraturePositions[z] * half.z};
                     const double point_coefficient = classify_points ?
                         (Domain.SignedDistance(point) <= 0 ? 1 : Config.FictitiousScale) :
                         coefficient;
-                    Sample(point, jacobian * weights[x] * weights[y] * weights[z], point_coefficient);
+                    Sample(point, jacobian * QuadratureWeights[x] * QuadratureWeights[y] * QuadratureWeights[z], point_coefficient);
                 }
             }
         }
@@ -404,27 +377,25 @@ struct CellIntegrator {
     }
 };
 
-template<uint32_t Order>
-using MomentVector = Eigen::Matrix<double, (2 * Order + 1) * (2 * Order + 1) * (2 * Order + 1), 1>;
+constexpr uint32_t MomentDegree{2 * BasisOrder}, MomentWidth{MomentDegree + 1}, MomentCount{MomentWidth * MomentWidth * MomentWidth};
+using MomentVector = Eigen::Matrix<double, MomentCount, 1>;
 
-template<uint32_t Order>
-MomentVector<Order> MomentBasis(const dvec3 &point) {
-    constexpr uint32_t Degree{2 * Order}, Width{Degree + 1};
-    std::array<std::array<double, Width>, 3> legendre{};
+MomentVector MomentBasis(const dvec3 &point) {
+    std::array<std::array<double, MomentWidth>, 3> legendre{};
     for (uint32_t axis = 0; axis < 3; ++axis) {
         const double x = Component(point, axis);
         legendre[axis][0] = 1;
-        if constexpr (Degree >= 1) legendre[axis][1] = x;
-        for (uint32_t degree = 2; degree <= Degree; ++degree)
+        legendre[axis][1] = x;
+        for (uint32_t degree = 2; degree <= MomentDegree; ++degree)
             legendre[axis][degree] = ((2 * degree - 1) * x * legendre[axis][degree - 1] -
                                       (degree - 1) * legendre[axis][degree - 2]) /
                 degree;
     }
-    MomentVector<Order> result;
-    for (uint32_t z = 0; z < Width; ++z)
-        for (uint32_t y = 0; y < Width; ++y)
-            for (uint32_t x = 0; x < Width; ++x)
-                result[x + Width * (y + Width * z)] = legendre[0][x] * legendre[1][y] * legendre[2][z];
+    MomentVector result;
+    for (uint32_t z = 0; z < MomentWidth; ++z)
+        for (uint32_t y = 0; y < MomentWidth; ++y)
+            for (uint32_t x = 0; x < MomentWidth; ++x)
+                result[x + MomentWidth * (y + MomentWidth * z)] = legendre[0][x] * legendre[1][y] * legendre[2][z];
     return result;
 }
 
@@ -433,25 +404,21 @@ struct MomentFitResult {
     double Residual{};
 };
 
-template<uint32_t Order>
 std::optional<MomentFitResult> FitCutCellMoments(
     std::span<const modal::FiniteCellOperator::QuadraturePoint> oracle,
     std::span<const modal::FiniteCellOperator::QuadraturePoint> candidates
 ) {
-    constexpr uint32_t PointsPerPatch{(Order + 1) * (Order + 1) * (Order + 1)};
-    constexpr uint32_t Degree{2 * Order}, MomentWidth{Degree + 1};
-    constexpr uint32_t MomentCount{MomentWidth * MomentWidth * MomentWidth};
-    if (oracle.size() % PointsPerPatch) throw std::logic_error("Finite-cell oracle quadrature has an incomplete tensor patch.");
-    if (candidates.size() % PointsPerPatch) throw std::logic_error("Finite-cell candidate quadrature has an incomplete tensor patch.");
+    if (oracle.size() % NodeCount) throw std::logic_error("Finite-cell oracle quadrature has an incomplete tensor patch.");
+    if (candidates.size() % NodeCount) throw std::logic_error("Finite-cell candidate quadrature has an incomplete tensor patch.");
     if (candidates.size() >= oracle.size()) return std::nullopt;
 
     std::array<double, 2> measures{};
-    std::array<MomentVector<Order>, 2> moments{};
+    std::array<MomentVector, 2> moments{};
     for (auto &moment : moments) moment.setZero();
     for (const auto &sample : oracle) {
         const uint32_t region = sample.Fictitious;
         measures[region] += sample.Weight;
-        moments[region] += sample.Weight * MomentBasis<Order>(sample.Reference);
+        moments[region] += sample.Weight * MomentBasis(sample.Reference);
     }
     for (uint32_t region = 0; region < 2; ++region)
         if (measures[region] > 0) moments[region] /= measures[region];
@@ -461,13 +428,12 @@ std::optional<MomentFitResult> FitCutCellMoments(
     };
     std::vector<double> oracle_weights(oracle.size());
     double maximum_residual{};
-    // Both signed regions fit against the same candidate moment basis, so it is factored once.
     Eigen::MatrixXd basis;
     Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> decomposition;
     if (candidates.size() >= MomentCount && (measures[0] > 0 || measures[1] > 0)) {
         basis.resize(MomentCount, candidates.size());
         for (uint32_t candidate = 0; candidate < candidates.size(); ++candidate)
-            basis.col(candidate) = MomentBasis<Order>(candidates[candidate].Reference);
+            basis.col(candidate) = MomentBasis(candidates[candidate].Reference);
         decomposition.compute(basis);
     }
     for (uint32_t region = 0; region < 2; ++region) {
@@ -488,14 +454,14 @@ std::optional<MomentFitResult> FitCutCellMoments(
     }
     std::vector<modal::FiniteCellOperator::QuadraturePoint> points;
     const auto Append = [&](const auto &source, const std::vector<double> &weights, std::optional<uint8_t> region = std::nullopt) {
-        const uint32_t patch_count = uint32_t(source.size()) / PointsPerPatch;
+        const uint32_t patch_count = uint32_t(source.size()) / NodeCount;
         for (uint32_t patch = 0; patch < patch_count; ++patch) {
             bool retained{};
-            for (uint32_t point = 0; point < PointsPerPatch; ++point)
-                retained |= weights[patch * PointsPerPatch + point] != 0;
+            for (uint32_t point = 0; point < NodeCount; ++point)
+                retained |= weights[patch * NodeCount + point] != 0;
             if (!retained) continue;
-            for (uint32_t point = 0; point < PointsPerPatch; ++point) {
-                const uint32_t index = patch * PointsPerPatch + point;
+            for (uint32_t point = 0; point < NodeCount; ++point) {
+                const uint32_t index = patch * NodeCount + point;
                 auto fitted = source[index];
                 fitted.Weight = weights[index];
                 if (region.has_value()) fitted.Fictitious = *region;
@@ -510,7 +476,6 @@ std::optional<MomentFitResult> FitCutCellMoments(
     return std::nullopt;
 }
 
-template<uint32_t Order>
 void BuildMomentFittedQuadrature(
     modal::FiniteCellOperator &operation, const modal::ImplicitDomain &domain,
     const modal::FiniteCellConfig &config
@@ -537,7 +502,7 @@ void BuildMomentFittedQuadrature(
             auto &result = context.Quadrature[cell_index];
             const dvec3 center = CellCenter(context.Operation, cell), half = 1.0 / cell.InverseHalf;
             std::vector<modal::FiniteCellOperator::QuadraturePoint> oracle;
-            CellIntegrator<Order> oracle_integrator{context.Domain, context.Config, center, half, oracle};
+            CellIntegrator oracle_integrator{context.Domain, context.Config, center, half, oracle};
             oracle_integrator.Integrate(center, half, 0);
             result.OracleCount = uint32_t(oracle.size());
             result.PhysicalVolume = oracle_integrator.PhysicalVolume;
@@ -546,9 +511,9 @@ void BuildMomentFittedQuadrature(
                     auto candidate_config = context.Config;
                     candidate_config.CutDepth = depth;
                     std::vector<modal::FiniteCellOperator::QuadraturePoint> candidates;
-                    CellIntegrator<Order> candidate_integrator{context.Domain, candidate_config, center, half, candidates};
+                    CellIntegrator candidate_integrator{context.Domain, candidate_config, center, half, candidates};
                     candidate_integrator.Integrate(center, half, 0);
-                    if (auto fit = FitCutCellMoments<Order>(oracle, candidates)) {
+                    if (auto fit = FitCutCellMoments(oracle, candidates)) {
                         result.Points = std::move(fit->Points);
                         result.Residual = fit->Residual;
                         result.Fitted = true;
@@ -592,15 +557,13 @@ uint32_t BackgroundNode(uvec3 point, uvec3 dimensions) {
     return (point.x * dimensions.y + point.y) * dimensions.z + point.z;
 }
 
-template<uint32_t Order>
 void BuildP1Transfer(modal::FiniteCellOperator &operation) {
-    constexpr uint32_t Width{Order + 1};
     std::vector<int32_t> coarse(operation.Nodes.size(), -1);
     for (const auto &cell : operation.Cells) {
         for (uint32_t z = 0; z < 2; ++z) {
             for (uint32_t y = 0; y < 2; ++y) {
                 for (uint32_t x = 0; x < 2; ++x) {
-                    const uint32_t local = Order * x + Width * (Order * y + Width * Order * z);
+                    const uint32_t local = BasisOrder * x + BasisWidth * (BasisOrder * y + BasisWidth * BasisOrder * z);
                     int32_t &index = coarse[cell.Nodes[local]];
                     if (index < 0) index = int32_t(operation.NumP1Nodes++);
                 }
@@ -615,19 +578,19 @@ void BuildP1Transfer(modal::FiniteCellOperator &operation) {
             for (uint32_t y = 0; y < 2; ++y)
                 for (uint32_t x = 0; x < 2; ++x) {
                     const uint32_t corner = x + 2 * (y + 2 * z);
-                    const uint32_t local = Order * x + Width * (Order * y + Width * Order * z);
+                    const uint32_t local = BasisOrder * x + BasisWidth * (BasisOrder * y + BasisWidth * BasisOrder * z);
                     corners[corner] = uint32_t(coarse[cell.Nodes[local]]);
                 }
 
-        for (uint32_t z = 0; z < Width; ++z) {
-            for (uint32_t y = 0; y < Width; ++y) {
-                for (uint32_t x = 0; x < Width; ++x) {
-                    const uint32_t local = x + Width * (y + Width * z), fine = cell.Nodes[local];
+        for (uint32_t z = 0; z < BasisWidth; ++z) {
+            for (uint32_t y = 0; y < BasisWidth; ++y) {
+                for (uint32_t x = 0; x < BasisWidth; ++x) {
+                    const uint32_t local = x + BasisWidth * (y + BasisWidth * z), fine = cell.Nodes[local];
                     auto &stencil = operation.P1Stencils[fine];
                     if (stencil.Count) continue;
-                    const std::array<double, 2> wx{1 - double(x) / Order, double(x) / Order};
-                    const std::array<double, 2> wy{1 - double(y) / Order, double(y) / Order};
-                    const std::array<double, 2> wz{1 - double(z) / Order, double(z) / Order};
+                    const std::array<double, 2> wx{1 - double(x) / BasisOrder, double(x) / BasisOrder};
+                    const std::array<double, 2> wy{1 - double(y) / BasisOrder, double(y) / BasisOrder};
+                    const std::array<double, 2> wz{1 - double(z) / BasisOrder, double(z) / BasisOrder};
                     for (uint32_t cz = 0; cz < 2; ++cz)
                         for (uint32_t cy = 0; cy < 2; ++cy)
                             for (uint32_t cx = 0; cx < 2; ++cx) {
@@ -643,15 +606,11 @@ void BuildP1Transfer(modal::FiniteCellOperator &operation) {
     }
 }
 
-template<uint32_t Order>
 modal::FiniteCellOperator Build(
     const modal::ImplicitDomain &domain, const AcousticMaterialProperties &material,
-    const modal::FiniteCellConfig &config, Clock::time_point start
+    const modal::FiniteCellConfig &config, Clock::time_point start, bool moment_fitting
 ) {
-    constexpr uint32_t Width{Order + 1}, NodeCount{Width * Width * Width};
     modal::FiniteCellOperator result;
-    result.Order = Order;
-    result.NodesPerCell = NodeCount;
     result.Density = material.Density;
     result.Lambda = material.Lambda();
     result.Mu = material.Mu();
@@ -661,8 +620,8 @@ modal::FiniteCellOperator Build(
     const dvec3 grid_min = domain.Min + (config.GridOffsetCells - config.PaddingCells) * nominal_step;
     const dvec3 grid_max = domain.Max + (config.GridOffsetCells + config.PaddingCells) * nominal_step;
     const dvec3 step = (grid_max - grid_min) / dvec3{config.Cells};
-    const dvec3 node_step = step / double(Order), half = 0.5 * step;
-    const uvec3 node_dimensions = Order * config.Cells + uvec3{1};
+    const dvec3 node_step = step / double(BasisOrder), half = 0.5 * step;
+    const uvec3 node_dimensions = BasisOrder * config.Cells + uvec3{1};
     const size_t background_nodes = size_t(node_dimensions.x) * node_dimensions.y * node_dimensions.z;
     std::vector<int32_t> compact(background_nodes, -1);
     result.Profile.BackgroundCells = config.Cells.x * config.Cells.y * config.Cells.z;
@@ -690,8 +649,8 @@ modal::FiniteCellOperator Build(
                 cell.QuadratureOffset = uint32_t(result.Quadrature.size());
                 cell.Color = uint8_t((x & 1) | ((y & 1) << 1) | ((z & 1) << 2));
                 cell.Cut = region == modal::DomainRegion::Cut;
-                if (config.CutQuadratureRule == modal::CutQuadrature::Octree) {
-                    CellIntegrator<Order> integrator{domain, config, center, half, result.Quadrature};
+                if (!moment_fitting) {
+                    CellIntegrator integrator{domain, config, center, half, result.Quadrature};
                     integrator.Integrate(center, half, 0);
                     cell.OracleQuadratureCount = uint32_t(result.Quadrature.size()) - cell.QuadratureOffset;
                     cell.QuadratureCount = cell.OracleQuadratureCount;
@@ -700,11 +659,11 @@ modal::FiniteCellOperator Build(
                     result.Profile.QuadraturePoints += cell.QuadratureCount;
                 }
 
-                for (uint32_t local_z = 0; local_z < Width; ++local_z) {
-                    for (uint32_t local_y = 0; local_y < Width; ++local_y) {
-                        for (uint32_t local_x = 0; local_x < Width; ++local_x) {
-                            const uint32_t node = local_x + Width * (local_y + Width * local_z);
-                            cell.Nodes[node] = acquire_node({Order * x + local_x, Order * y + local_y, Order * z + local_z});
+                for (uint32_t local_z = 0; local_z < BasisWidth; ++local_z) {
+                    for (uint32_t local_y = 0; local_y < BasisWidth; ++local_y) {
+                        for (uint32_t local_x = 0; local_x < BasisWidth; ++local_x) {
+                            const uint32_t node = local_x + BasisWidth * (local_y + BasisWidth * local_z);
+                            cell.Nodes[node] = acquire_node({BasisOrder * x + local_x, BasisOrder * y + local_y, BasisOrder * z + local_z});
                         }
                     }
                 }
@@ -712,9 +671,8 @@ modal::FiniteCellOperator Build(
             }
         }
     }
-    if (config.CutQuadratureRule != modal::CutQuadrature::Octree)
-        BuildMomentFittedQuadrature<Order>(result, domain, config);
-    BuildP1Transfer<Order>(result);
+    if (moment_fitting) BuildMomentFittedQuadrature(result, domain, config);
+    BuildP1Transfer(result);
     static_assert(NodeCount <= 32);
     result.NodeOccurrenceOffsets.resize(result.Nodes.size() + 1);
     for (const auto &cell : result.Cells)
@@ -735,127 +693,86 @@ modal::FiniteCellOperator Build(
     return result;
 }
 
-template<uint32_t Order>
-using Tensor = std::array<double, (Order + 1) * (Order + 1) * (Order + 1)>;
+using Tensor = std::array<double, NodeCount>;
+using TensorMatrix = std::array<std::array<double, BasisWidth>, BasisWidth>;
 
-template<uint32_t Order>
-using TensorMatrix = std::array<std::array<double, Order + 1>, Order + 1>;
-
-template<uint32_t Order>
-void EvaluateBasis1D(double coordinate, double inverse_half, std::array<double, Order + 1> &basis, std::array<double, Order + 1> &derivative) {
-    if constexpr (Order == 1) {
-        basis = {0.5 * (1 - coordinate), 0.5 * (1 + coordinate)};
-        derivative = {-0.5 * inverse_half, 0.5 * inverse_half};
-    } else {
-        basis = {0.5 * coordinate * (coordinate - 1), 1 - coordinate * coordinate, 0.5 * coordinate * (coordinate + 1)};
-        derivative = {
-            (coordinate - 0.5) * inverse_half,
-            -2 * coordinate * inverse_half,
-            (coordinate + 0.5) * inverse_half,
-        };
-    }
+void EvaluateBasis1D(double coordinate, double inverse_half, std::array<double, BasisWidth> &basis, std::array<double, BasisWidth> &derivative) {
+    basis = {0.5 * coordinate * (coordinate - 1), 1 - coordinate * coordinate, 0.5 * coordinate * (coordinate + 1)};
+    derivative = {
+        (coordinate - 0.5) * inverse_half,
+        -2 * coordinate * inverse_half,
+        (coordinate + 0.5) * inverse_half,
+    };
 }
 
-template<uint32_t Order>
-TensorMatrix<Order> Transpose(const TensorMatrix<Order> &matrix) {
-    TensorMatrix<Order> result;
-    for (uint32_t row = 0; row <= Order; ++row)
-        for (uint32_t column = 0; column <= Order; ++column) result[row][column] = matrix[column][row];
-    return result;
-}
-
-template<uint32_t Order>
-Tensor<Order> TensorProductScalar(
-    const Tensor<Order> &input, const TensorMatrix<Order> &x_matrix,
-    const TensorMatrix<Order> &y_matrix, const TensorMatrix<Order> &z_matrix
-) {
-    constexpr uint32_t Width{Order + 1};
-    Tensor<Order> x_values{}, xy_values{}, result{};
-    for (uint32_t z = 0; z < Width; ++z)
-        for (uint32_t y = 0; y < Width; ++y)
-            for (uint32_t out_x = 0; out_x < Width; ++out_x)
-                for (uint32_t x = 0; x < Width; ++x)
-                    x_values[out_x + Width * (y + Width * z)] += x_matrix[out_x][x] * input[x + Width * (y + Width * z)];
-    for (uint32_t z = 0; z < Width; ++z)
-        for (uint32_t out_y = 0; out_y < Width; ++out_y)
-            for (uint32_t x = 0; x < Width; ++x)
-                for (uint32_t y = 0; y < Width; ++y)
-                    xy_values[x + Width * (out_y + Width * z)] += y_matrix[out_y][y] * x_values[x + Width * (y + Width * z)];
-    for (uint32_t out_z = 0; out_z < Width; ++out_z)
-        for (uint32_t y = 0; y < Width; ++y)
-            for (uint32_t x = 0; x < Width; ++x)
-                for (uint32_t z = 0; z < Width; ++z)
-                    result[x + Width * (y + Width * out_z)] += z_matrix[out_z][z] * xy_values[x + Width * (y + Width * z)];
+TensorMatrix Transpose(const TensorMatrix &matrix) {
+    TensorMatrix result;
+    for (uint32_t row = 0; row < BasisWidth; ++row)
+        for (uint32_t column = 0; column < BasisWidth; ++column) result[row][column] = matrix[column][row];
     return result;
 }
 
 using Double2 = double __attribute__((ext_vector_type(2)));
 
-template<uint32_t Order>
-Tensor<Order> TensorProduct(
-    const Tensor<Order> &input, const TensorMatrix<Order> &x_matrix,
-    const TensorMatrix<Order> &y_matrix, const TensorMatrix<Order> &z_matrix
+Tensor TensorProduct(
+    const Tensor &input, const TensorMatrix &x_matrix,
+    const TensorMatrix &y_matrix, const TensorMatrix &z_matrix
 ) {
-    if constexpr (Order != 2) return TensorProductScalar<Order>(input, x_matrix, y_matrix, z_matrix);
-    else {
-        constexpr uint32_t Width{3};
-        Tensor<Order> x_values, xy_values, result;
-        for (uint32_t z = 0; z < Width; ++z) {
-            for (uint32_t y = 0; y < Width; ++y) {
-                Double2 pair{};
-                double last{};
-                for (uint32_t x = 0; x < Width; ++x) {
-                    const double value = input[x + Width * (y + Width * z)];
-                    pair += Double2{x_matrix[0][x], x_matrix[1][x]} * value;
-                    last += x_matrix[2][x] * value;
-                }
-                const uint32_t offset = Width * (y + Width * z);
-                x_values[offset] = pair[0];
-                x_values[offset + 1] = pair[1];
-                x_values[offset + 2] = last;
+    Tensor x_values, xy_values, result;
+    for (uint32_t z = 0; z < BasisWidth; ++z) {
+        for (uint32_t y = 0; y < BasisWidth; ++y) {
+            Double2 pair{};
+            double last{};
+            for (uint32_t x = 0; x < BasisWidth; ++x) {
+                const double value = input[x + BasisWidth * (y + BasisWidth * z)];
+                pair += Double2{x_matrix[0][x], x_matrix[1][x]} * value;
+                last += x_matrix[2][x] * value;
             }
+            const uint32_t offset = BasisWidth * (y + BasisWidth * z);
+            x_values[offset] = pair[0];
+            x_values[offset + 1] = pair[1];
+            x_values[offset + 2] = last;
         }
-        for (uint32_t z = 0; z < Width; ++z) {
-            for (uint32_t out_y = 0; out_y < Width; ++out_y) {
-                Double2 pair{};
-                double last{};
-                for (uint32_t y = 0; y < Width; ++y) {
-                    const uint32_t offset = Width * (y + Width * z);
-                    const double coefficient = y_matrix[out_y][y];
-                    pair += Double2{x_values[offset], x_values[offset + 1]} * coefficient;
-                    last += x_values[offset + 2] * coefficient;
-                }
-                const uint32_t offset = Width * (out_y + Width * z);
-                xy_values[offset] = pair[0];
-                xy_values[offset + 1] = pair[1];
-                xy_values[offset + 2] = last;
-            }
-        }
-        for (uint32_t out_z = 0; out_z < Width; ++out_z) {
-            for (uint32_t y = 0; y < Width; ++y) {
-                Double2 pair{};
-                double last{};
-                for (uint32_t z = 0; z < Width; ++z) {
-                    const uint32_t offset = Width * (y + Width * z);
-                    const double coefficient = z_matrix[out_z][z];
-                    pair += Double2{xy_values[offset], xy_values[offset + 1]} * coefficient;
-                    last += xy_values[offset + 2] * coefficient;
-                }
-                const uint32_t offset = Width * (y + Width * out_z);
-                result[offset] = pair[0];
-                result[offset + 1] = pair[1];
-                result[offset + 2] = last;
-            }
-        }
-        return result;
     }
+    for (uint32_t z = 0; z < BasisWidth; ++z) {
+        for (uint32_t out_y = 0; out_y < BasisWidth; ++out_y) {
+            Double2 pair{};
+            double last{};
+            for (uint32_t y = 0; y < BasisWidth; ++y) {
+                const uint32_t offset = BasisWidth * (y + BasisWidth * z);
+                const double coefficient = y_matrix[out_y][y];
+                pair += Double2{x_values[offset], x_values[offset + 1]} * coefficient;
+                last += x_values[offset + 2] * coefficient;
+            }
+            const uint32_t offset = BasisWidth * (out_y + BasisWidth * z);
+            xy_values[offset] = pair[0];
+            xy_values[offset + 1] = pair[1];
+            xy_values[offset + 2] = last;
+        }
+    }
+    for (uint32_t out_z = 0; out_z < BasisWidth; ++out_z) {
+        for (uint32_t y = 0; y < BasisWidth; ++y) {
+            Double2 pair{};
+            double last{};
+            for (uint32_t z = 0; z < BasisWidth; ++z) {
+                const uint32_t offset = BasisWidth * (y + BasisWidth * z);
+                const double coefficient = z_matrix[out_z][z];
+                pair += Double2{xy_values[offset], xy_values[offset + 1]} * coefficient;
+                last += xy_values[offset + 2] * coefficient;
+            }
+            const uint32_t offset = BasisWidth * (y + BasisWidth * out_z);
+            result[offset] = pair[0];
+            result[offset + 1] = pair[1];
+            result[offset + 2] = last;
+        }
+    }
+    return result;
 }
 
 // Evaluates the combined `stiffness_scale * K + mass_scale * M` action and, when a mass destination
 // is given, the plain `M` action alongside it. Each action goes to its per-cell buffer when one is
 // supplied, otherwise it is scattered into the matching global destination. A pair of null
 // destinations skips that action entirely.
-template<uint32_t Order>
 void ApplyTensorSerial(
     const modal::FiniteCellOperator &operation, const double *input, double *output,
     uint32_t width, double stiffness_scale, double mass_scale, double *independent_mass_output = nullptr,
@@ -863,10 +780,10 @@ void ApplyTensorSerial(
     double *cell_output = nullptr, double *cell_mass_output = nullptr,
     const uint32_t *cell_indices = nullptr
 ) {
-    constexpr uint32_t BasisWidth{Order + 1}, NodeCount{BasisWidth * BasisWidth * BasisWidth}, LocalDofs{3 * NodeCount};
     const uint32_t dofs = operation.Dofs();
     const bool action = output || cell_output;
     const bool independent_mass = independent_mass_output || cell_mass_output;
+    const bool needs_displacement = independent_mass || (action && mass_scale != 0);
     if (output) std::fill_n(output, size_t(dofs) * width, 0.0);
     if (independent_mass_output) std::fill_n(independent_mass_output, size_t(dofs) * width, 0.0);
     const size_t local_values = size_t(LocalDofs) * width;
@@ -884,32 +801,33 @@ void ApplyTensorSerial(
         if (action) std::fill_n(local, local_values, 0.0);
         if (independent_mass) std::fill_n(local_mass, local_values, 0.0);
         for (uint32_t patch = cell.QuadratureOffset; patch < cell.QuadratureOffset + cell.QuadratureCount; patch += NodeCount) {
-            std::array<TensorMatrix<Order>, 3> basis{}, derivative{}, basis_transpose{}, derivative_transpose{};
+            std::array<TensorMatrix, 3> basis{}, derivative{}, basis_transpose{}, derivative_transpose{};
             for (uint32_t axis = 0; axis < 3; ++axis) {
                 const uint32_t stride = axis == 0 ? 1 : axis == 1 ? BasisWidth :
                                                                     BasisWidth * BasisWidth;
                 for (uint32_t point = 0; point < BasisWidth; ++point)
-                    EvaluateBasis1D<Order>(
+                    EvaluateBasis1D(
                         Component(operation.Quadrature[patch + point * stride].Reference, axis),
                         Component(cell.InverseHalf, axis), basis[axis][point], derivative[axis][point]
                     );
-                basis_transpose[axis] = Transpose<Order>(basis[axis]);
-                derivative_transpose[axis] = Transpose<Order>(derivative[axis]);
+                basis_transpose[axis] = Transpose(basis[axis]);
+                derivative_transpose[axis] = Transpose(derivative[axis]);
             }
 
             for (uint32_t block = 0; block < width; ++block) {
                 const size_t input_offset = size_t(block) * dofs;
-                std::array<Tensor<Order>, 3> nodal, displacement, mass, mass_only;
-                std::array<std::array<Tensor<Order>, 3>, 3> gradient, stress;
+                std::array<Tensor, 3> nodal, displacement, mass, mass_only;
+                std::array<std::array<Tensor, 3>, 3> gradient, stress;
                 for (uint32_t node = 0; node < NodeCount; ++node)
                     for (uint32_t component = 0; component < 3; ++component)
                         nodal[component][node] = input[input_offset + 3 * cell.Nodes[node] + component];
                 for (uint32_t component = 0; component < 3; ++component) {
-                    displacement[component] = TensorProduct<Order>(nodal[component], basis[0], basis[1], basis[2]);
+                    if (needs_displacement)
+                        displacement[component] = TensorProduct(nodal[component], basis[0], basis[1], basis[2]);
                     if (action && stiffness_scale != 0) {
-                        gradient[component][0] = TensorProduct<Order>(nodal[component], derivative[0], basis[1], basis[2]);
-                        gradient[component][1] = TensorProduct<Order>(nodal[component], basis[0], derivative[1], basis[2]);
-                        gradient[component][2] = TensorProduct<Order>(nodal[component], basis[0], basis[1], derivative[2]);
+                        gradient[component][0] = TensorProduct(nodal[component], derivative[0], basis[1], basis[2]);
+                        gradient[component][1] = TensorProduct(nodal[component], basis[0], derivative[1], basis[2]);
+                        gradient[component][2] = TensorProduct(nodal[component], basis[0], basis[1], derivative[2]);
                     }
                 }
                 for (uint32_t point = 0; point < NodeCount; ++point) {
@@ -917,7 +835,8 @@ void ApplyTensorSerial(
                     if (independent_mass)
                         for (uint32_t p = 0; p < 3; ++p) mass_only[p][point] = weight * operation.Density * displacement[p][point];
                     if (!action) continue;
-                    for (uint32_t p = 0; p < 3; ++p) mass[p][point] = weight * mass_scale * operation.Density * displacement[p][point];
+                    if (mass_scale != 0)
+                        for (uint32_t p = 0; p < 3; ++p) mass[p][point] = weight * mass_scale * operation.Density * displacement[p][point];
                     if (stiffness_scale == 0) continue;
                     const double trace = gradient[0][0][point] + gradient[1][1][point] + gradient[2][2][point];
                     for (uint32_t p = 0; p < 3; ++p)
@@ -928,17 +847,19 @@ void ApplyTensorSerial(
                 }
                 for (uint32_t component = 0; component < 3; ++component) {
                     if (action) {
-                        Tensor<Order> result = TensorProduct<Order>(
-                            mass[component], basis_transpose[0], basis_transpose[1], basis_transpose[2]
-                        );
+                        Tensor result{};
+                        if (mass_scale != 0)
+                            result = TensorProduct(
+                                mass[component], basis_transpose[0], basis_transpose[1], basis_transpose[2]
+                            );
                         if (stiffness_scale != 0) {
-                            const auto x_result = TensorProduct<Order>(
+                            const auto x_result = TensorProduct(
                                 stress[component][0], derivative_transpose[0], basis_transpose[1], basis_transpose[2]
                             );
-                            const auto y_result = TensorProduct<Order>(
+                            const auto y_result = TensorProduct(
                                 stress[component][1], basis_transpose[0], derivative_transpose[1], basis_transpose[2]
                             );
-                            const auto z_result = TensorProduct<Order>(
+                            const auto z_result = TensorProduct(
                                 stress[component][2], basis_transpose[0], basis_transpose[1], derivative_transpose[2]
                             );
                             for (uint32_t node = 0; node < NodeCount; ++node) result[node] += x_result[node] + y_result[node] + z_result[node];
@@ -947,7 +868,7 @@ void ApplyTensorSerial(
                             local[size_t(block) * LocalDofs + 3 * node + component] += result[node];
                     }
                     if (independent_mass) {
-                        const auto mass_result = TensorProduct<Order>(
+                        const auto mass_result = TensorProduct(
                             mass_only[component], basis_transpose[0], basis_transpose[1], basis_transpose[2]
                         );
                         for (uint32_t node = 0; node < NodeCount; ++node)
@@ -973,7 +894,6 @@ void ApplyTensorSerial(
     }
 }
 
-template<uint32_t Order>
 struct CellGatherContext {
     const modal::FiniteCellOperator &Operation;
     const double *CellOutput, *CellMassOutput;
@@ -981,10 +901,8 @@ struct CellGatherContext {
     uint32_t Width, NodesPerTask;
 };
 
-template<uint32_t Order>
 void ApplyTensorCellGatherTile(void *raw_context, size_t task) {
-    constexpr uint32_t LocalDofs{3 * (Order + 1) * (Order + 1) * (Order + 1)};
-    const auto &context = *static_cast<CellGatherContext<Order> *>(raw_context);
+    const auto &context = *static_cast<CellGatherContext *>(raw_context);
     const uint32_t first = uint32_t(task) * context.NodesPerTask;
     const uint32_t last = std::min<uint32_t>(first + context.NodesPerTask, context.Operation.Nodes.size());
     const uint32_t dofs = context.Operation.Dofs();
@@ -1008,7 +926,6 @@ void ApplyTensorCellGatherTile(void *raw_context, size_t task) {
         }
 }
 
-template<uint32_t Order>
 struct ParallelTensorContext {
     const modal::FiniteCellOperator &Operation;
     const double *Input;
@@ -1016,11 +933,10 @@ struct ParallelTensorContext {
     double StiffnessScale, MassScale;
 };
 
-template<uint32_t Order>
 void ApplyTensorColumn(void *raw_context, size_t column) {
-    const auto &context = *static_cast<ParallelTensorContext<Order> *>(raw_context);
+    const auto &context = *static_cast<ParallelTensorContext *>(raw_context);
     const size_t offset = column * context.Operation.Dofs();
-    ApplyTensorSerial<Order>(
+    ApplyTensorSerial(
         context.Operation, context.Input + offset, context.Output + offset, 1,
         context.StiffnessScale, context.MassScale,
         context.IndependentMassOutput ? context.IndependentMassOutput + offset : nullptr
@@ -1028,18 +944,17 @@ void ApplyTensorColumn(void *raw_context, size_t column) {
 }
 
 // One task per right-hand side: every column touches every cell, so the columns are independent.
-template<uint32_t Order>
 void ApplyTensorParallel(
     const modal::FiniteCellOperator &operation, const double *input, double *output,
     uint32_t width, double stiffness_scale, double mass_scale, double *independent_mass_output = nullptr
 ) {
     if (!width) return;
     if (width == 1) {
-        ApplyTensorSerial<Order>(operation, input, output, 1, stiffness_scale, mass_scale, independent_mass_output);
+        ApplyTensorSerial(operation, input, output, 1, stiffness_scale, mass_scale, independent_mass_output);
         return;
     }
-    ParallelTensorContext<Order> context{operation, input, output, independent_mass_output, stiffness_scale, mass_scale};
-    dispatch_apply_f(width, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &context, ApplyTensorColumn<Order>);
+    ParallelTensorContext context{operation, input, output, independent_mass_output, stiffness_scale, mass_scale};
+    dispatch_apply_f(width, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &context, ApplyTensorColumn);
 }
 
 // Local mass and shifted `K + alpha*M` matrices over one cell's quadrature. `mass` receives the
@@ -1086,11 +1001,10 @@ void CellOperators(
 
 // Lower triangles of the mass and stiffness matrices over either the cell basis or its nested P1
 // corners. Each cell owns a fixed triplet slot, so the parallel emission order is the serial one.
-template<uint32_t Order, bool P1>
+template<bool P1>
 modal::FiniteCellOperator::AssembledLower Assemble(const modal::FiniteCellOperator &operation) {
-    constexpr uint32_t Basis{P1 ? 1 : Order}, Width{Order + 1};
-    constexpr uint32_t NodeCount{(Basis + 1) * (Basis + 1) * (Basis + 1)}, LocalDofs{3 * NodeCount};
-    constexpr uint32_t MassEntries{3 * NodeCount * (NodeCount + 1) / 2}, StiffnessEntries{LocalDofs * (LocalDofs + 1) / 2};
+    constexpr uint32_t Basis{P1 ? 1 : BasisOrder}, Nodes{(Basis + 1) * (Basis + 1) * (Basis + 1)}, Dofs{3 * Nodes};
+    constexpr uint32_t MassEntries{3 * Nodes * (Nodes + 1) / 2}, StiffnessEntries{Dofs * (Dofs + 1) / 2};
     std::vector<Eigen::Triplet<double>> mass_triplets(operation.Cells.size() * MassEntries);
     std::vector<Eigen::Triplet<double>> stiffness_triplets(operation.Cells.size() * StiffnessEntries);
     struct Context {
@@ -1102,31 +1016,31 @@ modal::FiniteCellOperator::AssembledLower Assemble(const modal::FiniteCellOperat
         [](void *raw, size_t cell_index) {
             const auto &context = *static_cast<Context *>(raw);
             const auto &cell = context.Operation.Cells[cell_index];
-            std::array<uint32_t, NodeCount> nodes;
+            std::array<uint32_t, Nodes> nodes;
             if constexpr (P1) {
                 for (uint32_t z = 0; z < 2; ++z)
                     for (uint32_t y = 0; y < 2; ++y)
                         for (uint32_t x = 0; x < 2; ++x) {
-                            const uint32_t local = Order * x + Width * (Order * y + Width * Order * z);
+                            const uint32_t local = BasisOrder * x + BasisWidth * (BasisOrder * y + BasisWidth * BasisOrder * z);
                             nodes[x + 2 * (y + 2 * z)] = context.Operation.P1Stencils[cell.Nodes[local]].Nodes[0];
                         }
             } else {
-                std::copy_n(cell.Nodes.begin(), NodeCount, nodes.begin());
+                std::copy_n(cell.Nodes.begin(), Nodes, nodes.begin());
             }
-            Eigen::Matrix<double, NodeCount, NodeCount> mass;
-            Eigen::Matrix<double, LocalDofs, LocalDofs> stiffness;
+            Eigen::Matrix<double, Nodes, Nodes> mass;
+            Eigen::Matrix<double, Dofs, Dofs> stiffness;
             CellOperators<Basis, false>(context.Operation, uint32_t(cell_index), 0, mass.data(), stiffness.data());
             auto *mass_triplet = context.Mass + cell_index * MassEntries;
             auto *stiffness_triplet = context.Stiffness + cell_index * StiffnessEntries;
-            for (uint32_t a = 0; a < NodeCount; ++a)
+            for (uint32_t a = 0; a < Nodes; ++a)
                 for (uint32_t c = 0; c <= a; ++c)
                     for (uint32_t component = 0; component < 3; ++component) {
                         const uint32_t row = 3 * nodes[a] + component, column = 3 * nodes[c] + component;
                         *mass_triplet++ = {int(std::max(row, column)), int(std::min(row, column)), mass(a, c)};
                     }
-            for (uint32_t a = 0; a < NodeCount; ++a)
+            for (uint32_t a = 0; a < Nodes; ++a)
                 for (uint32_t p = 0; p < 3; ++p)
-                    for (uint32_t c = 0; c < NodeCount; ++c)
+                    for (uint32_t c = 0; c < Nodes; ++c)
                         for (uint32_t q = 0; q < 3; ++q) {
                             const uint32_t row = 3 * nodes[a] + p, column = 3 * nodes[c] + q;
                             if (row >= column) *stiffness_triplet++ = {int(row), int(column), stiffness(3 * a + p, 3 * c + q)};
@@ -1142,16 +1056,14 @@ modal::FiniteCellOperator::AssembledLower Assemble(const modal::FiniteCellOperat
     return result;
 }
 
-template<uint32_t Order>
 Eigen::VectorXd ShiftedDiagonal(const modal::FiniteCellOperator &operation, double alpha) {
-    constexpr uint32_t NodeCount{(Order + 1) * (Order + 1) * (Order + 1)};
     Eigen::VectorXd result = Eigen::VectorXd::Zero(operation.Dofs());
     for (const auto &cell : operation.Cells) {
         for (uint32_t quadrature = cell.QuadratureOffset; quadrature < cell.QuadratureOffset + cell.QuadratureCount; ++quadrature) {
             const auto &point = operation.Quadrature[quadrature];
             std::array<double, NodeCount> shape;
             std::array<dvec3, NodeCount> gradient;
-            EvaluateBasis<Order>(point.Reference, cell.InverseHalf, shape, gradient);
+            EvaluateBasis<BasisOrder>(point.Reference, cell.InverseHalf, shape, gradient);
             for (uint32_t a = 0; a < NodeCount; ++a) {
                 const double dot = numeric::Dot(gradient[a], gradient[a]);
                 for (uint32_t component = 0; component < 3; ++component)
@@ -1165,12 +1077,10 @@ Eigen::VectorXd ShiftedDiagonal(const modal::FiniteCellOperator &operation, doub
     return result;
 }
 
-template<uint32_t Order>
 modal::FiniteCellOperator::PackedCutOperators BuildPackedCutOperators(
     const modal::FiniteCellOperator &operation, double alpha,
     std::span<const double> packed_shifted_elements = {}
 ) {
-    constexpr uint32_t NodeCount{(Order + 1) * (Order + 1) * (Order + 1)}, LocalDofs{3 * NodeCount};
     constexpr size_t PackedMass{size_t(NodeCount) * (NodeCount + 1) / 2};
     constexpr size_t PackedShifted{size_t(LocalDofs) * (LocalDofs + 1) / 2};
     const auto start = Clock::now();
@@ -1195,7 +1105,7 @@ modal::FiniteCellOperator::PackedCutOperators BuildPackedCutOperators(
             double *packed_mass = context.Result.Mass.data() + cut * PackedMass;
             double *packed_shifted = context.Result.Shifted.data() + cut * PackedShifted;
             Eigen::Matrix<double, NodeCount, NodeCount> mass;
-            CellOperators<Order, true>(
+            CellOperators<BasisOrder, true>(
                 context.Operation, cell, context.Alpha, mass.data(), supplied ? nullptr : packed_shifted
             );
             for (uint32_t row = 0; row < NodeCount; ++row)
@@ -1211,15 +1121,12 @@ modal::FiniteCellOperator::PackedCutOperators BuildPackedCutOperators(
 
 constexpr uint32_t InteriorCellsPerTask{4}, GatherNodesPerTask{64};
 
-template<uint32_t Order>
 void ApplyMassShiftedCut(
     const modal::FiniteCellOperator &operation,
     modal::FiniteCellOperator::PackedCutOperators &operators,
     const double *input, double *mass_output, double *shifted_output, uint32_t width
 ) {
     if (!width) return;
-    constexpr uint32_t NodeCount{(Order + 1) * (Order + 1) * (Order + 1)};
-    constexpr uint32_t LocalDofs{3 * NodeCount};
     constexpr size_t PackedMass{size_t(NodeCount) * (NodeCount + 1) / 2};
     constexpr size_t PackedShifted{size_t(LocalDofs) * (LocalDofs + 1) / 2};
     const size_t cell_values = size_t(operation.Cells.size()) * width * LocalDofs;
@@ -1247,7 +1154,7 @@ void ApplyMassShiftedCut(
             [](void *raw, size_t task) {
                 const auto &context = *static_cast<Context *>(raw);
                 const uint32_t first = uint32_t(task) * InteriorCellsPerTask;
-                ApplyTensorSerial<Order>(
+                ApplyTensorSerial(
                     context.Operation, context.Input, nullptr, context.Width, 1,
                     context.Operators.Alpha, nullptr, first,
                     std::min(InteriorCellsPerTask, uint32_t(context.Operators.InteriorCells.size()) - first),
@@ -1313,28 +1220,26 @@ void ApplyMassShiftedCut(
             }
         );
     }
-    CellGatherContext<Order> gather_context{
+    CellGatherContext gather_context{
         operation, context.CellOutput, context.CellMassOutput, shifted_output, mass_output, width, GatherNodesPerTask
     };
     const uint32_t tasks = (uint32_t(operation.Nodes.size()) + GatherNodesPerTask - 1) / GatherNodesPerTask;
     dispatch_apply_f(
         tasks, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &gather_context,
-        ApplyTensorCellGatherTile<Order>
+        ApplyTensorCellGatherTile
     );
 }
 
 } // namespace
 
 void modal::FiniteCellOperator::ApplyMass(const double *input, double *output, uint32_t width) const {
-    Order == 1 ? ApplyTensorParallel<1>(*this, input, output, width, 0, 1) :
-                 ApplyTensorParallel<2>(*this, input, output, width, 0, 1);
+    ApplyTensorParallel(*this, input, output, width, 0, 1);
 }
 
 void modal::FiniteCellOperator::ApplyMassShifted(
     const double *input, double *mass_output, double *shifted_output, uint32_t width, double alpha
 ) const {
-    Order == 1 ? ApplyTensorParallel<1>(*this, input, shifted_output, width, 1, alpha, mass_output) :
-                 ApplyTensorParallel<2>(*this, input, shifted_output, width, 1, alpha, mass_output);
+    ApplyTensorParallel(*this, input, shifted_output, width, 1, alpha, mass_output);
 }
 
 void modal::FiniteCellOperator::ApplyMassShiftedExpandedPackedCut(
@@ -1343,18 +1248,15 @@ void modal::FiniteCellOperator::ApplyMassShiftedExpandedPackedCut(
 ) const {
     if (operators.InteriorCells.size() + operators.CutCells.size() != Cells.size())
         throw std::invalid_argument("Finite-cell packed cut operators do not match the operation.");
-    Order == 1 ? ::ApplyMassShiftedCut<1>(*this, operators, input, mass_output, shifted_output, width) :
-                 ::ApplyMassShiftedCut<2>(*this, operators, input, mass_output, shifted_output, width);
+    ::ApplyMassShiftedCut(*this, operators, input, mass_output, shifted_output, width);
 }
 
 void modal::FiniteCellOperator::ApplyStiffness(const double *input, double *output, uint32_t width) const {
-    Order == 1 ? ApplyTensorParallel<1>(*this, input, output, width, 1, 0) :
-                 ApplyTensorParallel<2>(*this, input, output, width, 1, 0);
+    ApplyTensorParallel(*this, input, output, width, 1, 0);
 }
 
 void modal::FiniteCellOperator::ApplyShifted(const double *input, double *output, uint32_t width, double alpha) const {
-    Order == 1 ? ApplyTensorParallel<1>(*this, input, output, width, 1, alpha) :
-                 ApplyTensorParallel<2>(*this, input, output, width, 1, alpha);
+    ApplyTensorParallel(*this, input, output, width, 1, alpha);
 }
 
 void modal::FiniteCellOperator::RestrictP1(const double *input, double *output, uint32_t width) const {
@@ -1382,7 +1284,7 @@ void modal::FiniteCellOperator::ProlongP1(const double *input, double *output, u
 }
 
 Eigen::VectorXd modal::FiniteCellOperator::ShiftedDiagonal(double alpha) const {
-    return Order == 1 ? ::ShiftedDiagonal<1>(*this, alpha) : ::ShiftedDiagonal<2>(*this, alpha);
+    return ::ShiftedDiagonal(*this, alpha);
 }
 
 void modal::FiniteCellOperator::PackCellShiftedLower(uint32_t cell, double alpha, std::span<double> packed) const {
@@ -1390,12 +1292,11 @@ void modal::FiniteCellOperator::PackCellShiftedLower(uint32_t cell, double alpha
     if (cell >= Cells.size()) throw std::out_of_range("Finite-cell local matrix index is out of range.");
     if (packed.size() != local_dofs * (local_dofs + 1) / 2)
         throw std::invalid_argument("Finite-cell packed local matrix does not match the operation.");
-    if (Order == 1) CellOperators<1, true>(*this, cell, alpha, nullptr, packed.data());
-    else CellOperators<2, true>(*this, cell, alpha, nullptr, packed.data());
+    CellOperators<2, true>(*this, cell, alpha, nullptr, packed.data());
 }
 
 modal::FiniteCellOperator::PackedCutOperators modal::FiniteCellOperator::BuildPackedCutOperators(double alpha) const {
-    return Order == 1 ? ::BuildPackedCutOperators<1>(*this, alpha) : ::BuildPackedCutOperators<2>(*this, alpha);
+    return ::BuildPackedCutOperators(*this, alpha);
 }
 
 modal::FiniteCellOperator::PackedCutOperators modal::FiniteCellOperator::BuildPackedCutOperators(
@@ -1404,8 +1305,7 @@ modal::FiniteCellOperator::PackedCutOperators modal::FiniteCellOperator::BuildPa
     const size_t local_dofs = 3 * NodesPerCell;
     if (packed_shifted_elements.size() != Cells.size() * local_dofs * (local_dofs + 1) / 2)
         throw std::invalid_argument("Finite-cell packed shifted elements do not match the operation.");
-    return Order == 1 ? ::BuildPackedCutOperators<1>(*this, alpha, packed_shifted_elements) :
-                        ::BuildPackedCutOperators<2>(*this, alpha, packed_shifted_elements);
+    return ::BuildPackedCutOperators(*this, alpha, packed_shifted_elements);
 }
 
 modal::FiniteCellOperator modal::FiniteCellOperator::WithFictitiousScale(double scale) const {
@@ -1418,11 +1318,11 @@ modal::FiniteCellOperator modal::FiniteCellOperator::WithFictitiousScale(double 
 }
 
 modal::FiniteCellOperator::AssembledLower modal::FiniteCellOperator::AssembleLower() const {
-    return Order == 1 ? Assemble<1, false>(*this) : Assemble<2, false>(*this);
+    return Assemble<false>(*this);
 }
 
 modal::FiniteCellOperator::AssembledLower modal::FiniteCellOperator::AssembleP1Lower() const {
-    return Order == 1 ? Assemble<1, true>(*this) : Assemble<2, true>(*this);
+    return Assemble<true>(*this);
 }
 
 Eigen::SparseMatrix<double> modal::FiniteCellOperator::AssembleP1ShiftedLower(double alpha) const {
@@ -1509,13 +1409,10 @@ modal::ImplicitDomain modal::MakeCylinderDomain(dvec3 center, double radius, dou
     };
 }
 
-modal::ImplicitDomain modal::MakeTriangleSurfaceDomain(
-    std::span<const dvec3> points, std::span<const uint32_t> triangle_indices, TriangleQuery query
-) {
+modal::ImplicitDomain modal::MakeTriangleSurfaceDomain(std::span<const dvec3> points, std::span<const uint32_t> triangle_indices) {
     if (points.empty() || triangle_indices.empty() || triangle_indices.size() % 3)
         throw std::invalid_argument("Finite-cell surface must contain indexed triangles.");
     auto surface = std::make_shared<TriangleSurface>();
-    surface->Query = query;
     surface->Triangles.reserve(triangle_indices.size() / 3);
     dvec3 min{std::numeric_limits<double>::infinity()}, max{-std::numeric_limits<double>::infinity()};
     for (const auto &point : points) {
@@ -1533,7 +1430,7 @@ modal::ImplicitDomain modal::MakeTriangleSurfaceDomain(
             surface->Triangles.push_back(vertices);
     }
     if (surface->Triangles.empty()) throw std::invalid_argument("Finite-cell surface has no nondegenerate triangles.");
-    if (query == TriangleQuery::Hierarchy) surface->Build();
+    surface->Build();
     return {
         min,
         max,
@@ -1542,34 +1439,27 @@ modal::ImplicitDomain modal::MakeTriangleSurfaceDomain(
     };
 }
 
-modal::FiniteCellOperator modal::BuildFiniteCellOperator(
-    const ImplicitDomain &domain, const AcousticMaterialProperties &material, FiniteCellConfig config
+modal::FiniteCellOperator BuildOperator(
+    const modal::ImplicitDomain &domain, const AcousticMaterialProperties &material, modal::FiniteCellConfig config,
+    bool moment_fitting
 ) {
     if (!domain.SignedDistance || config.Cells.x == 0 || config.Cells.y == 0 || config.Cells.z == 0)
         throw std::invalid_argument("Finite-cell domain and grid must be nonempty.");
-    if ((config.Order != 1 && config.Order != 2) || !(config.FictitiousScale > 0 && config.FictitiousScale <= 1) ||
-        config.PaddingCells < 0 || std::abs(config.GridOffsetCells.x) > config.PaddingCells ||
+    if (!(config.FictitiousScale > 0 && config.FictitiousScale <= 1) || config.PaddingCells < 0 ||
+        std::abs(config.GridOffsetCells.x) > config.PaddingCells ||
         std::abs(config.GridOffsetCells.y) > config.PaddingCells || std::abs(config.GridOffsetCells.z) > config.PaddingCells)
         throw std::invalid_argument("Finite-cell configuration parameters are out of range.");
 
     const auto start = Clock::now();
-    return config.Order == 1 ? Build<1>(domain, material, config, start) : Build<2>(domain, material, config, start);
+    return Build(domain, material, config, start, moment_fitting);
 }
 
-modal::FiniteCellSystem modal::AssembleFiniteCells(
-    const ImplicitDomain &domain, const AcousticMaterialProperties &material, FiniteCellConfig config
-) {
-    const auto start = Clock::now();
-    auto operation = BuildFiniteCellOperator(domain, material, config);
-    auto assembled = operation.AssembleLower();
-    FiniteCellSystem result{
-        .Mass = std::move(assembled.Mass),
-        .Stiffness = std::move(assembled.Stiffness),
-        .Nodes = std::move(operation.Nodes),
-        .Profile = operation.Profile,
-    };
-    result.Profile.Assemble = SecondsSince(start);
-    return result;
+modal::FiniteCellOperator modal::BuildFiniteCellOperator(const ImplicitDomain &domain, const AcousticMaterialProperties &material, FiniteCellConfig config) {
+    return BuildOperator(domain, material, config, true);
+}
+
+modal::FiniteCellOperator modal::oracle::BuildOctree(const ImplicitDomain &domain, const AcousticMaterialProperties &material, FiniteCellConfig config) {
+    return BuildOperator(domain, material, config, false);
 }
 
 modal::FiniteCellCertification modal::CertifyFiniteCellEigenpairs(
