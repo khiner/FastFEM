@@ -175,6 +175,10 @@ if(FASTFEM_BUILD_TOOLS)
     add_executable(FastFEMFiniteCellAudioCorpus tools/FiniteCellAudioCorpus.cpp)
     target_link_libraries(FastFEMFiniteCellAudioCorpus PRIVATE FastFEM::FastFEM)
 
+    add_executable(FastFEMBlockSparseBenchmark tools/BlockSparseBenchmark.cpp)
+    target_link_libraries(FastFEMBlockSparseBenchmark PRIVATE FastFEM::FastFEM ${FASTFEM_TINYOBJLOADER_TARGET})
+    target_include_directories(FastFEMBlockSparseBenchmark PRIVATE tests)
+
 endif()
 
 if(FASTFEM_BUILD_TESTS)
