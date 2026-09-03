@@ -1100,25 +1100,27 @@ struct Mesh {
     double CosFacetSepAngTol{0}, CosSmallAngTol{0};
     int Plc{1}; // Marks piecewise-linear input and clears during cavity triangulation.
 
-    long HullSize{};
-    int CheckSubsegFlag{}, CheckSubfaceFlag{}, CheckConstraints{};
-    int BoundaryRecoveryFlag{};
-    int NonConvex{};
-    int UseInsertRadius{};
-    long InSegments{};
-    long DupVerts{}, UnuVerts{};
-    long StSegRefCount{}, StFacRefCount{}, StVolRefCount{};
-    long Flip14Count{}, Flip26Count{}, FlipN2nCount{};
-    long Flip23Count{}, Flip32Count{}, Flip44Count{}, Flip41Count{}, Flip31Count{}, Flip22Count{};
-    unsigned long RandomSeed{1};
-    std::minstd_rand0 Rng; // Stores one libc-compatible random sequence per mesh.
-    double LongEst{}, MinEdgeLength{};
-    dvec3 BoxMin{}, BoxMax{};
-    long SteinerLeft{-1};
-    bool SkippedFacet{}; // Indicates a facet-recovery failure caused by self-intersecting input.
-    long MissingEdgeCount{}, MissingFaceCount{}; // Counts boundary elements absent from the initial Delaunay triangulation.
-    Triface RecentTet{};
-    Facet RecentSh{};
+    struct {
+        long HullSize{};
+        int CheckSubsegFlag{}, CheckSubfaceFlag{}, CheckConstraints{};
+        int BoundaryRecoveryFlag{};
+        int NonConvex{};
+        int UseInsertRadius{};
+        long InSegments{};
+        long DupVerts{}, UnuVerts{};
+        long StSegRefCount{}, StFacRefCount{}, StVolRefCount{};
+        long Flip14Count{}, Flip26Count{}, FlipN2nCount{};
+        long Flip23Count{}, Flip32Count{}, Flip44Count{}, Flip41Count{}, Flip31Count{}, Flip22Count{};
+        unsigned long RandomSeed{1};
+        std::minstd_rand0 Rng; // Stores one libc-compatible random sequence per mesh.
+        double LongEst{}, MinEdgeLength{};
+        dvec3 BoxMin{}, BoxMax{};
+        long SteinerLeft{-1};
+        bool SkippedFacet{}; // Indicates a facet-recovery failure caused by self-intersecting input.
+        long MissingEdgeCount{}, MissingFaceCount{}; // Counts boundary elements absent from the initial Delaunay triangulation.
+        Triface RecentTet{};
+        Facet RecentSh{};
+    } State;
 
     std::vector<Triface> CaveOldTetList, CaveBdryList, CaveTetList;
     std::vector<Facet> CaveTetShList, CaveTetSegList;
@@ -1427,13 +1429,13 @@ struct Mesh {
     void release_steiner(int steinerpt, VertType vt) {
         if (pointtype(steinerpt) != UnusedVertex) {
             setpointtype(steinerpt, UnusedVertex);
-            ++UnuVerts;
+            ++State.UnuVerts;
         }
         if (vt != VolVertex) {
-            if (vt == FreeSegVertex) --StSegRefCount;
-            else if (vt == FreeFacetVertex) --StFacRefCount;
-            else if (vt == FreeVolVertex) --StVolRefCount;
-            if (SteinerLeft > 0) ++SteinerLeft;
+            if (vt == FreeSegVertex) --State.StSegRefCount;
+            else if (vt == FreeFacetVertex) --State.StFacRefCount;
+            else if (vt == FreeVolVertex) --State.StVolRefCount;
+            if (State.SteinerLeft > 0) ++State.SteinerLeft;
         }
     }
 
@@ -1516,7 +1518,7 @@ struct Mesh {
 
         const int pa = org(fliptets[0]), pb = dest(fliptets[0]), pc = apex(fliptets[0]);
         const int pd = oppo(fliptets[0]), pe = oppo(fliptets[1]);
-        ++Flip23Count;
+        ++State.Flip23Count;
 
         for (int i = 0; i < 3; ++i) {
             fnext(fliptets[0], topcastets[i]);
@@ -1549,7 +1551,7 @@ struct Mesh {
                     eprevesymself(fliptets[i]);
                     enextself(fliptets[i]);
                 }
-                HullSize += 2; // one hull tet went, three came
+                State.HullSize += 2; // one hull tet went, three came
             }
         } else {
             setvertices(fliptets[0], pe, pd, pa, pb);
@@ -1588,7 +1590,7 @@ struct Mesh {
             bond(newface, botcastets[i]);
         }
 
-        if (CheckSubsegFlag) {
+        if (State.CheckSubsegFlag) {
             Facet checkseg;
             for (int i = 0; i < 3; ++i) { // the middle three edges [a,b], [b,c], [c,a]
                 if (issubseg(topcastets[i])) {
@@ -1624,7 +1626,7 @@ struct Mesh {
             }
         }
 
-        if (CheckSubfaceFlag) {
+        if (State.CheckSubfaceFlag) {
             for (int i = 0; i < 3; ++i) {
                 eorgoppo(fliptets[i], newface);
                 rebond_subface(topcastets[i], newface, fc);
@@ -1675,7 +1677,7 @@ struct Mesh {
                 }
             }
         }
-        RecentTet = fliptets[0];
+        State.RecentTet = fliptets[0];
     }
 
     // Replace the edge [e,d] shared by [e,d,a,b], [e,d,b,c], [e,d,c,a] with the face [a,b,c].
@@ -1712,7 +1714,7 @@ struct Mesh {
 
         const int pa = apex(fliptets[0]), pb = apex(fliptets[1]), pc = apex(fliptets[2]);
         const int pd = dest(fliptets[0]), pe = org(fliptets[0]);
-        ++Flip32Count;
+        ++State.Flip32Count;
 
         for (int i = 0; i < 3; ++i) {
             eorgoppo(fliptets[i], casface);
@@ -1723,7 +1725,7 @@ struct Mesh {
             fsym(casface, botcastets[i]);
         }
 
-        if (CheckSubfaceFlag) {
+        if (State.CheckSubfaceFlag) {
             for (int i = 0; i < 3; ++i) {
                 tspivot(fliptets[i], flipshs[i]);
                 if (flipshs[i].sh != None) {
@@ -1741,7 +1743,7 @@ struct Mesh {
 
         if (hullflag > 0) {
             if (pc != DummyPoint) {
-                if (pd == DummyPoint) HullSize -= 2; // three hull tets went, one came
+                if (pd == DummyPoint) State.HullSize -= 2; // three hull tets went, one came
                 setvertices(fliptets[0], pa, pb, pc, pd);
                 setvertices(fliptets[1], pb, pa, pc, pe);
             } else {
@@ -1785,7 +1787,7 @@ struct Mesh {
             eprevself(fliptets[1]);
         }
 
-        if (CheckSubsegFlag) {
+        if (State.CheckSubsegFlag) {
             for (int i = 0; i < 3; ++i) { // edges a->b, b->c, c->a
                 if (issubseg(topcastets[i])) {
                     tsspivot1(topcastets[i], checkseg);
@@ -1820,7 +1822,7 @@ struct Mesh {
             }
         }
 
-        if (CheckSubfaceFlag) {
+        if (State.CheckSubfaceFlag) {
             Facet checksh;
             for (int i = 0; i < 3; ++i) { // at edges [b,a], [c,b], [a,c]
                 esym(fliptets[0], newface);
@@ -1909,7 +1911,7 @@ struct Mesh {
                 flippush(&newface);
             }
         }
-        RecentTet = fliptets[0];
+        State.RecentTet = fliptets[0];
     }
 
     // Remove the vertex p at the centre of [p,d,a,b], [p,d,b,c], [p,d,c,a] and [a,b,c,p].
@@ -1923,7 +1925,7 @@ struct Mesh {
 
         const int pa = org(fliptets[3]), pb = dest(fliptets[3]), pc = apex(fliptets[3]);
         const int pd = dest(fliptets[0]), pp = org(fliptets[0]);
-        ++Flip41Count;
+        ++State.Flip41Count;
 
         for (int i = 0; i < 3; ++i) {
             enext(fliptets[i], topcastets[i]);
@@ -1932,7 +1934,7 @@ struct Mesh {
         }
         fsym(fliptets[3], botcastet);
 
-        if (CheckSubfaceFlag) {
+        if (State.CheckSubfaceFlag) {
             for (int i = 0; i < 3; ++i) {
                 fnext(fliptets[3], newface);
                 tspivot(newface, flipshs[i]);
@@ -1961,7 +1963,7 @@ struct Mesh {
 
         if (pp != DummyPoint) {
             setpointtype(pp, UnusedVertex);
-            ++UnuVerts;
+            ++State.UnuVerts;
         }
 
         if (hullflag > 0) {
@@ -1986,8 +1988,8 @@ struct Mesh {
                 setvertices(fliptets[0], pa, pb, pc, pd);
                 dummyflag = pp == DummyPoint ? -1 : 0;
             }
-            if (dummyflag > 0) HullSize -= 2;
-            else if (dummyflag < 0) HullSize -= 4;
+            if (dummyflag > 0) State.HullSize -= 2;
+            else if (dummyflag < 0) State.HullSize -= 4;
         } else {
             setvertices(fliptets[0], pa, pb, pc, pd);
         }
@@ -2018,7 +2020,7 @@ struct Mesh {
         }
         bond(fliptets[0], botcastet);
 
-        if (CheckSubsegFlag) {
+        if (State.CheckSubsegFlag) {
             Facet checkseg;
             for (int i = 0; i < 3; ++i) {
                 eprev(topcastets[i], newface);
@@ -2041,7 +2043,7 @@ struct Mesh {
             }
         }
 
-        if (CheckSubfaceFlag) {
+        if (State.CheckSubfaceFlag) {
             Facet checksh;
             for (int i = 0; i < 3; ++i) {
                 esym(fliptets[0], newface);
@@ -2086,7 +2088,7 @@ struct Mesh {
                 }
             }
         }
-        RecentTet = fliptets[0];
+        State.RecentTet = fliptets[0];
     }
 
     // The link level the flip search climbs to when no explicit one is set.
@@ -2181,14 +2183,14 @@ struct Mesh {
             enextself(spintet); // [x, d], x = a, b, c
             tsspivot1(spintet, checkseg1);
             bool isseg = checkseg1.sh != None;
-            if (!isseg && BoundaryRecoveryFlag) isseg = is_segment(checkpt, pd);
+            if (!isseg && State.BoundaryRecoveryFlag) isseg = is_segment(checkpt, pd);
             if (isseg) {
                 fsym(checktet, spintet);
                 esymself(spintet);
                 eprevself(spintet);
                 tsspivot1(spintet, checkseg2);
                 isseg = checkseg2.sh != None;
-                if (!isseg && BoundaryRecoveryFlag) isseg = is_segment(checkpt, pe);
+                if (!isseg && State.BoundaryRecoveryFlag) isseg = is_segment(checkpt, pe);
                 if (isseg) {
                     if (pointtype(checkpt) == FreeSegVertex) return false;
                     if (checkpt != DummyPoint && pe != DummyPoint && pd != DummyPoint) {
@@ -2220,10 +2222,10 @@ struct Mesh {
             const int leftpt = apex(abtets[(k + 2) % 3]);
             const int rightpt = apex(abtets[(k + 1) % 3]);
             bool isseg = checksegs[k].sh != None;
-            if (!isseg && BoundaryRecoveryFlag) isseg = is_segment(chkpt, rightpt);
+            if (!isseg && State.BoundaryRecoveryFlag) isseg = is_segment(chkpt, rightpt);
             if (isseg) {
                 isseg = checksegs[(k + 2) % 3].sh != None;
-                if (!isseg && BoundaryRecoveryFlag) isseg = is_segment(chkpt, leftpt);
+                if (!isseg && State.BoundaryRecoveryFlag) isseg = is_segment(chkpt, leftpt);
                 if (isseg) {
                     if (pointtype(chkpt) == FreeSegVertex) return false;
                     if (chkpt != DummyPoint && leftpt != DummyPoint && rightpt != DummyPoint) {
@@ -2359,7 +2361,7 @@ struct Mesh {
             reflexlinkedgecount = 0;
             for (int i = 0; i < n; ++i) {
                 // Let the face of abtets[i] be [a,b,c].
-                if (CheckSubfaceFlag && issubface(abtets[i])) continue;
+                if (State.CheckSubfaceFlag && issubface(abtets[i])) continue;
                 // Preserve faces shared by two vertex stars.
                 if (elemcounter(abtets[i]) > 1 || elemcounter(abtets[(i - 1 + n) % n]) > 1) continue;
 
@@ -2407,7 +2409,7 @@ struct Mesh {
                     }
                 }
 
-                if (reducflag && NonConvex && hulledgeflag) {
+                if (reducflag && State.NonConvex && hulledgeflag) {
                     // Reject creation of duplicate hull edge [e,d].
                     if (getedge(pe, pd, &spintet)) reducflag = 0;
                 }
@@ -2490,7 +2492,7 @@ struct Mesh {
                         }
                         if (!edgepivot) continue;
 
-                        if (CheckSubsegFlag && issubseg(flipedge)) {
+                        if (State.CheckSubsegFlag && issubseg(flipedge)) {
                             if (fc->collectencsegflag) {
                                 Facet checkseg;
                                 tsspivot1(flipedge, checkseg);
@@ -2620,7 +2622,7 @@ struct Mesh {
                 }
             } else {
                 // [a,b] is a hull edge, which happens in the middle of a 4-4 flip.
-                if (!NonConvex) {
+                if (!State.NonConvex) {
                     ori = orient3d(P(pa), P(pb), P(pc), P(pd));
                     if (ori == 0) reducflag = 1;
                 } else {
@@ -2661,7 +2663,7 @@ struct Mesh {
             }
 
             if (reducflag) {
-                if (CheckSubfaceFlag) {
+                if (State.CheckSubfaceFlag) {
                     // The edge may be flipped only when 0 or 2 subfaces meet it.
                     // Two incident subfaces require a corresponding surface 2-2 flip.
                     nn = 0;
@@ -2821,7 +2823,7 @@ struct Mesh {
         const int pa = sorg(flipfaces[0]), pb = sdest(flipfaces[0]);
         const int pc = sapex(flipfaces[0]), pd = sapex(flipfaces[1]);
         if (sorg(flipfaces[1]) != pb) sesymself(flipfaces[1]);
-        ++Flip22Count;
+        ++State.Flip22Count;
 
         senext(flipfaces[0], bdedges[0]);
         senext2(flipfaces[0], bdedges[1]);
@@ -2853,7 +2855,7 @@ struct Mesh {
         if (chkencflag & 2) {
             for (int i = 0; i < 2; ++i) enqueuesubface(BadSubfacs, &flipfaces[i]);
         }
-        RecentSh = flipfaces[0];
+        State.RecentSh = flipfaces[0];
         if (flipflag) {
             for (int i = 0; i < 4; ++i) flipshpush(&bdedges[i]);
         }
@@ -2864,7 +2866,7 @@ struct Mesh {
     void flip31(Facet *flipfaces, int flipflag) {
         Facet bdedges[3], outfaces[3], infaces[3], bdsegs[3];
         const int pa = sdest(flipfaces[0]), pb = sdest(flipfaces[1]), pc = sdest(flipfaces[2]);
-        ++Flip31Count;
+        ++State.Flip31Count;
 
         for (int i = 0; i < 3; ++i) {
             senext(flipfaces[i], bdedges[i]);
@@ -2874,8 +2876,8 @@ struct Mesh {
         makesubface(&flipfaces[3]);
         setshvertices(flipfaces[3], pa, pb, pc);
         setshellmark(flipfaces[3], shellmark(flipfaces[0]));
-        if (CheckConstraints) setareabound(flipfaces[3], areabound(flipfaces[0]));
-        if (UseInsertRadius) setfacetindex(flipfaces[3], getfacetindex(flipfaces[0]));
+        if (State.CheckConstraints) setareabound(flipfaces[3], areabound(flipfaces[0]));
+        if (State.UseInsertRadius) setfacetindex(flipfaces[3], getfacetindex(flipfaces[0]));
 
         if (pointtype(pa) == FreeFacetVertex) setpoint2sh(pa, SEncode(flipfaces[3]));
         if (pointtype(pb) == FreeFacetVertex) setpoint2sh(pb, SEncode(flipfaces[3]));
@@ -2889,7 +2891,7 @@ struct Mesh {
             if (outfaces[i].sh != None) put_bdedge(bdedges[i], outfaces[i], infaces[i], bdsegs[i]);
             if (bdsegs[i].sh != None) ssbond(bdedges[i], bdsegs[i]);
         }
-        RecentSh = flipfaces[3];
+        State.RecentSh = flipfaces[3];
         if (flipflag) {
             for (int i = 0; i < 3; ++i) flipshpush(&bdedges[i]);
         }
@@ -2922,7 +2924,7 @@ struct Mesh {
     // Returns 2 when it is gone, otherwise the current size of its star.
     int removeedgebyflips(Triface *flipedge, FlipConstraints *fc) {
         Triface spintet;
-        if (CheckSubsegFlag && issubseg(*flipedge)) {
+        if (State.CheckSubsegFlag && issubseg(*flipedge)) {
             if (fc->collectencsegflag) {
                 Facet checkseg;
                 tsspivot1(*flipedge, checkseg);
@@ -3175,13 +3177,13 @@ struct Mesh {
     unsigned long randomnation(unsigned int choices) {
         if (choices == 0) return 0;
         if (choices >= 714025l) {
-            unsigned long newrandom = (RandomSeed * 1366l + 150889l) % 714025l;
-            RandomSeed = (newrandom * 1366l + 150889l) % 714025l;
-            newrandom = newrandom * (choices / 714025l) + RandomSeed;
+            unsigned long newrandom = (State.RandomSeed * 1366l + 150889l) % 714025l;
+            State.RandomSeed = (newrandom * 1366l + 150889l) % 714025l;
+            newrandom = newrandom * (choices / 714025l) + State.RandomSeed;
             return newrandom >= choices ? newrandom - choices : newrandom;
         }
-        RandomSeed = (RandomSeed * 1366l + 150889l) % 714025l;
-        return RandomSeed % choices;
+        State.RandomSeed = (State.RandomSeed * 1366l + 150889l) % 714025l;
+        return State.RandomSeed % choices;
     }
 
     // Restores the cavity and clears working lists.
@@ -3231,7 +3233,7 @@ struct Mesh {
     bool build_initial_cavity(int loc, Triface *searchtet, Facet *splitsh, Facet *splitseg, InsertFlags *ivf) {
         Triface neightet, spintet;
         if (loc == Outside || loc == InTetrahedron) {
-            ++Flip14Count;
+            ++State.Flip14Count;
             for (int i = 0; i < 4; ++i) {
                 Decode(Tets[searchtet->tet].N[i], neightet);
                 neightet.ver = epivot[neightet.ver];
@@ -3240,7 +3242,7 @@ struct Mesh {
             infect(*searchtet);
             CaveOldTetList.push_back(*searchtet);
         } else if (loc == OnFace) {
-            ++Flip26Count;
+            ++State.Flip26Count;
             int j = searchtet->ver & 3;
             for (int i = 1; i < 4; ++i) {
                 Decode(Tets[searchtet->tet].N[(j + i) % 4], neightet);
@@ -3263,7 +3265,7 @@ struct Mesh {
                 CaveShList.push_back(*splitsh);
             }
         } else if (loc == OnEdge) {
-            ++FlipN2nCount;
+            ++State.FlipN2nCount;
             spintet = *searchtet;
             while (true) {
                 eorgoppo(spintet, neightet);
@@ -3352,7 +3354,7 @@ struct Mesh {
         int nearpt = None;
         for (const int parypt : CaveTetVertList) {
             const double rd = distance(P(parypt), P(insertpt));
-            if (rd < MinEdgeLength) {
+            if (rd < State.MinEdgeLength) {
                 if (!create_a_shorter_edge(insertpt, parypt) && !ivf->ignore_near_vertex) {
                     nearpt = parypt;
                     loc = NearVertex;
@@ -3403,8 +3405,8 @@ struct Mesh {
                 } else {
                     // A visible convex-hull face expands the cavity.
                     // A coplanar convex-hull face and every non-convex boundary face use the adjacent interior tetrahedron.
-                    bool decide_behind = NonConvex;
-                    if (!NonConvex) {
+                    bool decide_behind = State.NonConvex;
+                    if (!State.NonConvex) {
                         const double ori = orient3d(P(e.V[0]), P(e.V[1]), P(e.V[2]), P(insertpt));
                         if (ori < 0) enqflag = true;
                         else decide_behind = ori == 0.0;
@@ -3443,7 +3445,7 @@ struct Mesh {
     // Collects every segment and subface of C(p) for attachment to the replacement tetrahedra.
     // Returns false when p encroaches a collected boundary element.
     bool collect_cavity_boundary(int insertpt, Facet *splitseg, InsertFlags *ivf) {
-        if (CheckSubsegFlag) {
+        if (State.CheckSubsegFlag) {
             Facet checkseg;
             for (const auto &cavetet : CaveOldTetList) {
                 for (int j = 0; j < 6; ++j) {
@@ -3474,7 +3476,7 @@ struct Mesh {
             }
         }
 
-        if (CheckSubfaceFlag) {
+        if (State.CheckSubfaceFlag) {
             Facet checksh;
             for (const auto &cavetet : CaveOldTetList) {
                 for (int j = 0; j < 4; ++j) {
@@ -3726,7 +3728,7 @@ struct Mesh {
     // Bond every boundary segment and subface of C(p) to a tet outside it, setting aside any that lies strictly inside.
     void bond_boundary_outward(InsertFlags *ivf) {
         Triface neightet, spintet, neineitet;
-        if (CheckSubsegFlag) {
+        if (State.CheckSubsegFlag) {
             for (size_t i = 0; i < CaveTetSegList.size(); ++i) {
                 const Facet paryseg = CaveTetSegList[i];
                 if (!smarktested(paryseg)) {
@@ -3758,7 +3760,7 @@ struct Mesh {
             }
         }
 
-        if (CheckSubfaceFlag) {
+        if (State.CheckSubfaceFlag) {
             for (size_t i = 0; i < CaveTetShList.size(); ++i) {
                 Facet parysh = CaveTetShList[i];
                 if (!smarktested(parysh)) {
@@ -3803,7 +3805,7 @@ struct Mesh {
                 setapex(newtet, apex(neightet));
                 setoppo(newtet, insertpt);
             } else {
-                ++HullSize;
+                ++State.HullSize;
                 maketetrahedron(&newtet);
                 setorg(newtet, org(neightet));
                 setdest(newtet, dest(neightet));
@@ -3815,7 +3817,7 @@ struct Mesh {
             CaveBdryList[i] = oldtet;
         }
 
-        RecentTet = newtet;
+        State.RecentTet = newtet;
         setpoint2tet(insertpt, Encode2(newtet.tet, 0));
         CaveTetList.clear();
 
@@ -3849,7 +3851,7 @@ struct Mesh {
     void reattach_boundary(int insertpt, Facet *splitsh, Facet *splitseg, InsertFlags *ivf) {
         Triface neightet, spintet;
         Facet checksh, checkseg;
-        if (CheckSubfaceFlag) {
+        if (State.CheckSubfaceFlag) {
             for (auto &parysh : CaveTetShList) {
                 if (!sinfected(parysh)) {
                     stpivot(parysh, neightet);
@@ -3860,7 +3862,7 @@ struct Mesh {
             }
         }
 
-        if (CheckSubsegFlag) {
+        if (State.CheckSubsegFlag) {
             for (auto &paryseg : CaveTetSegList) {
                 if (!sinfected(paryseg)) {
                     sstpivot1(paryseg, neightet);
@@ -3873,7 +3875,7 @@ struct Mesh {
             sinsertvertex(insertpt, splitsh, splitseg, ivf->sloc, ivf->sbowywat, 0);
         }
 
-        if (CheckSubfaceFlag) {
+        if (State.CheckSubfaceFlag) {
             if (ivf->splitbdflag) {
                 for (auto &parysh : CaveShBdList) {
                     spivot(parysh, checksh); // the new subface [a, b, p]
@@ -3913,7 +3915,7 @@ struct Mesh {
             }
         }
 
-        if (CheckSubsegFlag) {
+        if (State.CheckSubsegFlag) {
             if (ivf->splitbdflag) {
                 if (splitseg != nullptr) {
                     for (auto &paryseg : CaveSegShList) {
@@ -3983,13 +3985,13 @@ struct Mesh {
         }
 
         for (auto &t : CaveOldTetList) {
-            if (ishulltet(t)) --HullSize;
+            if (ishulltet(t)) --State.HullSize;
             tetrahedrondealloc(t.tet);
         }
 
         if ((splitsh != nullptr && splitsh->sh != None) || (splitseg != nullptr && splitseg->sh != None)) {
             for (auto &parysh : CaveShList) {
-                if (CheckSubfaceFlag) {
+                if (State.CheckSubfaceFlag) {
                     stpivot(parysh, neightet);
                     if (neightet.tet != None && Tets[neightet.tet].V[0] != None) {
                         tsdissolve(neightet);
@@ -4012,11 +4014,11 @@ struct Mesh {
         CaveOldTetList.clear();
         CaveBdryList.clear();
         CaveTetList.clear();
-        if (CheckSubsegFlag) {
+        if (State.CheckSubsegFlag) {
             CaveTetSegList.clear();
             CaveEncSegList.clear();
         }
-        if (CheckSubfaceFlag) {
+        if (State.CheckSubfaceFlag) {
             CaveTetShList.clear();
             CaveEncShList.clear();
         }
@@ -4129,8 +4131,8 @@ struct Mesh {
             for (auto &t : CaveOldTetList) unmarktest(t);
             for (auto &t : CaveBdryList) unmarktest(t);
             CaveTetList.clear();
-            if (CheckSubsegFlag) CaveTetSegList.clear();
-            if (CheckSubfaceFlag) CaveTetShList.clear();
+            if (State.CheckSubsegFlag) CaveTetSegList.clear();
+            if (State.CheckSubfaceFlag) CaveTetShList.clear();
             ivf->iloc = InStar;
             return 1;
         }
@@ -4249,7 +4251,7 @@ struct Mesh {
             middle = int(arraysize * ratio);
             brio_multiscale_sort(va, middle, threshold, ratio, depth);
         }
-        hilbert_sort3(&va[middle], arraysize - middle, 0, 0, BoxMin.x, BoxMax.x, BoxMin.y, BoxMax.y, BoxMin.z, BoxMax.z, 0);
+        hilbert_sort3(&va[middle], arraysize - middle, 0, 0, State.BoxMin.x, State.BoxMax.x, State.BoxMin.y, State.BoxMax.y, State.BoxMin.z, State.BoxMax.z, 0);
     }
 
     // The insphere test with symbolic perturbation of a cospherical tie, resolved on point index.
@@ -4279,12 +4281,12 @@ struct Mesh {
     // Pick a starting tet for point location: the closest of the current handle, the most recent tet, and a random sample of the pool.
     void randomsample(int searchpt, Triface *searchtet) {
         double searchdist;
-        if (!NonConvex) {
-            if (searchtet->tet == None) *searchtet = RecentTet;
+        if (!State.NonConvex) {
+            if (searchtet->tet == None) *searchtet = State.RecentTet;
             searchtet->ver = 3;
             searchdist = dot(P(searchpt) - P(org(*searchtet)), P(searchpt) - P(org(*searchtet)));
-            if (RecentTet.tet != searchtet->tet && RecentTet.tet != None) {
-                Triface rt = RecentTet;
+            if (State.RecentTet.tet != searchtet->tet && State.RecentTet.tet != None) {
+                Triface rt = State.RecentTet;
                 rt.ver = 3;
                 const double d = dot(P(searchpt) - P(org(rt)), P(searchpt) - P(org(rt)));
                 if (d < searchdist) {
@@ -4293,7 +4295,7 @@ struct Mesh {
                 }
             }
         } else {
-            searchdist = LongEst;
+            searchdist = State.LongEst;
         }
         // Uses the fourth root of the pool size and assigns at least one sample to each block.
         // A dead slot is re-drawn rather than skipped.
@@ -4375,7 +4377,7 @@ struct Mesh {
     // Locates a point while the triangulation remains convex.
     int locate_dt(int searchpt, Triface *searchtet) {
         int loc = Outside;
-        if (searchtet->tet == None) searchtet->tet = RecentTet.tet;
+        if (searchtet->tet == None) searchtet->tet = State.RecentTet.tet;
         if (ishulltet(*searchtet)) searchtet->tet = Tets[searchtet->tet].N[3] >> 4;
 
         face_toward(searchpt, searchtet);
@@ -4388,7 +4390,7 @@ struct Mesh {
                 loc = OnVertex;
                 break;
             }
-            const int s = int(Rng() % 3);
+            const int s = int(State.Rng() % 3);
             for (int i = 0; i < s; ++i) enextself(*searchtet);
 
             // Evaluates each orientation only after the preceding result fails to select a direction.
@@ -4421,7 +4423,7 @@ struct Mesh {
     int locate(int searchpt, Triface *searchtet, int chkencflag = 0) {
         WalkMove nextmove = OrgMove;
         int loc = Outside;
-        if (searchtet->tet == None) searchtet->tet = RecentTet.tet;
+        if (searchtet->tet == None) searchtet->tet = State.RecentTet.tet;
         if (ishulltet(*searchtet)) searchtet->tet = Tets[searchtet->tet].N[3] >> 4;
 
         face_toward(searchpt, searchtet);
@@ -4554,7 +4556,7 @@ struct Mesh {
             unmarktest(neightet);
             if (ishulltet(oldtet)) {
                 neightet.ver = epivot[neightet.ver];
-                if (apex(neightet) == DummyPoint) ++HullSize;
+                if (apex(neightet) == DummyPoint) ++State.HullSize;
             }
             const int v0 = dest(neightet), v1 = org(neightet), v2 = apex(neightet);
             maketetrahedron2(&newtet, v1, v0, insertpt, v2);
@@ -4590,12 +4592,12 @@ struct Mesh {
             CaveBdryList[i] = newtet;
         }
 
-        RecentTet = CaveBdryList[Rng() % f_out];
-        setpoint2tet(insertpt, Encode2(RecentTet.tet, 0));
+        State.RecentTet = CaveBdryList[State.Rng() % f_out];
+        setpoint2tet(insertpt, Encode2(State.RecentTet.tet, 0));
 
         for (const int t : CaveOldTetOnly) {
             const Triface o{t, 0};
-            if (ishulltet(o)) --HullSize;
+            if (ishulltet(o)) --State.HullSize;
             tetrahedrondealloc(t);
         }
         CaveOldTetOnly.clear();
@@ -4611,7 +4613,7 @@ struct Mesh {
         maketetrahedron2(&tetopb, pc, pa, pd, DummyPoint);
         maketetrahedron2(&tetopc, pa, pb, pd, DummyPoint);
         maketetrahedron2(&tetopd, pb, pa, pc, DummyPoint);
-        HullSize += 4;
+        State.HullSize += 4;
 
         bond(firsttet, tetopd);
         esym(firsttet, worktet);
@@ -4645,15 +4647,15 @@ struct Mesh {
             setpoint2tet(p, Encode(firsttet));
         }
         setpoint2tet(DummyPoint, Encode(tetopa));
-        RecentTet = firsttet;
+        State.RecentTet = firsttet;
     }
 
     bool incrementaldelaunay() {
         // A uniformly random permutation, then BRIO rounds laid out along a Hilbert curve.
         std::vector<int> permutarray(NumInputPoints);
-        Rng.seed(unsigned(NumInputPoints));
+        State.Rng.seed(unsigned(NumInputPoints));
         for (int i = 0; i < NumInputPoints; ++i) {
-            const int randindex = int(Rng() % (i + 1));
+            const int randindex = int(State.Rng() % (i + 1));
             permutarray[i] = permutarray[randindex];
             permutarray[randindex] = i + 1;
         }
@@ -4661,7 +4663,7 @@ struct Mesh {
         int ngroup = 0;
         brio_multiscale_sort(permutarray.data(), NumInputPoints, BrioThreshold, BrioRatio, &ngroup);
 
-        const double bboxsize = std::sqrt((BoxMax.x - BoxMin.x) * (BoxMax.x - BoxMin.x) + (BoxMax.y - BoxMin.y) * (BoxMax.y - BoxMin.y) + (BoxMax.z - BoxMin.z) * (BoxMax.z - BoxMin.z));
+        const double bboxsize = std::sqrt((State.BoxMax.x - State.BoxMin.x) * (State.BoxMax.x - State.BoxMin.x) + (State.BoxMax.y - State.BoxMin.y) * (State.BoxMax.y - State.BoxMin.y) + (State.BoxMax.z - State.BoxMin.z) * (State.BoxMax.z - State.BoxMin.z));
         const double bboxsize2 = bboxsize * bboxsize;
         const double bboxsize3 = bboxsize2 * bboxsize;
 
@@ -4700,7 +4702,7 @@ struct Mesh {
         Triface searchtet;
         for (int k = 4; k < NumInputPoints; ++k) {
             if (pointtype(permutarray[k]) == UnusedVertex) setpointtype(permutarray[k], VolVertex);
-            searchtet.tet = RecentTet.tet;
+            searchtet.tet = State.RecentTet.tet;
             searchtet.ver = 0;
             ivf.iloc = Outside;
             if (!insert_vertex_bw(permutarray[k], &searchtet, &ivf)) {
@@ -4708,7 +4710,7 @@ struct Mesh {
                     const int dup = org(searchtet);
                     setpoint2ppt(permutarray[k], dup);
                     setpointtype(permutarray[k], DuplicatedVertex);
-                    ++DupVerts;
+                    ++State.DupVerts;
                 } else if (ivf.iloc == NearVertex) {
                     bail(2); // insert_vertex_bw never reports this
                 }
@@ -4745,7 +4747,7 @@ struct Mesh {
             }
             if (pd == DummyPoint) {
                 // Only reachable once carving has made the mesh non-convex.
-                if (NonConvex) return AcrossFace;
+                if (State.NonConvex) return AcrossFace;
                 bail(2);
             }
 
@@ -4824,7 +4826,7 @@ struct Mesh {
         } else {
             if (loc != InStar) loc = iloc;
             if (loc == Outside) {
-                if (searchsh->sh == None) *searchsh = RecentSh;
+                if (searchsh->sh == None) *searchsh = State.RecentSh;
                 loc = slocate(insertpt, searchsh, 1, 1, rflag);
             }
         }
@@ -4876,8 +4878,8 @@ struct Mesh {
                 makesubface(&newsh);
                 setshvertices(newsh, pb, pa, insertpt);
                 setshellmark(newsh, shellmark(*searchsh));
-                if (CheckConstraints) setareabound(newsh, areabound(*searchsh));
-                if (UseInsertRadius) setfacetindex(newsh, getfacetindex(*searchsh));
+                if (State.CheckConstraints) setareabound(newsh, areabound(*searchsh));
+                if (State.UseInsertRadius) setfacetindex(newsh, getfacetindex(*searchsh));
                 sbond1(newsh, *searchsh);
                 sbond1(*searchsh, newsh);
                 if (casin.sh != None) {
@@ -4955,8 +4957,8 @@ struct Mesh {
             makesubface(&newsh);
             setshvertices(newsh, pa, pb, insertpt);
             setshellmark(newsh, shellmark(parysh));
-            if (CheckConstraints) setareabound(newsh, areabound(parysh));
-            if (UseInsertRadius) setfacetindex(newsh, getfacetindex(parysh));
+            if (State.CheckConstraints) setareabound(newsh, areabound(parysh));
+            if (State.UseInsertRadius) setfacetindex(newsh, getfacetindex(parysh));
             if (pointtype(pa) == FreeFacetVertex) setpoint2sh(pa, SEncode(newsh));
             if (pointtype(pb) == FreeFacetVertex) setpoint2sh(pb, SEncode(newsh));
             spivot(parysh, casout);
@@ -4981,7 +4983,7 @@ struct Mesh {
             sbond1(parysh, newsh);
         }
 
-        if (newsh.sh != None) RecentSh = newsh;
+        if (newsh.sh != None) State.RecentSh = newsh;
         if (pointtype(insertpt) == FreeFacetVertex) setpoint2sh(insertpt, SEncode(newsh));
 
         // Bond the new subfaces to each other.
@@ -5065,11 +5067,11 @@ struct Mesh {
                 setshvertices(bseg, insertpt, pb, None);
                 setshellmark(aseg, shellmark(*splitseg));
                 setshellmark(bseg, shellmark(*splitseg));
-                if (CheckConstraints) {
+                if (State.CheckConstraints) {
                     setareabound(aseg, areabound(*splitseg));
                     setareabound(bseg, areabound(*splitseg));
                 }
-                if (UseInsertRadius) {
+                if (State.UseInsertRadius) {
                     setfacetindex(aseg, getfacetindex(*splitseg));
                     setfacetindex(bseg, getfacetindex(*splitseg));
                 }
@@ -5423,8 +5425,8 @@ struct Mesh {
     // Drop the triangles of the facet's triangulation that lie outside its segments.
     void scarveholes(const std::vector<dvec3> &holelist) {
         Facet searchsh, neighsh;
-        smarktest(RecentSh);
-        CaveShList.push_back(RecentSh);
+        smarktest(State.RecentSh);
+        CaveShList.push_back(State.RecentSh);
         for (size_t i = 0; i < CaveShList.size(); ++i) {
             searchsh = CaveShList[i];
             searchsh.shver = 0;
@@ -5447,7 +5449,7 @@ struct Mesh {
         }
 
         for (const dvec3 &h : holelist) {
-            searchsh = RecentSh;
+            searchsh = State.RecentSh;
             if (slocate_at(h, None, &searchsh, 1, 1, 0) != Outside) {
                 sinfect(searchsh);
                 CaveShBdList.push_back(searchsh);
@@ -5563,7 +5565,7 @@ struct Mesh {
         makesubface(&newsh);
         setshvertices(newsh, pa, pb, pc);
         setshellmark(newsh, shmark);
-        RecentSh = newsh;
+        State.RecentSh = newsh;
         if (pointtype(pa) == VolVertex) setpointtype(pa, FacetVertex);
         if (pointtype(pb) == VolVertex) setpointtype(pb, FacetVertex);
         if (pointtype(pc) == VolVertex) setpointtype(pc, FacetVertex);
@@ -5589,7 +5591,7 @@ struct Mesh {
         for (; i < ptlist.size(); ++i) {
             const int ppt = ptlist[i];
             if (pinfected(ppt)) continue;
-            searchsh = RecentSh;
+            searchsh = State.RecentSh;
             const int iloc = sinsertvertex(ppt, &searchsh, nullptr, Outside, 1, 1);
             if (iloc == OnVertex) break; // the facet triangulation failed
             if (pointtype(ppt) == VolVertex) setpointtype(ppt, FacetVertex);
@@ -5617,7 +5619,7 @@ struct Mesh {
         size_t c = 0;
         for (; c < conlist.size(); ++c) {
             const int c0 = conlist[c][0], c1 = conlist[c][1];
-            searchsh = RecentSh;
+            searchsh = State.RecentSh;
             const int iloc = slocate(c0, &searchsh, 1, 1, 0);
             if (iloc != OnVertex) {
                 // Rounding lost it: sweep every subface of this facet for the vertex.
@@ -5751,7 +5753,7 @@ struct Mesh {
         for (const auto &e : inedges) {
             int endpts[2]{e[0], e[1]};
             if (endpts[0] == endpts[1]) continue;
-            if (DupVerts > 0) {
+            if (State.DupVerts > 0) {
                 for (int j = 0; j < 2; ++j) {
                     if (pointtype(endpts[j]) == DuplicatedVertex) endpts[j] = point2ppt(endpts[j]);
                 }
@@ -5837,7 +5839,7 @@ struct Mesh {
             setpointtype(Shells[sh].V[0], RidgeVertex);
             setpointtype(Shells[sh].V[1], RidgeVertex);
         });
-        InSegments = SubsegItems;
+        State.InSegments = SubsegItems;
     }
 
     // Abandon the build.
@@ -5909,13 +5911,13 @@ struct Mesh {
             enextesymself(*searchtet); // the face the edge leaves through
 
             if (dir == AcrossFace) {
-                if (CheckSubfaceFlag && issubface(*searchtet)) {
+                if (State.CheckSubfaceFlag && issubface(*searchtet)) {
                     if (sedge) idir = SelfIntersect;
                     return 0;
                 }
                 if (removefacebyflips(searchtet, &fc)) continue;
             } else if (dir == AcrossEdge) {
-                if (CheckSubsegFlag && issubseg(*searchtet)) {
+                if (State.CheckSubsegFlag && issubseg(*searchtet)) {
                     if (sedge) idir = SelfIntersect;
                     return 0;
                 }
@@ -5987,13 +5989,13 @@ struct Mesh {
                     bakface.foppo = oppo(*searchtet);
 
                     if (dir == AcrossFace) {
-                        if (CheckSubfaceFlag && issubface(*searchtet)) return 0;
+                        if (State.CheckSubfaceFlag && issubface(*searchtet)) return 0;
                         if (removefacebyflips(searchtet, &fc)) {
                             success = 1;
                             break;
                         }
                     } else if (dir == AcrossEdge) {
-                        if (CheckSubsegFlag && issubseg(*searchtet)) return 0;
+                        if (State.CheckSubsegFlag && issubseg(*searchtet)) return 0;
                         if (removeedgebyflips(searchtet, &fc) == 2) {
                             success = 1;
                             break;
@@ -6050,7 +6052,7 @@ struct Mesh {
         OptParameters opm;
 
         if (splitsliverflag) {
-            const int idx = int(Rng() % n);
+            const int idx = int(State.Rng() % n);
             const int pa = org(abtets[idx]), pb = dest(abtets[idx]);
             const int pcc = apex(abtets[idx]), pdd = oppo(abtets[idx]);
             const int steinerpt = makepoint(FreeVolVertex);
@@ -6065,8 +6067,8 @@ struct Mesh {
             ivf.respectbdflag = 1;
             if (insertpoint(steinerpt, &worktet, nullptr, nullptr, &ivf)) {
                 if (!FlipStack.empty()) recoverdelaunay();
-                ++StVolRefCount;
-                if (SteinerLeft > 0) --SteinerLeft;
+                ++State.StVolRefCount;
+                if (State.SteinerLeft > 0) --State.SteinerLeft;
                 return 1;
             }
             pointdealloc(steinerpt);
@@ -6148,8 +6150,8 @@ struct Mesh {
         ivf.iloc = InStar;
         ivf.chkencflag = chkencflag;
         if (insertpoint(steinerpt, &worktet, nullptr, nullptr, &ivf)) {
-            ++StVolRefCount;
-            if (SteinerLeft > 0) --SteinerLeft;
+            ++State.StVolRefCount;
+            if (State.SteinerLeft > 0) --State.SteinerLeft;
             return 1;
         }
         pointdealloc(steinerpt);
@@ -6267,12 +6269,12 @@ struct Mesh {
 
         if (AddSteinerAlgo == 1) {
             SubVertStack.push_back(steinerpt);
-            ++StSegRefCount;
+            ++State.StSegRefCount;
         } else {
             SubSegStack.push_back(SEncode(*misseg));
-            ++StVolRefCount;
+            ++State.StVolRefCount;
         }
-        if (SteinerLeft > 0) --SteinerLeft;
+        if (State.SteinerLeft > 0) --State.SteinerLeft;
         return 1;
     }
 
@@ -6449,8 +6451,8 @@ struct Mesh {
             if (insertpoint(steinerpt, &searchtet, &splitsh, misseg, &ivf)) {
                 if (!FlipStack.empty()) recoverdelaunay();
                 SubVertStack.push_back(steinerpt);
-                ++StSegRefCount;
-                if (SteinerLeft > 0) --SteinerLeft;
+                ++State.StSegRefCount;
+                if (State.SteinerLeft > 0) --State.SteinerLeft;
                 return 1;
             }
             if ((ivf.iloc == OnVertex || ivf.iloc == NearVertex) && misseg != nullptr && blocks_segment(org(searchtet), *misseg)) {
@@ -6526,7 +6528,7 @@ struct Mesh {
                     spivotself(spinsh);
                     if (spinsh.sh == neighsh.sh) break;
                 }
-                SkippedFacet = true;
+                State.SkippedFacet = true;
             }
         }
         return 0;
@@ -6604,8 +6606,8 @@ struct Mesh {
                                         Facet checksh;
                                         setpointtype(touchpt, FreeFacetVertex);
                                         sinsertvertex(touchpt, searchsh, nullptr, OnFace, 0, 0);
-                                        --StVolRefCount;
-                                        ++StFacRefCount;
+                                        --State.StVolRefCount;
+                                        ++State.StFacRefCount;
                                         SubVertStack.push_back(touchpt);
                                         for (auto &parysh : CaveShBdList) {
                                             spivot(parysh, checksh);
@@ -6790,13 +6792,13 @@ struct Mesh {
                     if (insertpoint(steinerpt, &searchtet, &searchsh, nullptr, &ivf)) {
                         if (!FlipStack.empty()) recoverdelaunay();
                         SubVertStack.push_back(steinerpt);
-                        ++StFacRefCount;
-                        if (SteinerLeft > 0) --SteinerLeft;
+                        ++State.StFacRefCount;
+                        if (State.SteinerLeft > 0) --State.SteinerLeft;
                         success = 1;
                     } else {
                         if (ivf.iloc == NearVertex) {
                             const int chkpt = org(searchtet);
-                            if (distance(P(steinerpt), P(chkpt)) < MinEdgeLength) {
+                            if (distance(P(steinerpt), P(chkpt)) < State.MinEdgeLength) {
                                 if (!issteinerpoint(chkpt)) dir = SelfIntersect;
                             } else {
                                 dir = SelfIntersect;
@@ -6853,9 +6855,9 @@ struct Mesh {
                 if (insertpoint(steinerpt, &searchtet, &searchsh, splitseg, &ivf)) {
                     if (!FlipStack.empty()) recoverdelaunay();
                     SubVertStack.push_back(steinerpt);
-                    if (splitseg_flag) ++StSegRefCount;
-                    else ++StFacRefCount;
-                    if (SteinerLeft > 0) --SteinerLeft;
+                    if (splitseg_flag) ++State.StSegRefCount;
+                    else ++State.StFacRefCount;
+                    if (State.SteinerLeft > 0) --State.SteinerLeft;
                     success = 1;
                 } else {
                     if (ivf.iloc == NearVertex) {
@@ -6893,7 +6895,7 @@ struct Mesh {
                     .fapex = Shells[searchsh.sh].V[2],
                 });
                 smarktest3(searchsh);
-                SkippedFacet = true;
+                State.SkippedFacet = true;
                 continue;
             }
 
@@ -6915,7 +6917,7 @@ struct Mesh {
                 if (pendpt == DummyPoint) continue;
                 int reduceflag = 0;
                 int dir;
-                if (NonConvex) {
+                if (State.NonConvex) {
                     dir = getedge(startpt, pendpt, &searchtet) ? AcrossVert : Intersect;
                 } else {
                     point2tetorg(startpt, searchtet);
@@ -7051,7 +7053,7 @@ struct Mesh {
         }
 
         if (!removeflag && vt == FreeSegVertex) {
-            if (getedge(lpt, rpt, &searchtet) && !CheckSubfaceFlag) {
+            if (getedge(lpt, rpt, &searchtet) && !State.CheckSubfaceFlag) {
                 // Moves the point into the volume when the edge already exists.
                 for (const Facet &seg : {leftseg, rightseg}) {
                     dissolve_seg_ring(seg);
@@ -7062,8 +7064,8 @@ struct Mesh {
                 CaveShBdList.clear();
                 bond_seg_ring(rightseg, searchtet);
                 setpointtype(steinerpt, FreeVolVertex);
-                --StSegRefCount;
-                ++StVolRefCount;
+                --State.StSegRefCount;
+                ++State.StVolRefCount;
                 return 1;
             }
         }
@@ -7075,7 +7077,7 @@ struct Mesh {
                 dissolve_seg_ring(seg);
                 sstdissolve1(seg);
             }
-            if (CheckSubfaceFlag) {
+            if (State.CheckSubfaceFlag) {
                 for (int i = 0; i < 2; ++i) {
                     checkseg = i == 0 ? leftseg : rightseg;
                     spivot(checkseg, parentsh);
@@ -7193,7 +7195,7 @@ struct Mesh {
         }
 
         if (vt == FreeSegVertex) {
-            const int slawson = CheckSubfaceFlag ? 0 : 1;
+            const int slawson = State.CheckSubfaceFlag ? 0 : 1;
             spivot(rightseg, parentsh);
             sremovevertex(steinerpt, &parentsh, &rightseg, slawson);
             rightseg.shver = 0;
@@ -7201,7 +7203,7 @@ struct Mesh {
             finddirection(&searchtet, rpt);
             if (dest(searchtet) != rpt) bail(2);
             bond_seg_ring(rightseg, searchtet);
-            if (CheckSubfaceFlag) {
+            if (State.CheckSubfaceFlag) {
                 spivot(rightseg, parentsh);
                 if (parentsh.sh != None) {
                     spinsh = parentsh;
@@ -7486,8 +7488,8 @@ struct Mesh {
             searchtet = neightet;
             ivf.iloc = InStar;
             if (insertpoint(newsteiners[k], &searchtet, nullptr, nullptr, &ivf)) {
-                ++StVolRefCount;
-                if (SteinerLeft > 0) --SteinerLeft;
+                ++State.StVolRefCount;
+                if (State.SteinerLeft > 0) --State.SteinerLeft;
             } else {
                 pointdealloc(newsteiners[k]);
                 newsteiners[k] = None;
@@ -7499,7 +7501,7 @@ struct Mesh {
         if (!removevertexbyflips(steinerpt)) return 0;
 
         setpointtype(steinerpt, UnusedVertex);
-        ++UnuVerts;
+        ++State.UnuVerts;
 
         const int bak_fliplinklevel = FlipLinkLevel;
         FlipLinkLevel = 100000;
@@ -7639,11 +7641,11 @@ struct Mesh {
         std::vector<Facet> misseglist, misshlist, bdrysteinerptlist;
         Triface neightet;
 
-        BoundaryRecoveryFlag = 1;
+        State.BoundaryRecoveryFlag = 1;
         CosCollinearAngTol = std::cos(CollinearAngTol / 180.0 * PI);
         if (SegmentEndpointsList.empty()) makesegmentendpointsmap();
 
-        CheckSubsegFlag = 1;
+        State.CheckSubsegFlag = 1;
 
         // Queue the segments in a random order.
         {
@@ -7667,7 +7669,7 @@ struct Mesh {
         while (true) {
             recoversegments(&misseglist, 0, 0);
             if (first_pass) {
-                MissingEdgeCount = long(misseglist.size());
+                State.MissingEdgeCount = long(misseglist.size());
                 first_pass = false;
             }
             if (misseglist.empty()) break;
@@ -7710,7 +7712,7 @@ struct Mesh {
             retry_segments(0, 2);
         }
 
-        if (StSegRefCount > 0) {
+        if (State.StSegRefCount > 0) {
             // Attempts to remove segment Steiner points.
             const int bak = FlipLinkLevel;
             FlipLinkLevel = 20;
@@ -7721,7 +7723,7 @@ struct Mesh {
             SubVertStack.clear();
         }
 
-        CheckSubfaceFlag = 1;
+        State.CheckSubfaceFlag = 1;
 
         {
             std::vector<int> shs;
@@ -7744,7 +7746,7 @@ struct Mesh {
         while (true) {
             recoversubfaces(&misshlist, 0);
             if (first_pass) {
-                MissingFaceCount = long(misshlist.size());
+                State.MissingFaceCount = long(misshlist.size());
                 first_pass = false;
             }
             if (misshlist.empty()) break;
@@ -7836,7 +7838,7 @@ struct Mesh {
             }
         }
 
-        if (StFacRefCount > 0) {
+        if (State.StFacRefCount > 0) {
             const int bak = FlipLinkLevel;
             FlipLinkLevel = 30;
             for (const int rempt : SubVertStack) {
@@ -7857,7 +7859,7 @@ struct Mesh {
             SubSegStack.clear();
         }
 
-        BoundaryRecoveryFlag = 0;
+        State.BoundaryRecoveryFlag = 0;
     }
 
     // Flood from the hull inward across every face that is not a subface.
@@ -8039,23 +8041,23 @@ struct Mesh {
                 Decode(point2tet(parypt), neightet);
                 if (neightet.tet == None || !infected(neightet)) continue;
                 if (parypt > NumInputPoints) {
-                    if (pointtype(parypt) == FreeSegVertex) --StSegRefCount;
-                    else if (pointtype(parypt) == FreeFacetVertex) --StFacRefCount;
-                    else --StVolRefCount;
-                    if (SteinerLeft > 0) ++SteinerLeft;
+                    if (pointtype(parypt) == FreeSegVertex) --State.StSegRefCount;
+                    else if (pointtype(parypt) == FreeFacetVertex) --State.StFacRefCount;
+                    else --State.StVolRefCount;
+                    if (State.SteinerLeft > 0) ++State.SteinerLeft;
                 }
                 setpointtype(parypt, UnusedVertex);
-                ++UnuVerts;
+                ++State.UnuVerts;
             }
             CaveTetVertList.clear();
 
-            HullSize += long(newhullfacearray.size()) - long(hullarray.size());
+            State.HullSize += long(newhullfacearray.size()) - long(hullarray.size());
 
             for (auto &t : tetarray) tetrahedrondealloc(t.tet);
             for (auto &t : hullarray) tetrahedrondealloc(t.tet);
         }
 
-        NonConvex = 1;
+        State.NonConvex = 1;
 
         // Peel the slivers off the hull.
         tetloop.ver = 11; // The face opposite dummypoint.
@@ -8120,7 +8122,7 @@ struct Mesh {
 
                 fsym(fliptets[0], fliptets[1]);
                 if (ishulltet(fliptets[1])) {
-                    if (NonConvex) {
+                    if (State.NonConvex) {
                         // The tet may be a hull sliver: two of its faces on the hull at one edge.
                         tspivot(fliptets[0], checksh);
                         if (checksh.sh == None) continue;
@@ -8154,8 +8156,8 @@ struct Mesh {
                                                     fnext(fliptets[0], fliptets[1]);
                                                     fnext(fliptets[1], fliptets[2]);
                                                     flip32(fliptets, 1, fc);
-                                                    --Flip32Count;
-                                                    --Flip22Count;
+                                                    --State.Flip32Count;
+                                                    --State.Flip22Count;
                                                     ++sliver_peels;
                                                     bank_prism_vol(fc);
                                                 }
@@ -8171,7 +8173,7 @@ struct Mesh {
                     continue;
                 }
 
-                if (CheckSubfaceFlag && issubface(fliptets[0])) continue;
+                if (State.CheckSubfaceFlag && issubface(fliptets[0])) continue;
 
                 const Tet &e1 = Tets[fliptets[1].tet];
                 if (insphere_s(e1.V[0], e1.V[1], e1.V[2], e1.V[3], oppo(fliptets[0])) >= 0) continue;
@@ -8208,7 +8210,7 @@ struct Mesh {
                     continue;
                 }
 
-                if (CheckSubsegFlag && issubseg(fliptets[0])) continue;
+                if (State.CheckSubsegFlag && issubseg(fliptets[0])) continue;
 
                 int scount = 0;
                 esymself(fliptets[0]); // [b,a,d,c]
@@ -8239,7 +8241,7 @@ struct Mesh {
 
                 fnext(fliptets[3], fliptets[4]);
                 if (fliptets[4].tet == fliptets[0].tet) {
-                    if (ori != 0.0 && NonConvex && apex(fliptets[3]) == DummyPoint) {
+                    if (ori != 0.0 && State.NonConvex && apex(fliptets[3]) == DummyPoint) {
                         ori = 0;
                         round_flag = 1;
                     }
@@ -8272,9 +8274,9 @@ struct Mesh {
                         fnext(fliptets[1], fliptets[2]);
                         flip32(&fliptets[1], apex(fliptets[3]) == DummyPoint, fc);
                         ++flipcount;
-                        --Flip23Count;
-                        --Flip32Count;
-                        ++Flip44Count;
+                        --State.Flip23Count;
+                        --State.Flip32Count;
+                        ++State.Flip44Count;
                         bank_prism_vol(fc);
                         continue;
                     }
@@ -8690,8 +8692,8 @@ struct Mesh {
             makesubseg(&abseg);
             setshvertices(abseg, pa, pb, None);
             setshellmark(abseg, shellmark(*parentseg));
-            if (CheckConstraints) setareabound(abseg, areabound(*parentseg));
-            if (UseInsertRadius) setfacetindex(abseg, getfacetindex(*parentseg));
+            if (State.CheckConstraints) setareabound(abseg, areabound(*parentseg));
+            if (State.UseInsertRadius) setfacetindex(abseg, getfacetindex(*parentseg));
             // Connect [#, a] to [a, b].
             senext2(prevseg, adjseg1);
             spivotself(adjseg1);
@@ -8921,7 +8923,7 @@ struct Mesh {
             return false;
         }
         // Preserves the point when the target lies within the resolvable distance.
-        if (distance(P(mesh_vert), target) < MinEdgeLength) {
+        if (distance(P(mesh_vert), target) < State.MinEdgeLength) {
             CaveOldTetList.clear();
             return false;
         }
@@ -8994,8 +8996,8 @@ struct Mesh {
                 default: break;
             }
         }
-        if (long(smpt_list.size()) != StVolRefCount || long(surf_smpt_list.size()) != StFacRefCount ||
-            long(seg_smpt_list.size()) != StSegRefCount) {
+        if (long(smpt_list.size()) != State.StVolRefCount || long(surf_smpt_list.size()) != State.StFacRefCount ||
+            long(seg_smpt_list.size()) != State.StSegRefCount) {
             bail(2);
         }
 
@@ -9140,7 +9142,7 @@ struct Mesh {
         }
         if (i == 6) bail(2);
 
-        if (Lmin <= MinEdgeLength) {
+        if (Lmin <= State.MinEdgeLength) {
             const int e1 = org(short_edge), e2 = dest(short_edge);
             if (issteinerpoint(e1)) {
                 if (!create_a_shorter_edge(e1, e2)) bail(2);
@@ -9237,7 +9239,7 @@ struct Mesh {
         };
 
         if (insertpoint(steinerpt, &splittet, nullptr, nullptr, &ivf)) {
-            ++StVolRefCount;
+            ++State.StVolRefCount;
             if (!FlipStack.empty()) {
                 FlipConstraints fc;
                 fc.enqflag = 2;
@@ -9440,12 +9442,12 @@ struct Mesh {
             else break;
         }
 
-        long bak_st_count = StVolRefCount;
+        long bak_st_count = State.StVolRefCount;
         for (int iter = 0; iter < OptIterations && BadTetItems > 0; ++iter) {
             const long repaired_count = repair_badqual_tets(true, true, true);
             // Stop when nothing was repaired and no Steiner point was added.
-            if (repaired_count == 0 && bak_st_count == StVolRefCount) break;
-            bak_st_count = StVolRefCount;
+            if (repaired_count == 0 && bak_st_count == State.StVolRefCount) break;
+            bak_st_count = State.StVolRefCount;
         }
 
         if (BadTetItems > 0) repair_badqual_tets(true, false, false);
@@ -9689,14 +9691,14 @@ struct Mesh {
         ivf.respectbdflag = 1;
         ivf.refineflag = 1;
         ivf.refinetet = *splittet;
-        ivf.smlenflag = UseInsertRadius;
-        ivf.check_insert_radius = qflag ? 0 : UseInsertRadius;
+        ivf.smlenflag = State.UseInsertRadius;
+        ivf.check_insert_radius = qflag ? 0 : State.UseInsertRadius;
         ivf.parentpt = None;
 
         if (insertpoint(newpt, &searchtet, nullptr, nullptr, &ivf)) {
-            ++StVolRefCount;
-            if (SteinerLeft > 0) --SteinerLeft;
-            if (UseInsertRadius) {
+            ++State.StVolRefCount;
+            if (State.SteinerLeft > 0) --State.SteinerLeft;
+            if (State.UseInsertRadius) {
                 // The shorter of this tet's smallest edge and the distance to the nearest vertex.
                 const double rv = param[3] > 0.0 ? std::min(param[3], ivf.smlen) : 0.0;
                 setpointinsradius(newpt, rv);
@@ -9729,10 +9731,10 @@ struct Mesh {
                 for (const auto &bface : BadTets) CheckTetsList.push_back(bface.tt);
                 BadTets.clear();
             }
-            if (SteinerLeft == 0) break;
+            if (State.SteinerLeft == 0) break;
 
             // Replaces a randomly selected tetrahedron with the final pool entry.
-            const size_t i = Rng() % CheckTetsList.size();
+            const size_t i = State.Rng() % CheckTetsList.size();
             const Triface checktet = CheckTetsList[i];
             CheckTetsList[i] = CheckTetsList.back();
             CheckTetsList.pop_back();
@@ -9800,7 +9802,7 @@ struct Mesh {
             for (auto &bt : pending) {
                 if (bt.tt.tet == None || isdeadtet(bt.tt)) continue;
                 if (org(bt.tt) != bt.forg || dest(bt.tt) != bt.fdest || apex(bt.tt) != bt.fapex || oppo(bt.tt) != bt.foppo) continue;
-                if (SteinerLeft == 0) break;
+                if (State.SteinerLeft == 0) break;
 
                 InsertFlags ivf;
                 const int qflag = int(bt.key);
@@ -9845,24 +9847,24 @@ struct Mesh {
         for (int i = 0; i < NumInputPoints; ++i) {
             const dvec3 &q = points[size_t(i)];
             if (i == 0) {
-                BoxMin = BoxMax = q;
+                State.BoxMin = State.BoxMax = q;
             } else {
-                BoxMin = numeric::Min(BoxMin, q);
-                BoxMax = numeric::Max(BoxMax, q);
+                State.BoxMin = numeric::Min(State.BoxMin, q);
+                State.BoxMax = numeric::Max(State.BoxMax, q);
             }
         }
 
-        const double dx = BoxMax.x - BoxMin.x, dy = BoxMax.y - BoxMin.y, dz = BoxMax.z - BoxMin.z;
+        const double dx = State.BoxMax.x - State.BoxMin.x, dy = State.BoxMax.y - State.BoxMin.y, dz = State.BoxMax.z - State.BoxMin.z;
         // The largest edge two input vertices can span.
-        LongEst = std::sqrt(dx * dx + dy * dy + dz * dz);
-        if (LongEst == 0.0) bail(10); // A trivial point set.
+        State.LongEst = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (State.LongEst == 0.0) bail(10); // A trivial point set.
         // Two points closer than this are the same point.
-        MinEdgeLength = LongEst * Epsilon;
+        State.MinEdgeLength = State.LongEst * Epsilon;
 
-        Rng.seed(unsigned(NumInputPoints));
+        State.Rng.seed(unsigned(NumInputPoints));
 
         // Piecewise-linear input preserves every Steiner-point insertion radius.
-        UseInsertRadius = 1;
+        State.UseInsertRadius = 1;
 
         CosMinDihedral = std::cos(MinDihedral / 180.0 * PI);
         CosOptMaxDihedral = std::cos(OptMaxDihedral / 180.0 * PI);
@@ -9900,7 +9902,7 @@ struct Mesh {
         const auto t2 = clock::now();
 
         recoverboundary();
-        if (SkippedFacet) bail(3);
+        if (State.SkippedFacet) bail(3);
         const auto t3 = clock::now();
 
         carveholes();
@@ -9913,7 +9915,7 @@ struct Mesh {
 
         if (Quality) delaunayrefinement();
 
-        if (SmoothMaxIter > 0 && (StVolRefCount > 0 || StFacRefCount > 0)) smooth_vertices();
+        if (SmoothMaxIter > 0 && (State.StVolRefCount > 0 || State.StFacRefCount > 0)) smooth_vertices();
         improve_mesh();
         const auto t7 = clock::now();
 
@@ -9925,12 +9927,12 @@ struct Mesh {
         prof.FaceSeconds = secs(t1, t2);
         prof.RefineSeconds = secs(t5, t7);
         prof.Builds = 1;
-        prof.FlipCount = u32(Flip23Count + Flip32Count + Flip44Count + Flip41Count + Flip22Count + Flip31Count);
-        prof.MissingEdgeCount = u32(MissingEdgeCount);
-        prof.MissingFaceCount = u32(MissingFaceCount);
-        prof.BdrySteinerCount = u32(StSegRefCount + StFacRefCount);
-        prof.VolSteinerCount = u32(StVolRefCount);
-        prof.SplitCount = u32(StSegRefCount + StFacRefCount + StVolRefCount);
+        prof.FlipCount = u32(State.Flip23Count + State.Flip32Count + State.Flip44Count + State.Flip41Count + State.Flip22Count + State.Flip31Count);
+        prof.MissingEdgeCount = u32(State.MissingEdgeCount);
+        prof.MissingFaceCount = u32(State.MissingFaceCount);
+        prof.BdrySteinerCount = u32(State.StSegRefCount + State.StFacRefCount);
+        prof.VolSteinerCount = u32(State.StVolRefCount);
+        prof.SplitCount = u32(State.StSegRefCount + State.StFacRefCount + State.StVolRefCount);
     }
 
     // The live interior tets, with input point i mapped back to i - 1 and the Steiner points that survived appended after them.
