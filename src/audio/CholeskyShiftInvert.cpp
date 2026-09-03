@@ -10,23 +10,15 @@ double SecondsSince(std::chrono::steady_clock::time_point start) {
 
 CholeskyShiftInvert::CholeskyShiftInvert(
     const Eigen::SparseMatrix<double> &k, const Eigen::SparseMatrix<double> &m,
-    double &factorize_seconds, double &solve_seconds, SparseOrdering ordering, SparseStorage storage,
-    SparseCholeskyCache *cache, bool *symbolic_reuse
-) : K(k), M(m), FactorizeSeconds(factorize_seconds), SolveSeconds(solve_seconds), Ordering(ordering), Storage(storage), Cache(cache), SymbolicReuse(symbolic_reuse) {}
+    double &factorize_seconds, double &solve_seconds
+) : K(k), M(m), FactorizeSeconds(factorize_seconds), SolveSeconds(solve_seconds) {}
 
 CholeskyShiftInvert::~CholeskyShiftInvert() = default;
 
 void CholeskyShiftInvert::set_shift(const Scalar &sigma) {
     const auto start = std::chrono::steady_clock::now();
     Eigen::SparseMatrix<double> shifted = K - sigma * M;
-    if (Cache) {
-        const auto [symbolic, reused] = Cache->Acquire(shifted, Ordering, Storage);
-        Factor = std::make_unique<SparseCholesky>(shifted, *symbolic);
-        if (SymbolicReuse) *SymbolicReuse = reused;
-    } else {
-        Factor = std::make_unique<SparseCholesky>(shifted, Ordering, Storage);
-        if (SymbolicReuse) *SymbolicReuse = false;
-    }
+    Factor = std::make_unique<SparseCholesky>(shifted);
     FactorizeSeconds += SecondsSince(start);
 }
 

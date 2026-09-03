@@ -15,11 +15,7 @@ struct CholeskyShiftInvert {
 
     CholeskyShiftInvert(
         const Eigen::SparseMatrix<double> &k, const Eigen::SparseMatrix<double> &m,
-        double &factorize_seconds, double &solve_seconds,
-        SparseOrdering ordering = SparseOrdering::Default,
-        SparseStorage storage = SparseStorage::Scalar,
-        SparseCholeskyCache *cache = nullptr,
-        bool *symbolic_reuse = nullptr
+        double &factorize_seconds, double &solve_seconds
     );
     ~CholeskyShiftInvert();
 
@@ -32,9 +28,5 @@ struct CholeskyShiftInvert {
 
     const Eigen::SparseMatrix<double> &K, &M;
     double &FactorizeSeconds, &SolveSeconds;
-    SparseOrdering Ordering;
-    SparseStorage Storage;
-    SparseCholeskyCache *Cache;
-    bool *SymbolicReuse;
     std::unique_ptr<SparseCholesky> Factor;
 };

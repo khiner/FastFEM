@@ -3,12 +3,16 @@
 #include "StructuredBar.h"
 #include "ValidateTetMesh.h"
 #include "audio/AcousticMaterialProperties.h"
+#include "audio/BlockSparseCholesky.h"
+#include "audio/CholeskyShiftInvert.h"
 #include "audio/SparseCholesky.h"
 #include "audio/Tet10Assembler.h"
 #include "audio/mesh2modes.h"
 #include "mesh/Tets.h"
 
 #include <Eigen/Eigenvalues>
+#include <Spectra/MatOp/SparseSymMatProd.h>
+#include <Spectra/SymGEigsShiftSolver.h>
 #include <boost/ut.hpp>
 
 #include <algorithm>
@@ -82,7 +86,6 @@ Family Classify(const ModalModes &modes, uint32_t mode, const Bar &bar, int nx) 
     return Family::Other;
 }
 
-// Solve the bar and bucket FEM frequencies by classified family, ascending.
 std::map<Family, std::vector<double>> SolveBar(const Bar &bar, int nx, int ny, int nz) {
     const auto tets = MakeStructuredBar(nx, ny, nz, {bar.Length, bar.Width, bar.Thickness});
     const std::vector<vec3> all_positions(tets.Points.begin(), tets.Points.end());
@@ -106,7 +109,6 @@ std::vector<double> BendingTheory(const Bar &bar, double thickness, int per_root
     return freqs;
 }
 
-// A closed triangle surface in the tetrahedralizer's double coordinates.
 struct Surface {
     std::vector<dvec3> Points;
     std::vector<uint32_t> Tris;
@@ -139,7 +141,6 @@ Surface GridBox(int k) {
     return s;
 }
 
-// Icosphere with optional radial noise.
 Surface Sphere(int subdivisions, double noise, unsigned seed) {
     constexpr double phi = std::numbers::phi;
     std::vector<dvec3> pts{{-1, phi, 0}, {1, phi, 0}, {-1, -phi, 0}, {1, -phi, 0}, {0, -1, phi}, {0, 1, phi}, {0, -1, -phi}, {0, 1, -phi}, {phi, 0, -1}, {phi, 0, 1}, {-phi, 0, -1}, {-phi, 0, 1}};
@@ -179,7 +180,6 @@ std::filesystem::path DatasetDir() {
     return env_dataset ? env_dataset : REALIMPACT_DATASET_DIR;
 }
 
-// Compares the lowest computed modes of a family against theory.
 void CheckFamily(std::string_view name, const std::vector<double> &fem, const std::vector<double> &theory, double tolerance, size_t min_count = 2) {
     const auto count = std::min(fem.size(), theory.size());
     expect(count >= min_count);
@@ -214,24 +214,6 @@ int main() {
         }
     };
 
-    "Accelerate block3 Cholesky matches scalar storage"_test = [] {
-        constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
-        const double alpha = std::pow(2 * std::numbers::pi * 20, 2);
-        const modal::Tet10Assembler fem{MakeStructuredBar(2, 1, 1), material};
-        const auto [mass, stiffness] = fem.AssembleLower();
-        const Eigen::SparseMatrix<double> shifted = stiffness + alpha * mass;
-        SparseCholesky scalar{shifted}, blocked{shifted, SparseOrdering::Default, SparseStorage::Block3};
-        Eigen::MatrixXd rhs(fem.Dofs(), 4), scalar_solution(fem.Dofs(), 4), blocked_solution(fem.Dofs(), 4);
-        for (Eigen::Index column = 0; column < rhs.cols(); ++column)
-            for (Eigen::Index row = 0; row < rhs.rows(); ++row) rhs(row, column) = std::sin(0.03 * double((row + 1) * (column + 2)));
-        scalar.Solve(rhs.data(), scalar_solution.data(), rhs.cols());
-        blocked.Solve(rhs.data(), blocked_solution.data(), rhs.cols());
-        const auto action = shifted.selfadjointView<Eigen::Lower>();
-        expect((action * scalar_solution - rhs).norm() / rhs.norm() < 1e-8);
-        expect((action * blocked_solution - rhs).norm() / rhs.norm() < 1e-8);
-        expect((scalar_solution - blocked_solution).norm() / scalar_solution.norm() < 1e-8);
-    };
-
     "Accelerate Cholesky reuses symbolic analysis"_test = [] {
         constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
         const double alpha = std::pow(2 * std::numbers::pi * 20, 2);
@@ -239,7 +221,7 @@ int main() {
         const auto [mass, stiffness] = fem.AssembleLower();
         const Eigen::SparseMatrix<double> first = stiffness + alpha * mass;
         const Eigen::SparseMatrix<double> second = stiffness + 2 * alpha * mass;
-        SparseCholeskySymbolic symbolic{first, SparseOrdering::Metis};
+        SparseCholeskySymbolic symbolic{first};
         Eigen::SparseMatrix<double> diagonal(first.rows(), first.cols());
         diagonal.setIdentity();
         expect(symbolic.Matches(second));
@@ -252,6 +234,99 @@ int main() {
         expect((second.selfadjointView<Eigen::Lower>() * solution - rhs).norm() / rhs.norm() < 1e-8);
     };
 
+    "block sparse Cholesky reuses symbolic analysis across shifts and solves panels"_test = [] {
+        constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
+        const double alpha = std::pow(2 * std::numbers::pi * 20, 2);
+        const modal::Tet10Assembler fem{MakeStructuredBar(2, 1, 1), material};
+        const auto [mass, stiffness] = fem.AssembleLower();
+        BlockSparseCholesky native{fem};
+        Eigen::MatrixXd rhs(fem.Dofs(), 4), solution(fem.Dofs(), 4), first_solution, reference(fem.Dofs(), 4);
+        for (Eigen::Index column = 0; column < rhs.cols(); ++column)
+            for (Eigen::Index row = 0; row < rhs.rows(); ++row) rhs(row, column) = std::sin(0.05 * double((row + 2) * (column + 1)));
+        for (const double scale : {1.0, 2.0, 1.0}) {
+            native.SetShift(-scale * alpha);
+            native.Solve(rhs.data(), solution.data(), rhs.cols());
+            const Eigen::SparseMatrix<double> shifted = stiffness + scale * alpha * mass;
+            SparseCholesky accelerate{shifted};
+            accelerate.Solve(rhs.data(), reference.data(), rhs.cols());
+            const double residual = (shifted.selfadjointView<Eigen::Lower>() * solution - rhs).norm() / rhs.norm();
+            const double difference = (solution - reference).norm() / reference.norm();
+            expect(residual < 1e-8) << residual << solution.norm() << reference.norm();
+            expect(difference < 1e-8) << difference << solution.norm() << reference.norm();
+            if (first_solution.size() == 0) first_solution = solution;
+            else if (scale == 1.0) expect((solution.array() == first_solution.array()).all());
+        }
+    };
+
+    "native block sparse Tet10 shift-invert certifies the same spectrum"_test = [] {
+        constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
+        constexpr int count{12}, basis{36};
+        const double shift = std::pow(2 * std::numbers::pi * 20, 2);
+        const modal::Tet10Assembler fem{MakeStructuredBar(3, 2, 1), material};
+        const auto [mass, stiffness] = fem.AssembleLower();
+        double factor_seconds{}, solve_seconds{};
+        CholeskyShiftInvert accelerate{stiffness, mass, factor_seconds, solve_seconds};
+        BlockSparseCholesky block{fem};
+        Spectra::SparseSymMatProd<double> mass_action{mass};
+        Spectra::SymGEigsShiftSolver<CholeskyShiftInvert, Spectra::SparseSymMatProd<double>, Spectra::GEigsMode::ShiftInvert> accelerate_solver{
+            accelerate, mass_action, count, basis, -shift
+        };
+        Spectra::SymGEigsShiftSolver<BlockSparseCholesky, Spectra::SparseSymMatProd<double>, Spectra::GEigsMode::ShiftInvert> block_solver{
+            block, mass_action, count, basis, -shift
+        };
+        accelerate_solver.init();
+        block_solver.init();
+        accelerate_solver.compute(Spectra::SortRule::LargestMagn, 300, 1e-10, Spectra::SortRule::SmallestAlge);
+        block_solver.compute(Spectra::SortRule::LargestMagn, 300, 1e-10, Spectra::SortRule::SmallestAlge);
+        expect(accelerate_solver.info() == Spectra::CompInfo::Successful);
+        expect(block_solver.info() == Spectra::CompInfo::Successful);
+        const Eigen::VectorXd reference = accelerate_solver.eigenvalues();
+        const Eigen::VectorXd values = block_solver.eigenvalues();
+        expect((values - reference).norm() / reference.norm() < 1e-9);
+        const Eigen::MatrixXd vectors = block_solver.eigenvectors();
+        const auto k = stiffness.selfadjointView<Eigen::Lower>();
+        const auto m = mass.selfadjointView<Eigen::Lower>();
+        double maximum_residual{};
+        for (int mode = 6; mode < count; ++mode) {
+            const Eigen::VectorXd kx = k * vectors.col(mode), mx = m * vectors.col(mode);
+            maximum_residual = std::max(maximum_residual, (kx - values[mode] * mx).norm() / (kx.norm() + std::abs(values[mode]) * mx.norm()));
+        }
+        expect(maximum_residual < 1e-8) << maximum_residual;
+    };
+
+    "block sparse Cholesky reassembles fixed topology and rescales material without new symbolic analysis"_test = [] {
+        constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
+        TetMesh mesh = MakeStructuredBar(2, 1, 1);
+        const modal::Tet10Assembler original{mesh, material};
+        BlockSparseCholesky factor{original};
+        for (auto &point : mesh.Points) point.x *= 1.07 + 0.03 * point.y / 0.05;
+        const modal::Tet10Assembler deformed{mesh, material};
+        factor.Reassemble(deformed);
+        constexpr double stiffness_scale{1.2}, mass_scale{0.8};
+        factor.ScalePencil(stiffness_scale, mass_scale);
+        const AcousticMaterialProperties scaled_material{
+            .Density = material.Density * mass_scale,
+            .YoungModulus = material.YoungModulus * stiffness_scale,
+            .PoissonRatio = material.PoissonRatio,
+        };
+        const modal::Tet10Assembler scaled{mesh, scaled_material};
+        const auto [mass, stiffness] = scaled.AssembleLower();
+        const double shift = std::pow(2 * std::numbers::pi * 20, 2);
+        const Eigen::SparseMatrix<double> shifted = stiffness + shift * mass;
+        Eigen::MatrixXd rhs(scaled.Dofs(), 4), solution(scaled.Dofs(), 4), reference(scaled.Dofs(), 4);
+        rhs.setRandom();
+        factor.SetShift(-shift);
+        factor.Solve(rhs.data(), solution.data(), int(rhs.cols()));
+        SparseCholesky accelerate{shifted};
+        accelerate.Solve(rhs.data(), reference.data(), int(rhs.cols()));
+        const double residual_norm = (shifted.selfadjointView<Eigen::Lower>() * solution - rhs).norm();
+        const double residual = residual_norm / rhs.norm();
+        const double backward_error = residual_norm / (shifted.norm() * solution.norm() + rhs.norm());
+        const double difference = (solution - reference).norm() / reference.norm();
+        expect(residual < 2e-8) << residual;
+        expect(backward_error < 1e-12) << backward_error;
+        expect(difference < 2e-8) << difference;
+    };
     "solve cache reuses Tet10 topology and assembly across material edits"_test = [] {
         constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
         const TetMesh mesh = MakeStructuredBar(2, 1, 1);
@@ -261,7 +336,11 @@ int main() {
         const auto second = modal::mesh2modes(mesh, material, {vec3(mesh.Points.front())}, vec3{1}, config, {.Cache = &cache, .KeepBasis = true});
         auto changed_material = material;
         changed_material.YoungModulus *= 1.5;
-        const auto changed = modal::mesh2modes(mesh, changed_material, {vec3(mesh.Points.front())}, vec3{1}, config, {.Cache = &cache, .KeepBasis = true});
+        const auto changed = modal::mesh2modes(mesh, changed_material, {vec3(mesh.Points.front())}, vec3{1}, config, {.SeedBasis = &first.Basis, .Cache = &cache, .KeepBasis = true});
+        TetMesh deformed_mesh = mesh;
+        for (auto &point : deformed_mesh.Points) point.x *= 1.03 + point.y;
+        const auto deformed = modal::mesh2modes(deformed_mesh, changed_material, {vec3(deformed_mesh.Points.front())}, vec3{1}, config, {.SeedBasis = &changed.Basis, .Cache = &cache, .KeepBasis = true});
+        const auto deformed_cold = modal::mesh2modes(deformed_mesh, changed_material, {vec3(deformed_mesh.Points.front())}, vec3{1}, config, {.KeepBasis = true});
         expect(!first.Profile.TopologyReuse);
         expect(!first.Profile.AssemblyReuse);
         expect(second.Profile.TopologyReuse);
@@ -270,13 +349,24 @@ int main() {
         expect(changed.Profile.TopologyReuse);
         expect(changed.Profile.AssemblyReuse);
         expect(changed.Profile.SymbolicReuse);
+        expect(!deformed.Profile.TopologyReuse);
+        expect(!deformed.Profile.AssemblyReuse);
+        expect(deformed.Profile.SymbolicReuse);
         expect(first.Summary.Eigenvalues.size() == 12);
         expect(second.Summary.Eigenvalues.size() == 12);
         expect(changed.Summary.Eigenvalues.size() == 12);
+        expect(deformed.Summary.Eigenvalues.size() == 12);
+        expect(deformed_cold.Summary.Eigenvalues.size() == 12);
+        expect(first.Summary.Eigenvalues == second.Summary.Eigenvalues);
+        expect(bool((first.Basis.array() == second.Basis.array()).all()));
         for (uint32_t mode = 6; mode < 12; ++mode) {
             expect(std::abs(second.Summary.Eigenvalues[mode] / first.Summary.Eigenvalues[mode] - 1) < 1e-8);
             expect(std::abs(changed.Summary.Eigenvalues[mode] / first.Summary.Eigenvalues[mode] - 1.5) < 1e-8);
         }
+        expect(deformed.Profile.PhysicalResidual < 1e-8) << deformed.Profile.PhysicalResidual;
+        expect(deformed.Profile.MassOrthogonality < 1e-8);
+        for (uint32_t mode = 6; mode < 12; ++mode)
+            expect(std::abs(deformed.Summary.Eigenvalues[mode] / deformed_cold.Summary.Eigenvalues[mode] - 1) < 1e-8);
     };
 
     // Square section: longitudinal validates the E/rho/assembly/eigensolve chain end to end,
@@ -359,8 +449,6 @@ int main() {
         expect(std::abs(volume - 0.875) < 1e-12);
     };
 
-    // Real-world complexity: a thin-walled RealImpact scan through the app's tet generation,
-    // timing the solve. Skipped when the dataset is not present.
     "RealImpact bowl solves in reasonable time"_test = [] {
         const auto path = DatasetDir() / "9_BowlCeramic/preprocessed/transformed.obj";
         if (!std::filesystem::exists(path)) {
