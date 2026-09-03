@@ -4,13 +4,12 @@
 #include "mesh2modes.h"
 
 #include "AcousticMaterialProperties.h"
-#include "CholeskyShiftInvert.h"
+#include "BlockSparseCholesky.h"
 #include "Tet10Assembler.h"
 #include "numeric/vec3.h"
 
 #include "mesh/TetMesh.h"
 #include <Eigen/Eigenvalues>
-#include <Eigen/SVD>
 #include <Spectra/SymGEigsShiftSolver.h>
 #include <algorithm>
 #include <array>
@@ -25,18 +24,34 @@
 using uint = uint32_t;
 
 struct modal::SolveCache::State {
+    struct ElasticProperties {
+        double Density, YoungModulus, PoissonRatio;
+        auto operator<=>(const ElasticProperties &) const = default;
+    };
+
+    static ElasticProperties Elastic(const AcousticMaterialProperties &material) {
+        return {material.Density, material.YoungModulus, material.PoissonRatio};
+    }
+
     std::mutex Mutex;
     TetMesh Mesh;
     std::shared_ptr<const Tet10Assembler::Topology> Topology;
     std::shared_ptr<const Tet10Assembler::AssembledLower> Assembly;
-    double Density{}, YoungModulus{}, PoissonRatio{};
-    bool HasMaterial{};
+    std::optional<ElasticProperties> AssemblyMaterial;
+    std::mutex BlockFactorMutex;
+    std::unique_ptr<BlockSparseCholesky> BlockFactor;
+    std::shared_ptr<const Tet10Assembler::Topology> BlockTopology;
+    std::optional<ElasticProperties> BlockMaterial;
 };
 
 modal::SolveCache::SolveCache() : Reuse(std::make_unique<State>()) {}
 modal::SolveCache::~SolveCache() = default;
 
 namespace {
+constexpr uint WarmOversampling{15};
+constexpr double WarmTolerance{1e-4};
+constexpr uint WarmRefinementIterations{10};
+
 modal::SolveCache &DefaultSolveCache() {
     static modal::SolveCache cache;
     return cache;
@@ -51,7 +66,7 @@ std::shared_ptr<const modal::Tet10Assembler::Topology> AcquireTopology(
         cache.Reuse->Mesh = mesh;
         cache.Reuse->Topology = modal::Tet10Assembler::BuildTopology(mesh);
         cache.Reuse->Assembly.reset();
-        cache.Reuse->HasMaterial = false;
+        cache.Reuse->AssemblyMaterial.reset();
     }
     reused = same;
     return cache.Reuse->Topology;
@@ -65,26 +80,22 @@ std::shared_ptr<const modal::Tet10Assembler::AssembledLower> AcquireAssembly(
         reused = false;
         return std::make_shared<modal::Tet10Assembler::AssembledLower>(fem.AssembleLower());
     }
-    const bool same_material = cache.Reuse->Assembly && cache.Reuse->HasMaterial &&
-        cache.Reuse->Density == material.Density && cache.Reuse->YoungModulus == material.YoungModulus && cache.Reuse->PoissonRatio == material.PoissonRatio;
-    if (same_material) {
+    const auto properties = modal::SolveCache::State::Elastic(material);
+    if (cache.Reuse->Assembly && cache.Reuse->AssemblyMaterial == properties) {
         reused = true;
         return cache.Reuse->Assembly;
     }
-    if (cache.Reuse->Assembly && cache.Reuse->HasMaterial && cache.Reuse->PoissonRatio == material.PoissonRatio) {
+    if (cache.Reuse->Assembly && cache.Reuse->AssemblyMaterial && cache.Reuse->AssemblyMaterial->PoissonRatio == properties.PoissonRatio) {
         auto scaled = std::make_shared<modal::Tet10Assembler::AssembledLower>(*cache.Reuse->Assembly);
-        scaled->Mass *= material.Density / cache.Reuse->Density;
-        scaled->Stiffness *= material.YoungModulus / cache.Reuse->YoungModulus;
+        scaled->Mass *= properties.Density / cache.Reuse->AssemblyMaterial->Density;
+        scaled->Stiffness *= properties.YoungModulus / cache.Reuse->AssemblyMaterial->YoungModulus;
         cache.Reuse->Assembly = std::move(scaled);
         reused = true;
     } else {
         cache.Reuse->Assembly = std::make_shared<modal::Tet10Assembler::AssembledLower>(fem.AssembleLower());
         reused = false;
     }
-    cache.Reuse->Density = material.Density;
-    cache.Reuse->YoungModulus = material.YoungModulus;
-    cache.Reuse->PoissonRatio = material.PoissonRatio;
-    cache.Reuse->HasMaterial = true;
+    cache.Reuse->AssemblyMaterial = properties;
     return cache.Reuse->Assembly;
 }
 
@@ -150,8 +161,8 @@ quat QuaternionFromRotation(const Eigen::Matrix3f &rotation) {
     return {result.w / norm, result.x / norm, result.y / norm, result.z / norm};
 }
 
-// Lumped-vertex rigid-body mass properties in SI at the baked size: each tet's volume splits evenly onto its four
-// vertices as point masses. `scale` maps tet coordinates to node-local, `length_to_si` maps node-local lengths to meters.
+// Assigns one quarter of each tetrahedron's volume to each vertex for rigid-body mass properties.
+// `scale` maps tet coordinates to node-local space; `length_to_si` maps lengths to meters.
 MassProperties ComputeMassProperties(const TetMesh &tets, double density, vec3 scale, double length_to_si) {
     const size_t nverts = tets.Points.size();
     const dvec3 inv_scale{1.0 / scale.x, 1.0 / scale.y, 1.0 / scale.z};
@@ -215,12 +226,9 @@ struct SubspaceResult {
     uint Iterations{}, OpApplications{};
 };
 
-struct RefinementResult {
-    uint Applications{}, Iterations{}, MaximumWidth{};
-};
-
-RefinementResult RefineSubspace(
-    const CholeskyShiftInvert &op, const Eigen::SparseMatrix<double> &M, const Eigen::SparseMatrix<double> &K,
+template<class ShiftInvert>
+uint RefineSubspace(
+    const ShiftInvert &op, const Eigen::SparseMatrix<double> &M, const Eigen::SparseMatrix<double> &K,
     double target_residual, double rigid_threshold, uint max_iterations,
     Eigen::VectorXd &eigenvalues, Eigen::MatrixXd &eigenvectors
 ) {
@@ -228,7 +236,7 @@ RefinementResult RefineSubspace(
     const auto mass_operator = M.selfadjointView<Eigen::Lower>();
     const auto stiffness_operator = K.selfadjointView<Eigen::Lower>();
     const uint width = eigenvalues.size();
-    RefinementResult result;
+    uint applications{};
     for (uint iteration = 0; iteration < max_iterations; ++iteration) {
         Eigen::MatrixXd mass = mass_operator * eigenvectors;
         Eigen::MatrixXd stiffness = stiffness_operator * eigenvectors;
@@ -267,9 +275,7 @@ RefinementResult RefineSubspace(
         for (size_t column = 0; column < active_modes.size(); ++column) active_residual.col(column) = residual.col(active_modes[column]);
         Eigen::MatrixXd correction(eigenvectors.rows(), active_modes.size());
         op.solve_panel(active_residual.data(), correction.data(), int(active_modes.size()));
-        result.Applications += active_modes.size();
-        result.Iterations++;
-        result.MaximumWidth = std::max(result.MaximumWidth, uint(active_modes.size()));
+        applications += active_modes.size();
 
         Eigen::MatrixXd mass_correction = mass_operator * correction;
         for (uint pass = 0; pass < 2; ++pass) {
@@ -300,11 +306,12 @@ RefinementResult RefineSubspace(
         eigenvalues = decomposition.eigenvalues().head(width);
         eigenvectors = space * decomposition.eigenvectors().leftCols(width);
     }
-    return result;
+    return applications;
 }
 
+template<class ShiftInvert>
 SubspaceResult SubspaceIterate(
-    const CholeskyShiftInvert &op, const Eigen::SparseMatrix<double> &M,
+    const ShiftInvert &op, const Eigen::SparseMatrix<double> &M,
     uint nev, uint p, double sigma, double tol, uint max_iters,
     const Eigen::MatrixXf &x0, // warm-start basis, its columns seed the leading panel columns
     modal::SolveMonitor *monitor = nullptr
@@ -331,7 +338,7 @@ SubspaceResult SubspaceIterate(
     // panel: the active block is deflated against them instead of re-solved.
     Eigen::MatrixXd XL(n, nev), MXL(n, nev);
     Eigen::VectorXd theta_locked(nev);
-    uint c = 0; // locked count
+    uint c = 0;
 
     Eigen::VectorXd prev_lambda = Eigen::VectorXd::Constant(nev, std::numeric_limits<double>::max());
     for (uint iter = 0; iter < max_iters; ++iter) {
@@ -366,7 +373,6 @@ SubspaceResult SubspaceIterate(
 
         const Eigen::MatrixXd q = dscale.asDiagonal() * es.eigenvectors();
 
-        // Lock the leading prefix of active pairs whose eigenvalue settled, keeping ascending order.
         uint newly_locked = 0;
         for (uint i = 0; i < w && c + i < nev; ++i) {
             const double lambda = es.eigenvalues()[i] + sigma;
@@ -387,7 +393,6 @@ SubspaceResult SubspaceIterate(
             result.Eigenvectors = std::move(XL);
             return result;
         }
-        // Rotate the maintained M X onto the remaining active Ritz vectors.
         MX.noalias() = MXbar * q.rightCols(w - newly_locked);
     }
     return result;
@@ -402,9 +407,77 @@ struct ComputeModesOpts {
     modal::SolveMonitor *Monitor{};
 };
 
-// `summary_out` receives the solved eigenpairs at the excitation positions, and `basis_out`
-// (when non-null) the full eigenvector basis.
+struct Tet10BlockShiftInvert {
+    using Scalar = double;
+    using Index = Eigen::Index;
+
+    const modal::Tet10Assembler &Fem;
+    const AcousticMaterialProperties &Material;
+    double &FactorizeSeconds, &SolveSeconds;
+    bool &SymbolicReuse;
+    modal::SolveCache::State *Cache{};
+    std::unique_lock<std::mutex> CacheLock;
+    std::unique_ptr<BlockSparseCholesky> LocalFactor;
+    BlockSparseCholesky *Factor{};
+
+    Tet10BlockShiftInvert(
+        const modal::Tet10Assembler &fem, const AcousticMaterialProperties &material, double &factorize_seconds,
+        double &solve_seconds, bool &symbolic_reuse, modal::SolveCache *cache
+    ) : Fem(fem), Material(material), FactorizeSeconds(factorize_seconds), SolveSeconds(solve_seconds),
+        SymbolicReuse(symbolic_reuse), Cache(cache ? cache->Reuse.get() : nullptr),
+        CacheLock(Cache ? std::unique_lock{Cache->BlockFactorMutex, std::try_to_lock} : std::unique_lock<std::mutex>{}) {}
+
+    Index rows() const { return Fem.Dofs(); }
+    Index cols() const { return Fem.Dofs(); }
+
+    void set_shift(const Scalar &sigma) {
+        const auto start = std::chrono::steady_clock::now();
+        if (!Factor) {
+            bool reused{};
+            if (CacheLock.owns_lock()) {
+                const auto properties = modal::SolveCache::State::Elastic(Material);
+                reused = bool(Cache->BlockFactor);
+                if (!Cache->BlockFactor) {
+                    Cache->BlockFactor = std::make_unique<BlockSparseCholesky>(Fem);
+                } else if (Cache->BlockTopology == Fem.State && Cache->BlockMaterial && Cache->BlockMaterial->PoissonRatio == properties.PoissonRatio) {
+                    if (*Cache->BlockMaterial != properties)
+                        Cache->BlockFactor->ScalePencil(properties.YoungModulus / Cache->BlockMaterial->YoungModulus, properties.Density / Cache->BlockMaterial->Density);
+                } else {
+                    try {
+                        Cache->BlockFactor->Reassemble(Fem);
+                    } catch (const std::invalid_argument &) {
+                        Cache->BlockFactor = std::make_unique<BlockSparseCholesky>(Fem);
+                        reused = false;
+                    }
+                }
+                Cache->BlockTopology = Fem.State;
+                Cache->BlockMaterial = properties;
+                Factor = Cache->BlockFactor.get();
+            } else {
+                LocalFactor = std::make_unique<BlockSparseCholesky>(Fem);
+                Factor = LocalFactor.get();
+            }
+            SymbolicReuse = reused;
+        }
+        Factor->SetShift(sigma);
+        FactorizeSeconds += SecondsSince(start);
+    }
+
+    void perform_op(const Scalar *input, Scalar *output) const {
+        const auto start = std::chrono::steady_clock::now();
+        Factor->Solve(input, output);
+        SolveSeconds += SecondsSince(start);
+    }
+
+    void solve_panel(const Scalar *input, Scalar *output, int width) const {
+        const auto start = std::chrono::steady_clock::now();
+        Factor->Solve(input, output, width);
+        SolveSeconds += SecondsSince(start);
+    }
+};
+
 ModalModes ComputeModes(
+    const modal::Tet10Assembler &fem,
     const Eigen::SparseMatrix<double> &M,
     const Eigen::SparseMatrix<double> &K,
     uint num_vertices, uint vertex_dim,
@@ -412,8 +485,7 @@ ModalModes ComputeModes(
     modal::SolveProfile &profile,
     ModalEigenSummary &summary_out, Eigen::MatrixXf *basis_out
 ) {
-    /** Compute mass/stiffness eigenvalues and eigenvectors **/
-    using OpType = CholeskyShiftInvert;
+    using OpType = Tet10BlockShiftInvert;
     using BOpType = Spectra::SparseSymMatProd<double>;
     using Spectra::GEigsMode::ShiftInvert;
 
@@ -427,14 +499,10 @@ ModalModes ComputeModes(
     const double sigma = -shift_omega * shift_omega;
     auto *monitor = opts.Monitor;
     if (monitor && monitor->Cancelled()) return {};
-    const SparseOrdering ordering = n >= 20'000 ? SparseOrdering::Metis : SparseOrdering::Default;
     const auto &reuse = opts.Reuse;
-    auto &cache = reuse.Cache ? *reuse.Cache : DefaultSolveCache();
-    OpType op{K, M, profile.Factorize, profile.OpSolve, ordering, SparseStorage::Block3, &cache.Cholesky, &profile.SymbolicReuse};
+    OpType op{fem, opts.Material, profile.Factorize, profile.OpSolve, profile.SymbolicReuse, reuse.Cache};
     BOpType Bop{M};
     if (monitor) monitor->Progress.store(0.3f, std::memory_order_relaxed);
-    // A basis solved over a different mesh cannot seed this solve, so it falls back to a cold solve.
-    // Subspace iteration re-converges a warm-start basis in a few block iterations.
     const bool use_subspace = reuse.SeedBasis != nullptr && reuse.SeedBasis->rows() == Eigen::Index(n) && reuse.SeedBasis->cols() >= Eigen::Index(fem_n_modes);
     std::optional<Spectra::SymGEigsShiftSolver<OpType, BOpType, ShiftInvert>> eigs;
     SubspaceResult subspace;
@@ -442,22 +510,12 @@ ModalModes ComputeModes(
     const auto eig_start = std::chrono::steady_clock::now();
     if (use_subspace) {
         op.set_shift(sigma);
-        subspace = SubspaceIterate(op, M, fem_n_modes, std::min(fem_n_modes + config.WarmOversampling, n), sigma, config.WarmTolerance, config.MaxRestarts, *reuse.SeedBasis, monitor);
+        subspace = SubspaceIterate(op, M, fem_n_modes, std::min(fem_n_modes + WarmOversampling, n), sigma, WarmTolerance, config.MaxRestarts, *reuse.SeedBasis, monitor);
         profile.OpApplications = subspace.OpApplications;
         profile.Restarts = subspace.Iterations;
         if (subspace.Eigenvalues.size() == 0) return {};
         eigenvalues = subspace.Eigenvalues;
-        if (config.WarmRefinementIterations > 0) {
-            const double correction_tolerance = config.CorrectionTolerance > 0 ? config.CorrectionTolerance : std::max(1e-10, 100 * config.Tolerance);
-            const auto refinement = RefineSubspace(
-                op, M, K, correction_tolerance, -sigma * 1e-4,
-                config.WarmRefinementIterations, eigenvalues, subspace.Eigenvectors
-            );
-            profile.OpApplications += refinement.Applications;
-            profile.RefinementApplications = refinement.Applications;
-            profile.RefinementIterations = refinement.Iterations;
-            profile.RefinementMaxWidth = refinement.MaximumWidth;
-        }
+        profile.OpApplications += RefineSubspace(op, M, K, config.Tolerance, -sigma * 1e-4, WarmRefinementIterations, eigenvalues, subspace.Eigenvectors);
     } else {
         if (monitor && monitor->Cancelled()) return {};
         // Spectra's compute runs to completion, so a cold solve reports no progress and cancels only at stage boundaries.
@@ -540,8 +598,6 @@ ModalModes modal::PostprocessModes(std::span<const double> eigenvalues, const st
     }
     if (lowest_mode_i == fem_n_modes) return {};
 
-    // Scale all modes so the lowest valid mode is at the configured fundamental frequency,
-    // and calculate T60s from the scaled frequencies.
     static const double ln_1000 = std::log(1000);
     const float freq_scale = config.FundamentalFreq ? *config.FundamentalFreq / lowest_mode_freq_orig : 1.f;
     for (uint mode = lowest_mode_i; mode < fem_n_modes; ++mode) {
@@ -562,7 +618,6 @@ ModalModes modal::PostprocessModes(std::span<const double> eigenvalues, const st
     mode_t60s.erase(mode_t60s.begin(), mode_t60s.begin() + lowest_mode_i);
     mode_t60s.resize(n_modes);
 
-    // One mode shape 3-vector per excitable vertex, so `out_shapes` stays the same length as `shapes`.
     std::vector<std::vector<vec3>> out_shapes(shapes.size(), std::vector<vec3>(n_modes));
     for (size_t ex_pos = 0; ex_pos < shapes.size(); ++ex_pos) {
         for (uint mode = 0; mode < n_modes; ++mode) out_shapes[ex_pos][mode] = shapes[ex_pos][mode + lowest_mode_i] * shape_scale;
@@ -636,14 +691,14 @@ modal::ModalResult modal::mesh2modes(const TetMesh &input_tets, const AcousticMa
     });
     ModalEigenSummary summary;
     Eigen::MatrixXf basis;
-    auto modes = ComputeModes(M, K, fem.NumNodes, 3, {
-                                                         .Config = std::move(config),
-                                                         .ExPos = std::move(excite_points),
-                                                         .Positions = std::move(positions),
-                                                         .Material = material,
-                                                         .Reuse = reuse,
-                                                         .Monitor = monitor,
-                                                     },
+    auto modes = ComputeModes(fem, M, K, fem.NumNodes, 3, {
+                                                              .Config = std::move(config),
+                                                              .ExPos = std::move(excite_points),
+                                                              .Positions = std::move(positions),
+                                                              .Material = material,
+                                                              .Reuse = reuse,
+                                                              .Monitor = monitor,
+                                                          },
                               profile, summary, reuse.KeepBasis ? &basis : nullptr);
     return {std::move(modes), std::move(mass_props), profile, std::move(summary), std::move(basis), std::move(sample_point_of)};
 }

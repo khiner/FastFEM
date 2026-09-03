@@ -102,7 +102,7 @@ std::array<std::array<double, 3>, 4> ShapeGradients(const TetMesh &mesh, const s
 }
 
 template<typename Element>
-void ElementStiffness(const Element &element, uint a, uint c, double lambda, double mu, double (&stiffness)[3][3]) {
+void ElementStiffness(const Element &element, uint a, uint c, double lambda, double mu, modal::Tet10Assembler::ElementBlock &stiffness) {
     const auto &basis = ReferenceBasis();
     double g[3][3]{};
     for (uint k = 0; k < 4; ++k) {
@@ -116,7 +116,7 @@ void ElementStiffness(const Element &element, uint a, uint c, double lambda, dou
     }
     const double trace = g[0][0] + g[1][1] + g[2][2];
     for (uint p = 0; p < 3; ++p) {
-        for (uint q = 0; q < 3; ++q) stiffness[p][q] = element.Volume * (lambda * g[p][q] + mu * g[q][p] + (p == q ? mu * trace : 0));
+        for (uint q = 0; q < 3; ++q) stiffness[p + 3 * q] = element.Volume * (lambda * g[p][q] + mu * g[q][p] + (p == q ? mu * trace : 0));
     }
 }
 
@@ -155,25 +155,31 @@ modal::Tet10Assembler::Tet10Assembler(const TetMesh &mesh, const AcousticMateria
 modal::Tet10Assembler::Tet10Assembler(std::shared_ptr<const Topology> state, const AcousticMaterialProperties &material)
     : State(std::move(state)), NumNodes(State->NumNodes), Density(material.Density), Lambda(material.Lambda()), Mu(material.Mu()) {}
 
-modal::Tet10Assembler::AssembledLower modal::Tet10Assembler::AssembleLower() const {
+void modal::Tet10Assembler::EvaluateBlock(
+    const Element &element, uint32_t row, uint32_t column, ElementBlock &stiffness, double &mass
+) const {
     const auto &basis = ReferenceBasis();
+    ElementStiffness(element, row, column, Lambda, Mu, stiffness);
+    mass = Density * element.Volume * basis.Mass[row][column];
+}
+
+modal::Tet10Assembler::AssembledLower modal::Tet10Assembler::AssembleLower() const {
     std::vector<Eigen::Triplet<double>> mass_triplets, stiffness_triplets;
-    mass_triplets.reserve(Elements().size() * NodesPerElement * (NodesPerElement + 1) / 2 * 3);
-    stiffness_triplets.reserve(Elements().size() * NodesPerElement * (NodesPerElement + 1) / 2 * 9);
+    mass_triplets.reserve(Elements().size() * LowerBlocksPerElement * 3);
+    stiffness_triplets.reserve(Elements().size() * LowerBlocksPerElement * 9);
 
     for (const auto &element : Elements()) {
         for (uint a = 0; a < NodesPerElement; ++a) {
-            for (uint c = 0; c < NodesPerElement; ++c) {
-                const uint row = 3 * element.Nodes[a], column = 3 * element.Nodes[c];
-                if (row < column) continue;
-
-                const double mass = Density * element.Volume * basis.Mass[a][c];
+            for (uint c = 0; c <= a; ++c) {
+                const bool transpose = element.Nodes[a] < element.Nodes[c];
+                const uint local_row = transpose ? c : a, local_column = transpose ? a : c;
+                const uint row = 3 * element.Nodes[local_row], column = 3 * element.Nodes[local_column];
+                ElementBlock stiffness;
+                double mass;
+                EvaluateBlock(element, local_row, local_column, stiffness, mass);
                 for (uint component = 0; component < 3; ++component) mass_triplets.emplace_back(row + component, column + component, mass);
-
-                double stiffness[3][3];
-                ElementStiffness(element, a, c, Lambda, Mu, stiffness);
                 for (uint p = 0; p < 3; ++p) {
-                    for (uint q = 0; q < (row == column ? p + 1 : 3u); ++q) stiffness_triplets.emplace_back(row + p, column + q, stiffness[p][q]);
+                    for (uint q = 0; q < (row == column ? p + 1 : 3u); ++q) stiffness_triplets.emplace_back(row + p, column + q, stiffness[p + 3 * q]);
                 }
             }
         }

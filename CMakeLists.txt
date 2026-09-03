@@ -8,14 +8,14 @@ endif()
 
 option(FASTFEM_BUILD_TESTS "Build FastFEM tests" ${PROJECT_IS_TOP_LEVEL})
 option(FASTFEM_BUILD_TOOLS "Build FastFEM command-line tools" ${PROJECT_IS_TOP_LEVEL})
-option(FASTFEM_PARALLEL_SPARSE "Allow nondeterministic multithreaded Accelerate sparse factorization" OFF)
+option(FASTFEM_PARALLEL_SPARSE "Allow nondeterministic multithreaded Accelerate sparse execution" OFF)
 set(FASTFEM_REALIMPACT_DATASET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/RealImpact/dataset" CACHE PATH "Optional RealImpact dataset directory")
 set(FASTFEM_TET_CORPUS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/TetCorpus" CACHE PATH "Tetrahedralizer OBJ corpus root")
 
 find_package(Eigen3 CONFIG REQUIRED)
 
 function(fastfem_require_submodule path)
-    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${path}/CMakeLists.txt")
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${path}/.git")
         message(FATAL_ERROR "Missing ${path}; run: git submodule update --init --recursive")
     endif()
 endfunction()
@@ -51,6 +51,7 @@ find_library(FASTFEM_FOUNDATION_FRAMEWORK Foundation REQUIRED)
 find_library(FASTFEM_METAL_FRAMEWORK Metal REQUIRED)
 
 add_library(FastFEM
+    src/audio/BlockSparseCholesky.cpp
     src/audio/CholeskyShiftInvert.cpp
     src/audio/FiniteCell.cpp
     src/audio/FiniteCellBlockEigensolver.cpp
@@ -140,7 +141,6 @@ target_link_libraries(FastFEM
         ${FASTFEM_FOUNDATION_FRAMEWORK}
         ${FASTFEM_METAL_FRAMEWORK}
 )
-
 set_source_files_properties(src/audio/FiniteCellMetal.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang|GNU")

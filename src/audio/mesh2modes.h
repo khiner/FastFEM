@@ -3,8 +3,6 @@
 #include "MassProperties.h"
 #include "ModalEigenSummary.h"
 #include "ModalModes.h"
-#include "SparseCholesky.h"
-
 #include <Eigen/Core>
 
 #include <atomic>
@@ -24,17 +22,13 @@ struct SolveMonitor {
     bool Cancelled() const { return CancelRequested.load(std::memory_order_relaxed); }
 };
 
-// Solve parameterization. The eigensolver shift is -(2*pi*MinModeFreq)^2.
+// MinModeFreq also sets the eigensolver shift to -(2*pi*MinModeFreq)^2.
 struct SolverConfig {
     float MinModeFreq{20}; // Hz
     float MaxModeFreq{16'000}; // Hz
     uint32_t NumModes{30}; // Synthesized modes kept from the FEM eigenpairs
     uint32_t NumFemModes{45}; // Eigenpairs requested from the eigensolver
     double Tolerance{1e-8}; // Eigensolver convergence tolerance
-    double WarmTolerance{1e-4}; // Warm-started re-solve tolerance (relative eigenvalue change between block iterations)
-    uint32_t WarmOversampling{15}; // Extra block-subspace vectors guarding the requested warm-start modes
-    uint32_t WarmRefinementIterations{}; // FP64 augmented residual-correction steps after warm subspace iteration
-    double CorrectionTolerance{}; // Physical residual target; zero derives it from Tolerance
     uint32_t MaxRestarts{100}; // Eigensolver restart limit
     std::optional<float> FundamentalFreq{}; // Scale mode freqs so the lowest mode is at this fundamental
 };
@@ -46,7 +40,6 @@ struct SolveProfile {
     double Factorize{}, Iterate{}, OpSolve{}, Extract{};
     double PhysicalResidual{}, MassOrthogonality{};
     uint32_t Dofs{}, StiffnessNonZeros{}, OpApplications{}, Restarts{};
-    uint32_t RefinementApplications{}, RefinementIterations{}, RefinementMaxWidth{};
     bool TopologyReuse{}, AssemblyReuse{}, SymbolicReuse{};
 
     SolveProfile &operator+=(const SolveProfile &o) {
@@ -64,9 +57,6 @@ struct SolveProfile {
         StiffnessNonZeros += o.StiffnessNonZeros;
         OpApplications += o.OpApplications;
         Restarts += o.Restarts;
-        RefinementApplications += o.RefinementApplications;
-        RefinementIterations += o.RefinementIterations;
-        RefinementMaxWidth = std::max(RefinementMaxWidth, o.RefinementMaxWidth);
         TopologyReuse = TopologyReuse || o.TopologyReuse;
         AssemblyReuse = AssemblyReuse || o.AssemblyReuse;
         SymbolicReuse = SymbolicReuse || o.SymbolicReuse;
@@ -78,28 +68,25 @@ struct ModalResult {
     ModalModes Modes;
     MassProperties MassProps;
     SolveProfile Profile;
-    ModalEigenSummary Summary; // Raw eigenpairs at the excitation positions
+    ModalEigenSummary Summary; // Raw eigenpairs sampled at the excitation positions
     Eigen::MatrixXf Basis; // Full eigenvector basis, filled when SolveReuse::KeepBasis
     // The index into Modes.Positions of each requested excitation position, in request order.
     // Requests reaching the same tet point share one entry there.
     std::vector<uint32_t> SamplePointOfExcitation;
 };
 
-// mesh2modes uses a process-wide one-entry topology, assembly, and symbolic-factor cache by
-// default. Supply a SolveCache to give a solve stream its own lifetime and prevent unrelated
-// topologies from replacing it.
+// mesh2modes uses a process-wide one-entry cache for topology and assembly.
+// SolveCache preserves block-sparse numeric storage and symbolic factorization across sequential compatible solves.
+// Pass an explicit cache to exchange persistent memory for lower repeated-solve latency.
 struct SolveCache {
     struct State;
 
-    SparseCholeskyCache Cholesky;
     std::unique_ptr<State> Reuse;
 
     SolveCache();
     ~SolveCache();
 };
 
-// A prior solve's eigenvector basis over the same tet inputs seeds the eigensolver, which
-// re-converges it in a few block iterations (WarmTolerance) instead of solving from scratch.
 struct SolveReuse {
     const Eigen::MatrixXf *SeedBasis{};
     SolveCache *Cache{}; // Optional lifetime override for the bounded default cache
