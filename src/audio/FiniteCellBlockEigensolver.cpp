@@ -71,10 +71,16 @@ struct Actions {
     void ApplyMassShifted(
         const double *input, double *mass_output, double *shifted_output, uint32_t width, double alpha
     ) {
-        Measure([&] {
-            if (PackedCut) Fem.ApplyMassShiftedExpandedPackedCut(*PackedCut, input, mass_output, shifted_output, width);
-            else Fem.ApplyMassShifted(input, mass_output, shifted_output, width, alpha);
-        });
+        Seconds += ApplyMassShiftedTimed(input, mass_output, shifted_output, width, alpha);
+    }
+
+    double ApplyMassShiftedTimed(
+        const double *input, double *mass_output, double *shifted_output, uint32_t width, double alpha
+    ) {
+        const auto start = Clock::now();
+        if (PackedCut) Fem.ApplyMassShiftedExpandedPackedCut(*PackedCut, input, mass_output, shifted_output, width);
+        else Fem.ApplyMassShifted(input, mass_output, shifted_output, width, alpha);
+        return SecondsSince(start);
     }
 
     void Measure(auto &&operation) {
@@ -113,8 +119,9 @@ bool MOrthonormalize(Actions &actions, Eigen::MatrixXd &vectors, Eigen::MatrixXd
     actions.ApplyMass(vectors.data(), mass_vectors.data(), uint32_t(vectors.cols()));
     const Eigen::VectorXd inverse_norm = (vectors.cwiseProduct(mass_vectors).colwise().sum().array().sqrt().inverse()).matrix();
     if (!inverse_norm.allFinite()) return false;
+    auto mass_scale = std::async(std::launch::async, [&] { mass_vectors *= inverse_norm.asDiagonal(); });
     vectors *= inverse_norm.asDiagonal();
-    mass_vectors *= inverse_norm.asDiagonal();
+    mass_scale.get();
     Eigen::MatrixXd gram = vectors.transpose() * mass_vectors;
     gram = (0.5 * (gram + gram.transpose())).eval();
     const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> decomposition{gram};
@@ -125,8 +132,11 @@ bool MOrthonormalize(Actions &actions, Eigen::MatrixXd &vectors, Eigen::MatrixXd
     if (decomposition.eigenvalues().size() - first < required) return false;
     const Eigen::MatrixXd transform = decomposition.eigenvectors().rightCols(decomposition.eigenvalues().size() - first) *
         decomposition.eigenvalues().tail(decomposition.eigenvalues().size() - first).cwiseSqrt().cwiseInverse().asDiagonal();
+    Eigen::MatrixXd rotated_mass;
+    auto mass_rotation = std::async(std::launch::async, [&] { rotated_mass.noalias() = mass_vectors * transform; });
     vectors = vectors * transform;
-    mass_vectors = mass_vectors * transform;
+    mass_rotation.get();
+    mass_vectors = std::move(rotated_mass);
     return true;
 }
 
@@ -145,9 +155,7 @@ bool Ritz(
     const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> decomposition{projected};
     if (decomposition.info() != Eigen::Success) return false;
     const Eigen::MatrixXd rotation = decomposition.eigenvectors().leftCols(count);
-    vectors = space * rotation;
-    mass_vectors = mass_space * rotation;
-    shifted_vectors = shifted_space * rotation;
+    RotateTallTriple(space, mass_space, shifted_space, rotation, vectors, mass_vectors, shifted_vectors);
     values = decomposition.eigenvalues().head(count);
     seconds += SecondsSince(start) - (actions.Seconds - action_start);
     return true;
@@ -164,15 +172,23 @@ bool RitzFromActions(
     const auto start = Clock::now();
     if (locked_count) {
         const Eigen::MatrixXd overlap = locked_vectors.leftCols(locked_count).transpose() * mass_space;
+        auto mass_projection = std::async(std::launch::async, [&] {
+            mass_space.noalias() -= locked_mass_vectors.leftCols(locked_count) * overlap;
+        });
+        auto shifted_projection = std::async(std::launch::async, [&] {
+            shifted_space.noalias() -= locked_mass_vectors.leftCols(locked_count) *
+                (locked_values.head(locked_count).asDiagonal() * overlap);
+        });
         space.noalias() -= locked_vectors.leftCols(locked_count) * overlap;
-        mass_space.noalias() -= locked_mass_vectors.leftCols(locked_count) * overlap;
-        shifted_space.noalias() -= locked_mass_vectors.leftCols(locked_count) *
-            (locked_values.head(locked_count).asDiagonal() * overlap);
+        mass_projection.get();
+        shifted_projection.get();
     }
+    auto mass_gram = std::async(std::launch::async, [&] { return SymmetricCrossGram(space, mass_space); });
+    Eigen::MatrixXd projected = SymmetricCrossGram(space, shifted_space);
+    Eigen::MatrixXd gram = mass_gram.get();
     const Eigen::VectorXd inverse_norm =
         (space.cwiseProduct(mass_space).colwise().sum().array().sqrt().inverse()).matrix();
     if (!inverse_norm.allFinite()) return false;
-    Eigen::MatrixXd gram = SymmetricCrossGram(space, mass_space);
     gram = inverse_norm.asDiagonal() * gram * inverse_norm.asDiagonal();
     gram = (0.5 * (gram + gram.transpose())).eval();
     const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> mass_decomposition{gram};
@@ -185,7 +201,6 @@ bool RitzFromActions(
     if (retained < count) return false;
     const Eigen::MatrixXd transform = inverse_norm.asDiagonal() * mass_decomposition.eigenvectors().rightCols(retained) *
         mass_values.tail(retained).cwiseSqrt().cwiseInverse().asDiagonal();
-    Eigen::MatrixXd projected = SymmetricCrossGram(space, shifted_space);
     projected = transform.transpose() * projected * transform;
     projected = (0.5 * (projected + projected.transpose())).eval();
     const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> decomposition{projected};
@@ -206,29 +221,39 @@ Eigen::MatrixXd InitialSpace(
     Eigen::MatrixXd result(fem.Dofs(), width);
     std::mt19937_64 random{20260828};
     std::normal_distribution<double> gaussian;
-    for (Eigen::Index column = 0; column < result.cols(); ++column)
-        for (Eigen::Index row = 0; row < result.rows(); ++row) result(row, column) = gaussian(random);
+    const auto fill_random = [&](uint32_t first) {
+        for (Eigen::Index column = first; column < result.cols(); ++column)
+            for (Eigen::Index row = 0; row < result.rows(); ++row) result(row, column) = gaussian(random);
+    };
     const uint32_t count = std::min<uint32_t>(width, 3 * fem.NumP1Nodes - 1);
-    if (count == 0 || count >= p1.Mass.rows()) return result;
+    if (count == 0 || count >= p1.Mass.rows()) {
+        fill_random(0);
+        return result;
+    }
 
-    const uint32_t basis_size = std::min<uint32_t>(p1.Mass.rows(), std::max<uint32_t>(count + 20, 20));
+    const uint32_t basis_size = std::min<uint32_t>(p1.Mass.rows(), std::max<uint32_t>(count + 2, 20));
+    const double seed_tolerance = fem.Dofs() < 20'000 ? 1e-2 : 1e-1; // Fine iterations above 20k DOFs cost more than the additional P1 accuracy.
     double factor_seconds{}, solve_seconds{};
     CholeskyShiftInvert operation{p1.Stiffness, p1.Mass, factor_seconds, solve_seconds};
-    const auto eigensolver = modal::detail::SolveGeneralizedEigenproblem(
+    const auto eigensolver = modal::detail::SolveGeneralizedInverseIteration(
         operation, p1.Mass, p1.Stiffness,
         {
             .Count = count,
             .SubspaceSize = basis_size,
             .Shift = -alpha,
-            .IterationTolerance = 1e-4,
-            .ResidualTolerance = 1e-4,
+            .IterationTolerance = 1e-1,
+            .ResidualTolerance = seed_tolerance,
             .MaxIterations = 100,
             .MaxRefinementIterations = 20,
             .RandomSeed = 20260828,
         }
     );
-    if (!eigensolver.Converged) return result;
+    if (!eigensolver.Converged) {
+        fill_random(0);
+        return result;
+    }
     fem.ProlongP1(eigensolver.Eigenvectors.data(), result.data(), count);
+    fill_random(count);
     return result;
 }
 
@@ -425,7 +450,7 @@ modal::FiniteCellBlockResult SolvePreferred(
         return MetalMultiplicativePreconditioner{fem, alpha, *p1_assembly};
     });
     const uint32_t requested_count = count;
-    uint32_t width = std::min<uint32_t>(fem.Dofs(), count + std::min<uint32_t>(guard_vectors, count));
+    uint32_t width = std::min<uint32_t>(fem.Dofs(), count + std::min(guard_vectors, count));
     Eigen::MatrixXd space = InitialSpace(fem, width, alpha, *p1_assembly);
     initialization_seconds += SecondsSince(initialization_start);
     Eigen::MatrixXd mass_space, vectors, mass_vectors, shifted_vectors;
@@ -480,6 +505,14 @@ modal::FiniteCellBlockResult SolvePreferred(
     p1_assembly.reset();
     actions.PackedCut = std::move(preconditioner.CutActions);
     Eigen::MatrixXf compact_previous_direction;
+    Eigen::MatrixXd previous_mass_direction, previous_shifted_direction;
+    std::future<double> previous_actions;
+    const auto wait_previous_actions = [&] {
+        if (!previous_actions.valid()) return;
+        const auto wait_start = Clock::now();
+        previous_actions.get();
+        actions.Seconds += SecondsSince(wait_start);
+    };
     std::vector<double> stagnation_history;
 
     for (uint32_t iteration = 0; iteration < max_iterations; ++iteration) {
@@ -503,6 +536,7 @@ modal::FiniteCellBlockResult SolvePreferred(
         };
         bool converged = is_converged();
         if (converged) {
+            wait_previous_actions();
             // Recompute the residual from exact actions before accepting a recurrence-driven convergence.
             actions.ApplyMassShifted(vectors.data(), mass_vectors.data(), shifted_vectors.data(), width, alpha);
             residual = shifted_vectors - mass_vectors * shifted_values.asDiagonal();
@@ -533,6 +567,7 @@ modal::FiniteCellBlockResult SolvePreferred(
                     0;
                 const bool cannot_finish = best > 4 * tolerance && projected_iterations > max_iterations - iteration;
                 if (stalled || cannot_finish) {
+                    wait_previous_actions();
                     result.Profile.Stagnated = true;
                     result.Profile.StagnationIteration = iteration;
                     result.Profile.StagnationResidual = maximum;
@@ -548,6 +583,7 @@ modal::FiniteCellBlockResult SolvePreferred(
         const double recurrence_ritz_start = ritz_seconds;
 
         if (newly_locked) {
+            wait_previous_actions();
             const uint32_t old_locked = locked_count;
             locked_count += newly_locked;
             locked_vectors.middleCols(old_locked, newly_locked) = vectors.leftCols(newly_locked);
@@ -562,6 +598,8 @@ modal::FiniteCellBlockResult SolvePreferred(
             count -= newly_locked;
             width -= newly_locked;
             compact_previous_direction.resize(0, 0);
+            previous_mass_direction.resize(0, 0);
+            previous_shifted_direction.resize(0, 0);
         }
 
         std::vector<uint32_t> active;
@@ -581,23 +619,20 @@ modal::FiniteCellBlockResult SolvePreferred(
         mass_space.leftCols(width) = mass_vectors;
         shifted_space.leftCols(width) = shifted_vectors;
         const auto preconditioner_start = Clock::now();
-        const double action_start = actions.Seconds;
         preconditioner.Apply(
             active_residual.data(), space.middleCols(width, correction_columns).data(), uint32_t(active.size())
         );
-        preconditioner_seconds += SecondsSince(preconditioner_start) - (actions.Seconds - action_start);
-        active_residual.resize(0, 0);
+        preconditioner_seconds += SecondsSince(preconditioner_start);
+        wait_previous_actions();
         apply_mass_shifted(
-            space.middleCols(width, correction_columns).data(),
-            mass_space.middleCols(width, correction_columns).data(),
+            space.middleCols(width, correction_columns).data(), mass_space.middleCols(width, correction_columns).data(),
             shifted_space.middleCols(width, correction_columns).data(), uint32_t(correction_columns)
         );
+        active_residual.resize(0, 0);
         if (history_columns) {
             space.rightCols(history_columns) = compact_previous_direction.cast<double>();
-            apply_mass_shifted(
-                space.rightCols(history_columns).data(), mass_space.rightCols(history_columns).data(),
-                shifted_space.rightCols(history_columns).data(), uint32_t(history_columns)
-            );
+            mass_space.rightCols(history_columns) = previous_mass_direction;
+            shifted_space.rightCols(history_columns) = previous_shifted_direction;
         }
         if (!RitzFromActions(
                 space, mass_space, shifted_space, width, vectors, mass_vectors, shifted_vectors,
@@ -607,16 +642,27 @@ modal::FiniteCellBlockResult SolvePreferred(
             return finish();
         }
         compact_previous_direction.resize(fem.Dofs(), active.size());
+        previous_mass_direction.resize(fem.Dofs(), active.size());
+        previous_shifted_direction.resize(fem.Dofs(), active.size());
         for (uint32_t i = 0; i < active.size(); ++i) {
             const auto vector = vectors.col(active[i]);
-            compact_previous_direction.col(i) = (vector - space.leftCols(width) * (mass_space.leftCols(width).transpose() * vector)).cast<float>();
+            compact_previous_direction.col(i) =
+                (vector - space.leftCols(width) * (mass_space.leftCols(width).transpose() * vector)).cast<float>();
         }
+        previous_actions = std::async(std::launch::async, [&] {
+            const Eigen::MatrixXd direction = compact_previous_direction.cast<double>();
+            return actions.ApplyMassShiftedTimed(
+                direction.data(), previous_mass_direction.data(), previous_shifted_direction.data(),
+                uint32_t(direction.cols()), alpha
+            );
+        });
 
         recurrence_seconds += SecondsSince(recurrence_start) - (actions.Seconds - recurrence_action_start) -
             (preconditioner_seconds - recurrence_preconditioner_start) - (ritz_seconds - recurrence_ritz_start);
         result.Iterations = iteration + 1;
     }
 
+    wait_previous_actions();
     const auto residual_start = Clock::now();
     const Eigen::MatrixXd residual = shifted_vectors.leftCols(count) - mass_vectors.leftCols(count) * shifted_values.head(count).asDiagonal();
     Eigen::VectorXd relative(count);
@@ -676,9 +722,30 @@ modal::FiniteCellBlockResult modal::oracle::SolveCholesky(
     const auto assembly_start = Clock::now();
     const auto assembled = fem.AssembleLower();
     result.Profile.Actions = SecondsSince(assembly_start);
+    if (fem.Dofs() <= 2048 && count * 8 >= fem.Dofs()) {
+        const auto dense_start = Clock::now();
+        Eigen::MatrixXd dense_stiffness{assembled.Stiffness}, dense_mass{assembled.Mass};
+        Eigen::VectorXd eigenvalues(fem.Dofs());
+        if (numeric::GeneralizedSelfAdjointEigenSolve(
+                dense_stiffness.data(), dense_mass.data(), eigenvalues.data(), fem.Dofs()
+            )) {
+            result.Profile.RayleighRitz = SecondsSince(dense_start);
+            result.Eigenvalues = eigenvalues.head(count);
+            result.Eigenvectors = dense_stiffness.leftCols(count);
+            const auto certification_start = Clock::now();
+            result.Certification = CertifyFiniteCellEigenpairs(fem, result.Eigenvalues, result.Eigenvectors);
+            result.Profile.Certification = SecondsSince(certification_start);
+            result.RelativeResiduals = result.Certification.RelativeResiduals;
+            result.Iterations = 1;
+            result.Profile.Total = SecondsSince(start);
+            result.Profile.Other = result.Profile.Total - result.Profile.Actions -
+                result.Profile.RayleighRitz - result.Profile.Certification;
+            return result;
+        }
+    }
     double factor_seconds{}, solve_seconds{};
     CholeskyShiftInvert inverse{assembled.Stiffness, assembled.Mass, factor_seconds, solve_seconds};
-    const uint32_t solve_count = std::min<uint32_t>(fem.Dofs() - 1, count + 20);
+    const uint32_t solve_count = std::min<uint32_t>(fem.Dofs() - 1, count + 4);
     const uint32_t basis = std::min<uint32_t>(fem.Dofs(), solve_count + 20);
     const auto eigensolver = modal::detail::SolveGeneralizedEigenproblem(
         inverse, assembled.Mass, assembled.Stiffness,

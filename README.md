@@ -54,7 +54,8 @@ Its matrix-free path combines:
 - a four-guard P1 block-subspace seed;
 - one packed localized multiplicative Metal correction with cooperative batch-eight local matrices;
 - a degree-four resident P1 multigrid cycle;
-- compact FP32 recurrence history with FP64 Ritz algebra and certification;
+- compact FP32 recurrence history whose exact FP64 actions overlap the Metal correction;
+- FP64 Ritz algebra and independent certification;
 - precompiled Metal kernels and a binary pipeline archive when the installed toolchain supports them.
 
 `SolveFiniteCellBlock` checks every result against physical FP64 residual and mass-orthogonality bounds.

@@ -307,7 +307,7 @@ ModalModes ComputeModes(
     const auto &config = opts.Config;
     const uint n = num_vertices * vertex_dim;
     const uint fem_n_modes = std::min(config.NumFemModes, n - 1);
-    const uint basis_size = std::min(std::max(fem_n_modes + 20, 20u), n);
+    const uint basis_size = std::min(std::max(fem_n_modes + (n >= 100000 ? 30u : 20u), 20u), n);
     // A negative shift makes K - sigma*M positive definite and places the smallest eigenvalues nearest the shift.
     const double shift_omega = 2 * std::numbers::pi * config.MinModeFreq;
     const double sigma = -shift_omega * shift_omega;
@@ -316,7 +316,8 @@ ModalModes ComputeModes(
     const auto &reuse = opts.Reuse;
     OpType op{fem, opts.Material, profile.Factorize, profile.OpSolve, profile.SymbolicReuse, reuse.Cache};
     if (monitor) monitor->Progress.store(0.3f, std::memory_order_relaxed);
-    const bool use_subspace = reuse.SeedBasis != nullptr && reuse.SeedBasis->rows() == Eigen::Index(n) && reuse.SeedBasis->cols() >= Eigen::Index(fem_n_modes);
+    const bool use_subspace = reuse.SeedBasis != nullptr && reuse.SeedBasis->rows() == Eigen::Index(n) &&
+        reuse.SeedBasis->cols() >= Eigen::Index(fem_n_modes);
     const auto eig_start = std::chrono::steady_clock::now();
     const auto subspace = modal::detail::SolveGeneralizedEigenproblem(
         op, M, K,
@@ -328,6 +329,9 @@ ModalModes ComputeModes(
             .ResidualTolerance = config.Tolerance,
             .MaxIterations = config.MaxRestarts,
             .MaxRefinementIterations = use_subspace ? WarmRefinementIterations : 50,
+            .KrylovBlockWidth = 8,
+            .KrylovSize = std::min(fem_n_modes + 115, n),
+            .ExtendedKrylovSize = std::min(fem_n_modes + 203, n),
         },
         use_subspace ? reuse.SeedBasis : nullptr,
         {

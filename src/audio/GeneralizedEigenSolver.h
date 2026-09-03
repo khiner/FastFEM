@@ -22,6 +22,10 @@ struct GeneralizedEigenOptions {
     uint32_t MaxIterations{100};
     uint32_t MaxRefinementIterations{10};
     uint64_t RandomSeed{20260710};
+    uint32_t KrylovBlockWidth{1};
+    uint32_t KrylovSize{};
+    uint32_t ExtendedKrylovSize{};
+    double ExtensionResidual{1e-3};
 };
 
 struct GeneralizedEigenControl {
@@ -40,21 +44,47 @@ struct GeneralizedEigenResult {
     bool Converged{};
 };
 
+inline void CertifyGeneralizedEigenResult(
+    GeneralizedEigenResult &result, const Eigen::MatrixXd &mass_vectors,
+    const Eigen::MatrixXd &stiffness_vectors, uint32_t certified_count,
+    double rigid_threshold, double residual_tolerance
+) {
+    const uint32_t count = uint32_t(result.Eigenvalues.size());
+    const Eigen::MatrixXd residual = stiffness_vectors - mass_vectors * result.Eigenvalues.asDiagonal();
+    result.RelativeResiduals.resize(count);
+    double maximum_physical_residual{};
+    for (uint32_t mode = 0; mode < count; ++mode) {
+        const double scale = stiffness_vectors.col(mode).norm() +
+            std::abs(result.Eigenvalues[mode]) * mass_vectors.col(mode).norm();
+        result.RelativeResiduals[mode] = scale == 0 ? residual.col(mode).norm() : residual.col(mode).norm() / scale;
+        if (mode < certified_count && std::abs(result.Eigenvalues[mode]) > rigid_threshold)
+            maximum_physical_residual = std::max(maximum_physical_residual, result.RelativeResiduals[mode]);
+    }
+    result.MassOrthogonalityError =
+        (result.Eigenvectors.transpose() * mass_vectors - Eigen::MatrixXd::Identity(count, count)).norm();
+    result.Converged = maximum_physical_residual <= residual_tolerance &&
+        result.MassOrthogonalityError <= std::max(1e-9, 10 * residual_tolerance);
+}
+
 template<class ShiftInvert>
 uint32_t RefineGeneralizedEigenpairs(
     const ShiftInvert &operation, const Eigen::SparseMatrix<double> &mass,
     const Eigen::SparseMatrix<double> &stiffness, double target_residual,
     double rigid_threshold, uint32_t certified_count, uint32_t max_iterations,
-    Eigen::VectorXd &eigenvalues, Eigen::MatrixXd &eigenvectors
+    Eigen::VectorXd &eigenvalues, Eigen::MatrixXd &eigenvectors,
+    Eigen::MatrixXd &mass_vectors, Eigen::MatrixXd &stiffness_vectors,
+    bool actions_initialized = false
 ) {
     constexpr double ClusterRelativeGap{1e-3};
     const auto mass_operator = mass.selfadjointView<Eigen::Lower>();
     const auto stiffness_operator = stiffness.selfadjointView<Eigen::Lower>();
     const uint32_t width = uint32_t(eigenvalues.size());
     uint32_t applications{};
+    if (!actions_initialized) {
+        mass_vectors.noalias() = mass_operator * eigenvectors;
+        stiffness_vectors.noalias() = stiffness_operator * eigenvectors;
+    }
     for (uint32_t iteration = 0; iteration < max_iterations; ++iteration) {
-        Eigen::MatrixXd mass_vectors = mass_operator * eigenvectors;
-        Eigen::MatrixXd stiffness_vectors = stiffness_operator * eigenvectors;
         const Eigen::MatrixXd residual = stiffness_vectors - mass_vectors * eigenvalues.asDiagonal();
         std::vector<bool> active(width);
         bool unconverged{};
@@ -117,21 +147,30 @@ uint32_t RefineGeneralizedEigenpairs(
         const Eigen::MatrixXd transform = correction_decomposition.eigenvectors().rightCols(correction_width) *
             correction_decomposition.eigenvalues().tail(correction_width).cwiseSqrt().cwiseInverse().asDiagonal();
         correction *= transform;
+        mass_correction *= transform;
+        const Eigen::MatrixXd stiffness_correction = stiffness_operator * correction;
 
         Eigen::MatrixXd space(eigenvectors.rows(), width + correction_width);
         space << eigenvectors, correction;
-        Eigen::MatrixXd projected = space.transpose() * (stiffness_operator * space);
+        Eigen::MatrixXd mass_space(eigenvectors.rows(), width + correction_width);
+        mass_space << mass_vectors, mass_correction;
+        Eigen::MatrixXd stiffness_space(eigenvectors.rows(), width + correction_width);
+        stiffness_space << stiffness_vectors, stiffness_correction;
+        Eigen::MatrixXd projected = space.transpose() * stiffness_space;
         projected = (0.5 * (projected + projected.transpose())).eval();
         const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> decomposition{projected};
         if (decomposition.info() != Eigen::Success) break;
+        const auto rotation = decomposition.eigenvectors().leftCols(width);
         eigenvalues = decomposition.eigenvalues().head(width);
-        eigenvectors = space * decomposition.eigenvectors().leftCols(width);
+        eigenvectors = space * rotation;
+        mass_vectors = mass_space * rotation;
+        stiffness_vectors = stiffness_space * rotation;
     }
     return applications;
 }
 
 template<class ShiftInvert>
-GeneralizedEigenResult SolveGeneralizedEigenproblem(
+GeneralizedEigenResult SolveGeneralizedInverseIteration(
     ShiftInvert &operation, const Eigen::SparseMatrix<double> &mass,
     const Eigen::SparseMatrix<double> &stiffness, const GeneralizedEigenOptions &options,
     const Eigen::MatrixXf *seed = nullptr, GeneralizedEigenControl control = {}
@@ -144,19 +183,59 @@ GeneralizedEigenResult SolveGeneralizedEigenproblem(
         stiffness.cols() != mass.cols())
         return result;
 
-    operation.set_shift(options.Shift);
     const auto mass_operator = mass.selfadjointView<Eigen::Lower>();
+    bool operation_ready{};
+    if (seed && seed->rows() == n && seed->cols() >= count) {
+        Eigen::MatrixXd seed_vectors = seed->leftCols(count).template cast<double>();
+        Eigen::MatrixXd seed_mass = mass_operator * seed_vectors;
+        Eigen::MatrixXd seed_stiffness = stiffness.selfadjointView<Eigen::Lower>() * seed_vectors;
+        Eigen::MatrixXd projected_mass = seed_vectors.transpose() * seed_mass;
+        Eigen::MatrixXd projected_stiffness = seed_vectors.transpose() * seed_stiffness;
+        projected_mass = (0.5 * (projected_mass + projected_mass.transpose())).eval();
+        projected_stiffness = (0.5 * (projected_stiffness + projected_stiffness.transpose())).eval();
+        const Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> decomposition{
+            projected_stiffness,
+            projected_mass,
+        };
+        if (decomposition.info() == Eigen::Success) {
+            result.Eigenvalues = decomposition.eigenvalues();
+            result.Eigenvectors = seed_vectors * decomposition.eigenvectors();
+            seed_mass = seed_mass * decomposition.eigenvectors();
+            seed_stiffness = seed_stiffness * decomposition.eigenvectors();
+            const uint32_t certified_count = options.CertifiedCount ?
+                std::min(options.CertifiedCount, count) :
+                count;
+            const double rigid_threshold = std::max(std::abs(options.Shift) * 1e-4, 1e-12);
+            CertifyGeneralizedEigenResult(
+                result, seed_mass, seed_stiffness, certified_count,
+                rigid_threshold, options.ResidualTolerance
+            );
+            if (result.Converged) return result;
+            operation.set_shift(options.Shift);
+            operation_ready = true;
+            result.OpApplications += RefineGeneralizedEigenpairs(
+                operation, mass, stiffness, options.ResidualTolerance, rigid_threshold,
+                certified_count, std::min(2u, options.MaxRefinementIterations),
+                result.Eigenvalues, result.Eigenvectors, seed_mass, seed_stiffness, true
+            );
+            CertifyGeneralizedEigenResult(
+                result, seed_mass, seed_stiffness, certified_count,
+                rigid_threshold, options.ResidualTolerance
+            );
+            if (result.Converged) return result;
+            result = {};
+        }
+    }
+
+    if (!operation_ready) operation.set_shift(options.Shift);
+    const uint32_t seeded = seed && seed->rows() == n ? std::min(uint32_t(seed->cols()), subspace_size) : 0;
     Eigen::MatrixXd mass_space(n, subspace_size);
     {
         Eigen::MatrixXd space(n, subspace_size);
         std::mt19937_64 random{options.RandomSeed};
-        std::normal_distribution<double> gaussian;
-        const uint32_t seeded = seed && seed->rows() == n ?
-            std::min(uint32_t(seed->cols()), subspace_size) :
-            0;
         if (seeded) space.leftCols(seeded) = seed->leftCols(seeded).template cast<double>();
         for (uint32_t column = seeded; column < subspace_size; ++column)
-            for (uint32_t row = 0; row < n; ++row) space(row, column) = gaussian(random);
+            for (uint32_t row = 0; row < n; ++row) space(row, column) = (random() & 1) ? 1.0 : -1.0;
         mass_space.noalias() = mass_operator * space;
     }
 
@@ -228,6 +307,19 @@ GeneralizedEigenResult SolveGeneralizedEigenproblem(
             );
         }
         if (locked == count) {
+            const double rigid_threshold = std::max(std::abs(options.Shift) * 1e-4, 1e-12);
+            const uint32_t certified_count = options.CertifiedCount ? std::min(options.CertifiedCount, count) : count;
+            if (seeded) {
+                result.Eigenvalues = previous_values;
+                result.Eigenvectors = locked_vectors;
+                const Eigen::MatrixXd locked_stiffness =
+                    stiffness.selfadjointView<Eigen::Lower>() * locked_vectors;
+                CertifyGeneralizedEigenResult(
+                    result, locked_mass_vectors, locked_stiffness, certified_count,
+                    rigid_threshold, options.ResidualTolerance
+                );
+                if (result.Converged) return result;
+            }
             const uint32_t guard_count = width - newly_locked;
             Eigen::VectorXd refined_values(count + guard_count);
             refined_values.head(count) = previous_values;
@@ -239,39 +331,179 @@ GeneralizedEigenResult SolveGeneralizedEigenproblem(
                 refined_vectors.rightCols(guard_count).noalias() =
                     space * rotation.rightCols(guard_count);
             }
-            const double rigid_threshold = std::max(std::abs(options.Shift) * 1e-4, 1e-12);
+            Eigen::MatrixXd refined_mass(n, count + guard_count), refined_stiffness(n, count + guard_count);
             result.OpApplications += RefineGeneralizedEigenpairs(
                 operation, mass, stiffness, options.ResidualTolerance, rigid_threshold, count,
-                options.MaxRefinementIterations, refined_values, refined_vectors
+                options.MaxRefinementIterations, refined_values, refined_vectors, refined_mass, refined_stiffness
             );
             result.Eigenvalues = refined_values.head(count);
             result.Eigenvectors = refined_vectors.leftCols(count);
-            const Eigen::MatrixXd final_mass = mass_operator * result.Eigenvectors;
-            const Eigen::MatrixXd final_stiffness =
-                stiffness.selfadjointView<Eigen::Lower>() * result.Eigenvectors;
-            const Eigen::MatrixXd residual =
-                final_stiffness - final_mass * result.Eigenvalues.asDiagonal();
-            result.RelativeResiduals.resize(count);
-            double maximum_physical_residual{};
-            const uint32_t certified_count = options.CertifiedCount ?
-                std::min(options.CertifiedCount, count) :
-                count;
-            for (uint32_t mode = 0; mode < count; ++mode) {
-                const double scale = final_stiffness.col(mode).norm() +
-                    std::abs(result.Eigenvalues[mode]) * final_mass.col(mode).norm();
-                result.RelativeResiduals[mode] = scale == 0 ? residual.col(mode).norm() :
-                                                              residual.col(mode).norm() / scale;
-                if (mode < certified_count && std::abs(result.Eigenvalues[mode]) > rigid_threshold)
-                    maximum_physical_residual = std::max(maximum_physical_residual, result.RelativeResiduals[mode]);
-            }
-            result.MassOrthogonalityError =
-                (result.Eigenvectors.transpose() * final_mass - Eigen::MatrixXd::Identity(count, count)).norm();
-            result.Converged = maximum_physical_residual <= options.ResidualTolerance &&
-                result.MassOrthogonalityError <= std::max(1e-9, 10 * options.ResidualTolerance);
+            const auto final_mass = refined_mass.leftCols(count);
+            const auto final_stiffness = refined_stiffness.leftCols(count);
+            CertifyGeneralizedEigenResult(
+                result, final_mass, final_stiffness, certified_count,
+                rigid_threshold, options.ResidualTolerance
+            );
             return result;
         }
         mass_space.noalias() = mass_vectors * rotation.rightCols(width - newly_locked);
     }
     return {};
+}
+
+template<class ShiftInvert>
+GeneralizedEigenResult SolveGeneralizedBlockKrylov(
+    ShiftInvert &operation, const Eigen::SparseMatrix<double> &mass,
+    const Eigen::SparseMatrix<double> &stiffness, const GeneralizedEigenOptions &options,
+    GeneralizedEigenControl control
+) {
+    const uint32_t block_width = std::max(options.KrylovBlockWidth, 1u);
+    const uint32_t n = uint32_t(mass.rows());
+    const uint32_t count = std::min(options.Count, n > 0 ? n - 1 : 0);
+    const uint32_t retained_size = std::min(std::max(options.SubspaceSize, count + 1), n);
+    const uint32_t default_size = std::max({retained_size, 2 * count + 6, count + 40});
+    const uint32_t subspace_size = std::min(std::max(options.KrylovSize, default_size), n);
+    const uint32_t capacity = std::min(std::max(options.ExtendedKrylovSize, subspace_size), n);
+    GeneralizedEigenResult result;
+    if (!count || subspace_size <= count || stiffness.rows() != mass.rows() || stiffness.cols() != mass.cols())
+        return result;
+
+    operation.set_shift(options.Shift);
+    const auto mass_operator = mass.selfadjointView<Eigen::Lower>();
+    Eigen::MatrixXd basis(n, capacity), mass_basis(n, capacity), action_basis(n, capacity);
+    const auto append = [&](Eigen::MatrixXd vectors, Eigen::MatrixXd mass_vectors, uint32_t used) {
+        if (block_width == 1) {
+            for (uint32_t pass = 0; pass < 2 && used; ++pass) {
+                const Eigen::MatrixXd coefficients = basis.leftCols(used).transpose() * mass_vectors;
+                vectors.noalias() -= basis.leftCols(used) * coefficients;
+                mass_vectors.noalias() -= mass_basis.leftCols(used) * coefficients;
+            }
+        } else {
+            constexpr uint32_t OrthogonalizationBlock{16};
+            for (uint32_t first = 0; first < used; first += OrthogonalizationBlock) {
+                const uint32_t width = std::min(OrthogonalizationBlock, used - first);
+                const Eigen::MatrixXd coefficients = basis.middleCols(first, width).transpose() * mass_vectors;
+                vectors.noalias() -= basis.middleCols(first, width) * coefficients;
+                mass_vectors.noalias() -= mass_basis.middleCols(first, width) * coefficients;
+            }
+        }
+        Eigen::MatrixXd gram = vectors.transpose() * mass_vectors;
+        const Eigen::VectorXd inverse_norm = gram.diagonal().cwiseSqrt().cwiseInverse();
+        if (!inverse_norm.allFinite()) return uint32_t{};
+        gram = inverse_norm.asDiagonal() * (0.5 * (gram + gram.transpose())).eval() * inverse_norm.asDiagonal();
+        const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> decomposition{gram};
+        if (decomposition.info() != Eigen::Success) return uint32_t{};
+        const double threshold = decomposition.eigenvalues().cwiseAbs().maxCoeff() * 1e-12;
+        Eigen::Index first{};
+        while (first < decomposition.eigenvalues().size() && decomposition.eigenvalues()[first] <= threshold) ++first;
+        const uint32_t rank = uint32_t(decomposition.eigenvalues().size() - first);
+        const uint32_t retained = std::min(rank, capacity - used);
+        if (!retained) return uint32_t{};
+        const Eigen::MatrixXd transform = inverse_norm.asDiagonal() *
+            decomposition.eigenvectors().rightCols(rank).leftCols(retained) *
+            decomposition.eigenvalues().tail(rank).head(retained).cwiseSqrt().cwiseInverse().asDiagonal();
+        basis.middleCols(used, retained).noalias() = vectors * transform;
+        mass_basis.middleCols(used, retained).noalias() = mass_vectors * transform;
+        return retained;
+    };
+
+    const uint32_t initial_width = std::min(block_width, capacity);
+    Eigen::MatrixXd initial(n, initial_width);
+    std::mt19937_64 random{options.RandomSeed};
+    for (uint32_t column = 0; column < initial_width; ++column)
+        for (uint32_t row = 0; row < n; ++row) initial(row, column) = (random() & 1) ? 1.0 : -1.0;
+    Eigen::MatrixXd initial_mass = mass_operator * initial;
+    uint32_t used = append(std::move(initial), std::move(initial_mass), 0);
+    uint32_t applied{};
+    const double rigid_threshold = std::max(std::abs(options.Shift) * 1e-4, 1e-12);
+    const uint32_t certified_count = options.CertifiedCount ? std::min(options.CertifiedCount, count) : count;
+    const auto grow = [&](uint32_t target) {
+        while (applied < target) {
+            if (control.Cancel && control.Cancel->load(std::memory_order_relaxed)) return false;
+            if (applied >= used) return false;
+            const uint32_t width = std::min(block_width, used - applied);
+            operation.solve_panel(mass_basis.col(applied).data(), action_basis.col(applied).data(), int(width));
+            result.OpApplications += width;
+            if (used < capacity) {
+                Eigen::MatrixXd next = action_basis.middleCols(applied, width);
+                Eigen::MatrixXd next_mass = mass_operator * next;
+                const uint32_t added = append(std::move(next), std::move(next_mass), used);
+                if (!added) return false;
+                used += added;
+            }
+            applied += width;
+            ++result.Iterations;
+            if (control.Progress) {
+                const float fraction = float(applied) / float(capacity);
+                control.Progress->store(
+                    control.ProgressBegin + fraction * (control.ProgressEnd - control.ProgressBegin),
+                    std::memory_order_relaxed
+                );
+            }
+        }
+        return true;
+    };
+    Eigen::VectorXd values;
+    Eigen::MatrixXd vectors, mass_vectors, stiffness_vectors;
+    const auto extract = [&](uint32_t width) {
+        Eigen::MatrixXd projected = mass_basis.leftCols(width).transpose() * action_basis.leftCols(width);
+        projected = (0.5 * (projected + projected.transpose())).eval();
+        Eigen::MatrixXd projected_mass = basis.leftCols(width).transpose() * mass_basis.leftCols(width);
+        projected_mass = (0.5 * (projected_mass + projected_mass.transpose())).eval();
+        const Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> decomposition{projected, projected_mass};
+        if (decomposition.info() != Eigen::Success) return false;
+        Eigen::MatrixXd rotation(width, retained_size);
+        values.resize(retained_size);
+        for (uint32_t mode = 0; mode < retained_size; ++mode) {
+            const Eigen::Index index = decomposition.eigenvalues().size() - 1 - mode;
+            const double inverse_value = decomposition.eigenvalues()[index];
+            if (!(inverse_value > 0) || !std::isfinite(inverse_value)) return false;
+            values[mode] = options.Shift + 1 / inverse_value;
+            rotation.col(mode) = decomposition.eigenvectors().col(index);
+        }
+        vectors.noalias() = basis.leftCols(width) * rotation;
+        mass_vectors.noalias() = mass_basis.leftCols(width) * rotation;
+        stiffness_vectors.noalias() = stiffness.selfadjointView<Eigen::Lower>() * vectors;
+        result.Eigenvalues = values.head(count);
+        result.Eigenvectors = vectors.leftCols(count);
+        CertifyGeneralizedEigenResult(
+            result, mass_vectors.leftCols(count), stiffness_vectors.leftCols(count),
+            certified_count, rigid_threshold, options.ResidualTolerance
+        );
+        return true;
+    };
+    if (!grow(subspace_size) || !extract(subspace_size)) return {};
+    double maximum_residual{};
+    for (uint32_t mode = 0; mode < certified_count; ++mode)
+        if (std::abs(values[mode]) > rigid_threshold)
+            maximum_residual = std::max(maximum_residual, result.RelativeResiduals[mode]);
+    if (capacity > subspace_size && maximum_residual > options.ExtensionResidual) {
+        if (!grow(capacity) || !extract(capacity)) return {};
+    }
+    result.OpApplications += RefineGeneralizedEigenpairs(
+        operation, mass, stiffness, options.ResidualTolerance, rigid_threshold, count,
+        options.MaxRefinementIterations, values, vectors, mass_vectors, stiffness_vectors, block_width > 1
+    );
+    result.Eigenvalues = values.head(count);
+    result.Eigenvectors = vectors.leftCols(count);
+    CertifyGeneralizedEigenResult(
+        result, mass_vectors.leftCols(count), stiffness_vectors.leftCols(count),
+        certified_count, rigid_threshold, options.ResidualTolerance
+    );
+    if (control.Progress) control.Progress->store(control.ProgressEnd, std::memory_order_relaxed);
+    return result;
+}
+
+template<class ShiftInvert>
+GeneralizedEigenResult SolveGeneralizedEigenproblem(
+    ShiftInvert &operation, const Eigen::SparseMatrix<double> &mass,
+    const Eigen::SparseMatrix<double> &stiffness, const GeneralizedEigenOptions &options,
+    const Eigen::MatrixXf *seed = nullptr, GeneralizedEigenControl control = {}
+) {
+    if (seed || options.Count <= 12 || options.Count >= 128 || mass.rows() >= 100000)
+        return SolveGeneralizedInverseIteration(operation, mass, stiffness, options, seed, control);
+    auto result = SolveGeneralizedBlockKrylov(operation, mass, stiffness, options, control);
+    if (result.Converged) return result;
+    return SolveGeneralizedInverseIteration(operation, mass, stiffness, options, seed, control);
 }
 } // namespace modal::detail
