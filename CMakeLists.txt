@@ -20,20 +20,6 @@ function(fastfem_require_submodule path)
     endif()
 endfunction()
 
-if(NOT TARGET Spectra AND NOT TARGET Spectra::Spectra)
-    fastfem_require_submodule(lib/spectra)
-    block()
-        set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-        add_subdirectory(lib/spectra EXCLUDE_FROM_ALL)
-    endblock()
-endif()
-if(TARGET Spectra::Spectra)
-    set(FASTFEM_SPECTRA_TARGET Spectra::Spectra)
-else()
-    set(FASTFEM_SPECTRA_TARGET Spectra)
-endif()
-
 if(NOT TARGET meshoptimizer AND NOT TARGET meshoptimizer::meshoptimizer)
     set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "" FORCE)
     set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
@@ -134,7 +120,6 @@ target_include_directories(FastFEM PUBLIC
 target_link_libraries(FastFEM
     PUBLIC
         Eigen3::Eigen
-        ${FASTFEM_SPECTRA_TARGET}
     PRIVATE
         ${FASTFEM_MESHOPTIMIZER_TARGET}
         ${FASTFEM_ACCELERATE_FRAMEWORK}

@@ -6,7 +6,7 @@
 
 #include <memory>
 
-// Computes y = (K - sigma*M)^-1 x for Spectra from the lower triangles of K and M.
+// Computes y = (K - sigma*M)^-1 x from the lower triangles of K and M.
 // A negative sigma makes K - sigma*M positive definite when K is positive semidefinite and M is positive definite.
 // The constructor stores references that accumulate factorization and solve wall-clock time.
 struct CholeskyShiftInvert {

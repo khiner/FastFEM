@@ -5,13 +5,12 @@
 #include "CholeskyShiftInvert.h"
 #include "FiniteCellMetal.h"
 #include "FiniteCellOracle.h"
+#include "GeneralizedEigenSolver.h"
 #include "SparseCholesky.h"
 #include "numeric/Accelerate.h"
 
 #include <Eigen/Cholesky>
 #include <Eigen/Eigenvalues>
-#include <Spectra/MatOp/SparseSymMatProd.h>
-#include <Spectra/SymGEigsShiftSolver.h>
 
 #include <dispatch/dispatch.h>
 
@@ -215,14 +214,21 @@ Eigen::MatrixXd InitialSpace(
     const uint32_t basis_size = std::min<uint32_t>(p1.Mass.rows(), std::max<uint32_t>(count + 20, 20));
     double factor_seconds{}, solve_seconds{};
     CholeskyShiftInvert operation{p1.Stiffness, p1.Mass, factor_seconds, solve_seconds};
-    Spectra::SparseSymMatProd<double> mass{p1.Mass};
-    Spectra::SymGEigsShiftSolver<CholeskyShiftInvert, Spectra::SparseSymMatProd<double>, Spectra::GEigsMode::ShiftInvert> eigensolver{
-        operation, mass, int(count), int(basis_size), -alpha
-    };
-    eigensolver.init();
-    eigensolver.compute(Spectra::SortRule::LargestMagn, 100, 1e-4, Spectra::SortRule::SmallestAlge);
-    if (eigensolver.info() != Spectra::CompInfo::Successful) return result;
-    fem.ProlongP1(eigensolver.eigenvectors().data(), result.data(), count);
+    const auto eigensolver = modal::detail::SolveGeneralizedEigenproblem(
+        operation, p1.Mass, p1.Stiffness,
+        {
+            .Count = count,
+            .SubspaceSize = basis_size,
+            .Shift = -alpha,
+            .IterationTolerance = 1e-4,
+            .ResidualTolerance = 1e-4,
+            .MaxIterations = 100,
+            .MaxRefinementIterations = 20,
+            .RandomSeed = 20260828,
+        }
+    );
+    if (!eigensolver.Converged) return result;
+    fem.ProlongP1(eigensolver.Eigenvectors.data(), result.data(), count);
     return result;
 }
 
@@ -672,23 +678,26 @@ modal::FiniteCellBlockResult modal::oracle::SolveCholesky(
     result.Profile.Actions = SecondsSince(assembly_start);
     double factor_seconds{}, solve_seconds{};
     CholeskyShiftInvert inverse{assembled.Stiffness, assembled.Mass, factor_seconds, solve_seconds};
-    Spectra::SparseSymMatProd<double> mass{assembled.Mass};
-    const uint32_t solve_count = std::min<uint32_t>(fem.Dofs() - 1, count + 4);
-    const uint32_t basis = std::min<uint32_t>(
-        fem.Dofs(), std::max(2 * solve_count + 20, solve_count + 40)
+    const uint32_t solve_count = std::min<uint32_t>(fem.Dofs() - 1, count + 20);
+    const uint32_t basis = std::min<uint32_t>(fem.Dofs(), solve_count + 20);
+    const auto eigensolver = modal::detail::SolveGeneralizedEigenproblem(
+        inverse, assembled.Mass, assembled.Stiffness,
+        {
+            .Count = solve_count,
+            .CertifiedCount = count,
+            .SubspaceSize = basis,
+            .Shift = -alpha,
+            .IterationTolerance = 1e-5,
+            .ResidualTolerance = 0.25 * tolerance,
+            .MaxIterations = max_iterations,
+            .MaxRefinementIterations = 50,
+            .RandomSeed = 20260828,
+        }
     );
-    Spectra::SymGEigsShiftSolver<CholeskyShiftInvert, Spectra::SparseSymMatProd<double>, Spectra::GEigsMode::ShiftInvert> eigensolver{
-        inverse, mass, int(solve_count), int(basis), -alpha
-    };
-    eigensolver.init();
-    eigensolver.compute(
-        Spectra::SortRule::LargestMagn, int(max_iterations), 0.01 * tolerance,
-        Spectra::SortRule::SmallestAlge
-    );
-    result.Iterations = uint32_t(eigensolver.num_iterations());
-    if (eigensolver.info() == Spectra::CompInfo::Successful) {
-        Eigen::MatrixXd space = eigensolver.eigenvectors();
-        result.Eigenvalues = eigensolver.eigenvalues().head(count);
+    result.Iterations = eigensolver.Iterations;
+    if (eigensolver.Converged) {
+        Eigen::MatrixXd space = eigensolver.Eigenvectors;
+        result.Eigenvalues = eigensolver.Eigenvalues.head(count);
         result.Eigenvectors = space.leftCols(count);
         result.Certification = CertifyFiniteCellEigenpairs(fem, result.Eigenvalues, result.Eigenvectors);
         result.RelativeResiduals = result.Certification.RelativeResiduals;

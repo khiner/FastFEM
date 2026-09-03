@@ -29,7 +29,7 @@ FastFEM provides two discretizations with independent accuracy and certification
 
 `mesh2modes` accepts a quadratic tetrahedral volume mesh and assembles stiffness and mass directly into a 3-by-3 block pencil.
 It factors the pencil with relaxed-supernodal Cholesky and solves the FP64 generalized elastic eigenproblem.
-Spectra drives shift-invert iteration, while Accelerate supplies fill-reducing ordering and dense BLAS/LAPACK kernels.
+A deterministic block shift-invert iteration extracts the modes, while Accelerate supplies fill-reducing ordering and dense BLAS/LAPACK kernels.
 
 Pass a `SolveCache` to preserve the block pencil and symbolic factorization between compatible solve calls.
 `mesh2modes` can seed a guarded block-subspace re-solve with modes from a geometry-compatible prior solution.
@@ -51,7 +51,7 @@ Its matrix-free path combines:
 
 - signed moment-fitted cut integration;
 - vectorized paired FP64 mass and shifted actions with exact packed cut operators;
-- a four-guard P1 Spectra seed;
+- a four-guard P1 block-subspace seed;
 - one packed localized multiplicative Metal correction with cooperative batch-eight local matrices;
 - a degree-four resident P1 multigrid cycle;
 - compact FP32 recurrence history with FP64 Ritz algebra and certification;

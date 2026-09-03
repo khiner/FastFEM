@@ -5,12 +5,12 @@
 
 #include "AcousticMaterialProperties.h"
 #include "BlockSparseCholesky.h"
+#include "GeneralizedEigenSolver.h"
 #include "Tet10Assembler.h"
 #include "numeric/vec3.h"
 
 #include "mesh/TetMesh.h"
 #include <Eigen/Eigenvalues>
-#include <Spectra/SymGEigsShiftSolver.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -18,7 +18,6 @@
 #include <mutex>
 #include <numbers>
 #include <optional>
-#include <random>
 #include <unordered_map>
 
 using uint = uint32_t;
@@ -217,185 +216,6 @@ MassProperties ComputeMassProperties(const TetMesh &tets, double density, vec3 s
     };
 }
 
-// Returns the leading `nev` eigenpairs from a prior eigenvector basis and a shifted block solve.
-struct SubspaceResult {
-    Eigen::VectorXd Eigenvalues;
-    Eigen::MatrixXd Eigenvectors;
-    uint Iterations{}, OpApplications{};
-};
-
-template<class ShiftInvert>
-uint RefineSubspace(
-    const ShiftInvert &op, const Eigen::SparseMatrix<double> &M, const Eigen::SparseMatrix<double> &K,
-    double target_residual, double rigid_threshold, uint max_iterations,
-    Eigen::VectorXd &eigenvalues, Eigen::MatrixXd &eigenvectors
-) {
-    constexpr double ClusterRelativeGap{1e-3};
-    const auto mass_operator = M.selfadjointView<Eigen::Lower>();
-    const auto stiffness_operator = K.selfadjointView<Eigen::Lower>();
-    const uint width = eigenvalues.size();
-    uint applications{};
-    for (uint iteration = 0; iteration < max_iterations; ++iteration) {
-        Eigen::MatrixXd mass = mass_operator * eigenvectors;
-        Eigen::MatrixXd stiffness = stiffness_operator * eigenvectors;
-        const Eigen::MatrixXd residual = stiffness - mass * eigenvalues.asDiagonal();
-        std::vector<bool> active(width);
-        bool unconverged = false;
-        for (Eigen::Index mode = 0; mode < eigenvalues.size(); ++mode) {
-            if (std::abs(eigenvalues[mode]) <= rigid_threshold) continue;
-            const double relative = residual.col(mode).norm() /
-                (stiffness.col(mode).norm() + std::abs(eigenvalues[mode]) * mass.col(mode).norm());
-            if (relative > target_residual) {
-                unconverged = true;
-                active[mode] = true;
-            }
-        }
-        if (!unconverged) break;
-        bool expanded;
-        do {
-            expanded = false;
-            for (uint mode = 0; mode + 1 < width; ++mode) {
-                if (active[mode] == active[mode + 1] || std::abs(eigenvalues[mode]) <= rigid_threshold ||
-                    std::abs(eigenvalues[mode + 1]) <= rigid_threshold) continue;
-                const double scale = std::max({std::abs(eigenvalues[mode]), std::abs(eigenvalues[mode + 1]), rigid_threshold});
-                if (std::abs(eigenvalues[mode + 1] - eigenvalues[mode]) <= ClusterRelativeGap * scale) {
-                    active[mode] = active[mode + 1] = true;
-                    expanded = true;
-                }
-            }
-        } while (expanded);
-        std::vector<Eigen::Index> active_modes;
-        for (uint mode = 0; mode < width; ++mode)
-            if (active[mode]) active_modes.push_back(mode);
-        if (active_modes.empty()) break;
-
-        Eigen::MatrixXd active_residual(eigenvectors.rows(), active_modes.size());
-        for (size_t column = 0; column < active_modes.size(); ++column) active_residual.col(column) = residual.col(active_modes[column]);
-        Eigen::MatrixXd correction(eigenvectors.rows(), active_modes.size());
-        op.solve_panel(active_residual.data(), correction.data(), int(active_modes.size()));
-        applications += active_modes.size();
-
-        Eigen::MatrixXd mass_correction = mass_operator * correction;
-        for (uint pass = 0; pass < 2; ++pass) {
-            const Eigen::MatrixXd coefficients = eigenvectors.transpose() * mass_correction;
-            correction.noalias() -= eigenvectors * coefficients;
-            mass_correction.noalias() -= mass * coefficients;
-        }
-        Eigen::MatrixXd gram = correction.transpose() * mass_correction;
-        gram = (0.5 * (gram + gram.transpose())).eval();
-        const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> correction_decomposition{gram};
-        if (correction_decomposition.info() != Eigen::Success) break;
-        const double threshold = correction_decomposition.eigenvalues().maxCoeff() * 1e-12;
-        Eigen::Index first = 0;
-        while (first < correction.cols() && correction_decomposition.eigenvalues()[first] <= threshold) ++first;
-        if (first == correction.cols()) break;
-        const Eigen::Index correction_width = correction.cols() - first;
-        const Eigen::MatrixXd transform = correction_decomposition.eigenvectors().rightCols(correction_width) *
-            correction_decomposition.eigenvalues().tail(correction_width).cwiseSqrt().cwiseInverse().asDiagonal();
-        correction *= transform;
-        mass_correction *= transform;
-
-        Eigen::MatrixXd space(eigenvectors.rows(), width + correction.cols());
-        space << eigenvectors, correction;
-        Eigen::MatrixXd projected = space.transpose() * (stiffness_operator * space);
-        projected = (0.5 * (projected + projected.transpose())).eval();
-        const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> decomposition{projected};
-        if (decomposition.info() != Eigen::Success) break;
-        eigenvalues = decomposition.eigenvalues().head(width);
-        eigenvectors = space * decomposition.eigenvectors().leftCols(width);
-    }
-    return applications;
-}
-
-template<class ShiftInvert>
-SubspaceResult SubspaceIterate(
-    const ShiftInvert &op, const Eigen::SparseMatrix<double> &M,
-    uint nev, uint p, double sigma, double tol, uint max_iters,
-    const Eigen::MatrixXf &x0,
-    modal::SolveMonitor *monitor = nullptr
-) {
-    const uint n = M.rows();
-    const auto Msa = M.selfadjointView<Eigen::Lower>();
-
-    // Storing M*X avoids repeated mass actions in panel solves, projections, and deflation.
-    // The iteration materializes Ritz vectors when they become locked.
-    Eigen::MatrixXd MX(n, p);
-    {
-        Eigen::MatrixXd X(n, p);
-        std::mt19937_64 rng{20260710};
-        std::normal_distribution<double> gauss;
-        const uint seeded = std::min(uint(x0.cols()), p);
-        X.leftCols(seeded) = x0.leftCols(seeded).cast<double>();
-        for (uint j = seeded; j < p; ++j)
-            for (uint i = 0; i < n; ++i) X(i, j) = gauss(rng);
-        MX.noalias() = Msa * X;
-    }
-
-    SubspaceResult result;
-    // Locked Ritz pairs remain in ascending order.
-    // Deflation removes locked vectors from subsequent panel solves.
-    Eigen::MatrixXd XL(n, nev), MXL(n, nev);
-    Eigen::VectorXd theta_locked(nev);
-    uint c = 0;
-
-    Eigen::VectorXd prev_lambda = Eigen::VectorXd::Constant(nev, std::numeric_limits<double>::max());
-    for (uint iter = 0; iter < max_iters; ++iter) {
-        if (monitor && monitor->Cancelled()) return result;
-        const uint w = p - c;
-        Eigen::MatrixXd Xbar(n, w);
-        op.solve_panel(MX.data(), Xbar.data(), int(w));
-        result.OpApplications += w;
-
-        // Kr = Xbar^T*(K - sigma*M)*Xbar = Xbar^T*M*X before the deflation correction.
-        Eigen::MatrixXd Kr = Xbar.transpose() * MX;
-        Eigen::MatrixXd MXbar = Msa * Xbar;
-
-        // Locked pairs satisfy (K - sigma*M)*x = theta*M*x within tolerance.
-        // This identity reduces the deflated projection to the -C^T*theta*C correction.
-        if (c > 0) {
-            const Eigen::MatrixXd C = XL.leftCols(c).transpose() * MXbar;
-            Xbar.noalias() -= XL.leftCols(c) * C;
-            MXbar.noalias() -= MXL.leftCols(c) * C;
-            Kr.noalias() -= C.transpose() * theta_locked.head(c).asDiagonal() * C;
-        }
-        Eigen::MatrixXd Mr = Xbar.transpose() * MXbar;
-
-        // Unit M-norm columns improve conditioning of the projected generalized eigenproblem.
-        Kr = (0.5 * (Kr + Kr.transpose())).eval();
-        Mr = (0.5 * (Mr + Mr.transpose())).eval();
-        const Eigen::VectorXd dscale = Mr.diagonal().cwiseSqrt().cwiseInverse();
-        Kr = dscale.asDiagonal() * Kr * dscale.asDiagonal();
-        Mr = dscale.asDiagonal() * Mr * dscale.asDiagonal();
-        const Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> es(Kr, Mr);
-        if (es.info() != Eigen::Success) return result;
-
-        const Eigen::MatrixXd q = dscale.asDiagonal() * es.eigenvectors();
-
-        uint newly_locked = 0;
-        for (uint i = 0; i < w && c + i < nev; ++i) {
-            const double lambda = es.eigenvalues()[i] + sigma;
-            const double rel = std::abs(lambda - prev_lambda[c + i]) / std::max(std::abs(lambda), std::abs(sigma));
-            prev_lambda[c + i] = lambda;
-            if (newly_locked == i && rel < tol) ++newly_locked;
-        }
-        if (newly_locked > 0) {
-            XL.middleCols(c, newly_locked).noalias() = Xbar * q.leftCols(newly_locked);
-            MXL.middleCols(c, newly_locked).noalias() = MXbar * q.leftCols(newly_locked);
-            theta_locked.segment(c, newly_locked) = es.eigenvalues().head(newly_locked);
-            c += newly_locked;
-        }
-        if (monitor) monitor->Progress.store(0.3f + 0.65f * float(c) / float(nev), std::memory_order_relaxed);
-        result.Iterations = iter + 1;
-        if (c >= nev) {
-            result.Eigenvalues = prev_lambda;
-            result.Eigenvectors = std::move(XL);
-            return result;
-        }
-        MX.noalias() = MXbar * q.rightCols(w - newly_locked);
-    }
-    return result;
-}
-
 struct ComputeModesOpts {
     modal::SolverConfig Config{};
     std::vector<uint> ExPos{}; // Excitation positions
@@ -484,13 +304,10 @@ ModalModes ComputeModes(
     ModalEigenSummary &summary_out, Eigen::MatrixXf *basis_out
 ) {
     using OpType = Tet10BlockShiftInvert;
-    using BOpType = Spectra::SparseSymMatProd<double>;
-    using Spectra::GEigsMode::ShiftInvert;
-
     const auto &config = opts.Config;
     const uint n = num_vertices * vertex_dim;
     const uint fem_n_modes = std::min(config.NumFemModes, n - 1);
-    const uint basis_size = std::min(std::max(fem_n_modes + 20, 20u), n); // Lanczos basis vector count (ncv)
+    const uint basis_size = std::min(std::max(fem_n_modes + 20, 20u), n);
     // A negative shift makes K - sigma*M positive definite and places the smallest eigenvalues nearest the shift.
     const double shift_omega = 2 * std::numbers::pi * config.MinModeFreq;
     const double sigma = -shift_omega * shift_omega;
@@ -498,40 +315,40 @@ ModalModes ComputeModes(
     if (monitor && monitor->Cancelled()) return {};
     const auto &reuse = opts.Reuse;
     OpType op{fem, opts.Material, profile.Factorize, profile.OpSolve, profile.SymbolicReuse, reuse.Cache};
-    BOpType Bop{M};
     if (monitor) monitor->Progress.store(0.3f, std::memory_order_relaxed);
     const bool use_subspace = reuse.SeedBasis != nullptr && reuse.SeedBasis->rows() == Eigen::Index(n) && reuse.SeedBasis->cols() >= Eigen::Index(fem_n_modes);
-    std::optional<Spectra::SymGEigsShiftSolver<OpType, BOpType, ShiftInvert>> eigs;
-    SubspaceResult subspace;
-    Eigen::VectorXd eigenvalues;
     const auto eig_start = std::chrono::steady_clock::now();
-    if (use_subspace) {
-        op.set_shift(sigma);
-        subspace = SubspaceIterate(op, M, fem_n_modes, std::min(fem_n_modes + WarmOversampling, n), sigma, WarmTolerance, config.MaxRestarts, *reuse.SeedBasis, monitor);
-        profile.OpApplications = subspace.OpApplications;
-        profile.Restarts = subspace.Iterations;
-        if (subspace.Eigenvalues.size() == 0) return {};
-        eigenvalues = subspace.Eigenvalues;
-        profile.OpApplications += RefineSubspace(op, M, K, config.Tolerance, -sigma * 1e-4, WarmRefinementIterations, eigenvalues, subspace.Eigenvectors);
-    } else {
-        if (monitor && monitor->Cancelled()) return {};
-        // Cold solves update progress and cancellation only at stage boundaries because Spectra provides no callback.
-        eigs.emplace(op, Bop, fem_n_modes, basis_size, sigma);
-        eigs->init();
-        eigs->compute(
-            Spectra::SortRule::LargestMagn, config.MaxRestarts, 0.01 * config.Tolerance,
-            Spectra::SortRule::SmallestAlge
-        );
-        profile.OpApplications = eigs->num_operations();
-        profile.Restarts = eigs->num_iterations();
-        if (eigs->info() != Spectra::CompInfo::Successful) return {};
-        eigenvalues = eigs->eigenvalues();
+    const auto subspace = modal::detail::SolveGeneralizedEigenproblem(
+        op, M, K,
+        {
+            .Count = fem_n_modes,
+            .SubspaceSize = use_subspace ? std::min(fem_n_modes + WarmOversampling, n) : basis_size,
+            .Shift = sigma,
+            .IterationTolerance = use_subspace ? WarmTolerance : 1e-3,
+            .ResidualTolerance = config.Tolerance,
+            .MaxIterations = config.MaxRestarts,
+            .MaxRefinementIterations = use_subspace ? WarmRefinementIterations : 50,
+        },
+        use_subspace ? reuse.SeedBasis : nullptr,
+        {
+            .Cancel = monitor ? &monitor->CancelRequested : nullptr,
+            .Progress = monitor ? &monitor->Progress : nullptr,
+            .ProgressBegin = 0.3f,
+            .ProgressEnd = 0.95f,
+        }
+    );
+    profile.OpApplications = subspace.OpApplications;
+    profile.Restarts = subspace.Iterations;
+    if (subspace.RelativeResiduals.size()) {
+        const uint32_t first_physical = std::min(6u, fem_n_modes);
+        if (first_physical < fem_n_modes)
+            profile.PhysicalResidual = subspace.RelativeResiduals.tail(fem_n_modes - first_physical).maxCoeff();
+        profile.MassOrthogonality = subspace.MassOrthogonalityError;
     }
+    if (!subspace.Converged) return {};
     profile.Iterate = SecondsSince(eig_start) - profile.Factorize;
-    // M-orthonormal eigenvectors provide mass-normalized shapes in kg^-1/2.
-    const Eigen::MatrixXd eigenvectors = Timed(profile.Extract, [&]() -> Eigen::MatrixXd {
-        return use_subspace ? std::move(subspace.Eigenvectors) : eigs->eigenvectors();
-    });
+    const Eigen::VectorXd &eigenvalues = subspace.Eigenvalues;
+    const Eigen::MatrixXd &eigenvectors = subspace.Eigenvectors;
     std::vector<std::vector<vec3>> shapes(opts.ExPos.size(), std::vector<vec3>(fem_n_modes));
     for (size_t ex_pos = 0; ex_pos < shapes.size(); ++ex_pos) {
         const uint ev_i = vertex_dim * opts.ExPos[ex_pos];

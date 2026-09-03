@@ -190,6 +190,8 @@ suite ConsolidationTests = [] {
             expect(preferred.Eigenvalues.size() == Eigen::Index(ModeCount)) << entry.Geometry;
             expect(preferred.Profile.FallbackAttemptIterations == 0_u) << entry.Geometry;
             if (reference.Values.size() != ModeCount || preferred.Eigenvalues.size() != ModeCount) continue;
+            expect(reference.RelativeResidual < 1e-8) << entry.Geometry << reference.RelativeResidual;
+            expect(reference.MassOrthogonalityError < 1e-9) << entry.Geometry << reference.MassOrthogonalityError;
             const double spectrum = (preferred.Eigenvalues.tail(ModeCount - 6) - reference.Values.tail(ModeCount - 6)).norm() /
                 reference.Values.tail(ModeCount - 6).norm();
             const double residual = preferred.Certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();

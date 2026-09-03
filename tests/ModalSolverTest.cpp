@@ -4,15 +4,13 @@
 #include "ValidateTetMesh.h"
 #include "audio/AcousticMaterialProperties.h"
 #include "audio/BlockSparseCholesky.h"
-#include "audio/CholeskyShiftInvert.h"
+#include "audio/GeneralizedEigenSolver.h"
 #include "audio/SparseCholesky.h"
 #include "audio/Tet10Assembler.h"
 #include "audio/mesh2modes.h"
 #include "mesh/Tets.h"
 
 #include <Eigen/Eigenvalues>
-#include <Spectra/MatOp/SparseSymMatProd.h>
-#include <Spectra/SymGEigsShiftSolver.h>
 #include <boost/ut.hpp>
 
 #include <algorithm>
@@ -263,26 +261,32 @@ int main() {
         const double shift = std::pow(2 * std::numbers::pi * 20, 2);
         const modal::Tet10Assembler fem{MakeStructuredBar(3, 2, 1), material};
         const auto [mass, stiffness] = fem.AssembleLower();
-        double factor_seconds{}, solve_seconds{};
-        CholeskyShiftInvert accelerate{stiffness, mass, factor_seconds, solve_seconds};
         BlockSparseCholesky block{fem};
-        Spectra::SparseSymMatProd<double> mass_action{mass};
-        Spectra::SymGEigsShiftSolver<CholeskyShiftInvert, Spectra::SparseSymMatProd<double>, Spectra::GEigsMode::ShiftInvert> accelerate_solver{
-            accelerate, mass_action, count, basis, -shift
+        const auto block_solver = modal::detail::SolveGeneralizedEigenproblem(
+            block, mass, stiffness,
+            {
+                .Count = count,
+                .SubspaceSize = basis,
+                .Shift = -shift,
+                .IterationTolerance = 1e-5,
+                .ResidualTolerance = 1e-10,
+                .MaxIterations = 300,
+                .MaxRefinementIterations = 20,
+            }
+        );
+        expect(block_solver.Converged);
+        Eigen::MatrixXd dense_mass{mass}, dense_stiffness{stiffness};
+        dense_mass = dense_mass.selfadjointView<Eigen::Lower>();
+        dense_stiffness = dense_stiffness.selfadjointView<Eigen::Lower>();
+        const Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> reference_solver{
+            dense_stiffness,
+            dense_mass,
         };
-        Spectra::SymGEigsShiftSolver<BlockSparseCholesky, Spectra::SparseSymMatProd<double>, Spectra::GEigsMode::ShiftInvert> block_solver{
-            block, mass_action, count, basis, -shift
-        };
-        accelerate_solver.init();
-        block_solver.init();
-        accelerate_solver.compute(Spectra::SortRule::LargestMagn, 300, 1e-10, Spectra::SortRule::SmallestAlge);
-        block_solver.compute(Spectra::SortRule::LargestMagn, 300, 1e-10, Spectra::SortRule::SmallestAlge);
-        expect(accelerate_solver.info() == Spectra::CompInfo::Successful);
-        expect(block_solver.info() == Spectra::CompInfo::Successful);
-        const Eigen::VectorXd reference = accelerate_solver.eigenvalues();
-        const Eigen::VectorXd values = block_solver.eigenvalues();
+        expect(reference_solver.info() == Eigen::Success);
+        const Eigen::VectorXd reference = reference_solver.eigenvalues().head(count);
+        const Eigen::VectorXd values = block_solver.Eigenvalues;
         expect((values - reference).norm() / reference.norm() < 1e-9);
-        const Eigen::MatrixXd vectors = block_solver.eigenvectors();
+        const Eigen::MatrixXd vectors = block_solver.Eigenvectors;
         const auto k = stiffness.selfadjointView<Eigen::Lower>();
         const auto m = mass.selfadjointView<Eigen::Lower>();
         double maximum_residual{};

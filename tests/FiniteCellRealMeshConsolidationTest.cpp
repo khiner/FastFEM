@@ -139,7 +139,7 @@ RunResult Run(const fs::path &path, uint32_t resolution, uint32_t max_iterations
     );
     const auto fractions = PhysicalCellFractions(operation);
     std::println(
-        "real-mesh object={} triangles={} grid={}x{}x{} dofs={} active={} interior={} cut={} fill={:.3f} cell_fraction={:.2e}/{:.3f} slivers={} iterations={} fallback={}/{}/{:.3e}/{:.3e} spectrum={:.3e} residual={:.3e} orthogonality={:.3e} cluster_mac={:.6f}",
+        "real-mesh object={} triangles={} grid={}x{}x{} dofs={} active={} interior={} cut={} fill={:.3f} cell_fraction={:.2e}/{:.3f} slivers={} iterations={} fallback={}/{}/{:.3e}/{:.3e} spectrum={:.3e} residual={:.3e} orthogonality={:.3e} reference={:.3e}/{:.3e} cluster_mac={:.6f}",
         path.parent_path().filename().string() + "/" + path.stem().string(), geometry.Boundary.Triangles.size() / 3,
         cells.x, cells.y, cells.z, operation.Dofs(), operation.Profile.ActiveCells,
         operation.Profile.ActiveCells - operation.Profile.CutCells, operation.Profile.CutCells,
@@ -147,10 +147,12 @@ RunResult Run(const fs::path &path, uint32_t resolution, uint32_t max_iterations
         fractions.Median, fractions.BelowOnePercent, preferred.Iterations,
         preferred.Profile.FallbackAttemptIterations, preferred.Profile.FallbackAttemptStagnated,
         preferred.Profile.FallbackAttemptResidual, preferred.Profile.FallbackAttemptOrthogonality, spectrum, residual,
-        preferred.Certification.MassOrthogonalityError, shapes.ClusterMacMinimum
+        preferred.Certification.MassOrthogonalityError, reference.RelativeResidual,
+        reference.MassOrthogonalityError, shapes.ClusterMacMinimum
     );
     return {
         .Passed = spectrum < 1e-9 && residual < 1e-8 && preferred.Certification.MassOrthogonalityError < 1e-9 &&
+            reference.RelativeResidual < 1e-8 && reference.MassOrthogonalityError < 1e-9 &&
             shapes.ClusterMacMinimum > 0.99999,
         .FellBack = preferred.Profile.FallbackAttemptIterations > 0,
         .Stagnated = preferred.Profile.FallbackAttemptStagnated,

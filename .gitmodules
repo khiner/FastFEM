@@ -1,6 +1,3 @@
-[submodule "lib/spectra"]
-	path = lib/spectra
-	url = git@github.com:yixuan/spectra.git
 [submodule "lib/meshoptimizer"]
 	path = lib/meshoptimizer
 	url = git@github.com:khiner/meshoptimizer.git
