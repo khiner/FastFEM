@@ -1,13 +1,13 @@
 #pragma once
 
-#include "FiniteCell.h"
+#include "audio/FiniteCell.h"
 
 #include <memory>
 #include <span>
 #include <vector>
 
-namespace modal {
-struct FiniteCellMetal {
+namespace modal::finite_cell {
+struct MetalOperations {
     struct SharedFloats {
         SharedFloats();
         explicit SharedFloats(size_t size);
@@ -42,8 +42,8 @@ struct FiniteCellMetal {
 
     std::unique_ptr<Implementation> Impl;
 
-    explicit FiniteCellMetal(const FiniteCellOperator &);
-    ~FiniteCellMetal();
+    explicit MetalOperations(const FiniteCellOperator &);
+    ~MetalOperations();
 
     Block CreateBlock(uint32_t width) const;
     Block CreateSharedBlock(uint32_t width) const;
@@ -67,4 +67,4 @@ struct FiniteCellMetal {
 private:
     void Synchronize() const;
 };
-} // namespace modal
+} // namespace modal::finite_cell

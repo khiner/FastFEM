@@ -3,6 +3,7 @@
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellEigensolver.h"
 #include "audio/finite_cell/AssembledCholesky.h"
+#include "audio/finite_cell/EigenpairCertification.h"
 
 #include <charconv>
 #include <cmath>
@@ -43,7 +44,7 @@ bool Run(std::string_view name, uint32_t longitudinal, uint32_t count) {
     }
     const double spectrum_error = (result.Eigenvalues.tail(count - 6) - assembled.Eigenvalues.tail(count - 6)).norm() /
         assembled.Eigenvalues.tail(count - 6).norm();
-    const auto result_certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
+    const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
     Eigen::Index worst_physical{};
     const double residual = result_certification.RelativeResiduals.tail(count - 6).maxCoeff(&worst_physical);
     const double recurrence_residual = result.RelativeResiduals.tail(count - 6).maxCoeff();

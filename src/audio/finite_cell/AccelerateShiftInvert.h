@@ -1,6 +1,6 @@
 #pragma once
 
-#include "AccelerateSparseCholesky.h"
+#include "audio/AccelerateSparseCholesky.h"
 
 #include <Eigen/SparseCore>
 
@@ -9,7 +9,7 @@
 // Computes y = (K - sigma*M)^-1 x from the lower triangles of K and M.
 // A negative sigma makes K - sigma*M positive definite when K is positive semidefinite and M is positive definite.
 // The constructor stores references that accumulate factorization and solve wall-clock time.
-namespace modal {
+namespace modal::finite_cell {
 struct AccelerateShiftInvert {
     AccelerateShiftInvert(
         const Eigen::SparseMatrix<double> &k, const Eigen::SparseMatrix<double> &m,
@@ -25,4 +25,4 @@ struct AccelerateShiftInvert {
     double &FactorizeSeconds, &SolveSeconds;
     std::unique_ptr<AccelerateSparseCholesky> Factor;
 };
-} // namespace modal
+} // namespace modal::finite_cell

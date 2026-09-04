@@ -1,10 +1,11 @@
 #include "FiniteCellBenchmarkGeometry.h"
 #include "ModeShapeComparison.h"
 #include "RunSuites.h"
-#include "audio/AccelerateShiftInvert.h"
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellEigensolver.h"
+#include "audio/finite_cell/AccelerateShiftInvert.h"
 #include "audio/finite_cell/AssembledCholesky.h"
+#include "audio/finite_cell/EigenpairCertification.h"
 
 #include <boost/ut.hpp>
 
@@ -28,7 +29,7 @@ struct Case {
     dvec3 GridOffset;
 };
 
-suite ConsolidationTests = [] {
+suite RobustnessTests = [] {
     "wide tapered-key eigenpairs certify with assembled Cholesky fallback"_test = [] {
         constexpr uint32_t count{256};
         const auto geometry = finite_cell_benchmark::MakeGeometry("tapered-key");
@@ -49,10 +50,10 @@ suite ConsolidationTests = [] {
                 rhs(row, column) = std::sin(double(1 + row + 17 * column));
         Eigen::MatrixXd first_solve(rhs.rows(), rhs.cols()), repeated_solve(rhs.rows(), rhs.cols());
         double first_factor_seconds{}, first_solve_seconds{}, repeated_factor_seconds{}, repeated_solve_seconds{};
-        modal::AccelerateShiftInvert first_inverse{p1.Stiffness, p1.Mass, first_factor_seconds, first_solve_seconds};
+        modal::finite_cell::AccelerateShiftInvert first_inverse{p1.Stiffness, p1.Mass, first_factor_seconds, first_solve_seconds};
         first_inverse.set_shift(-Shift);
         first_inverse.solve_panel(rhs.data(), first_solve.data(), int(rhs.cols()));
-        modal::AccelerateShiftInvert repeated_inverse{p1.Stiffness, p1.Mass, repeated_factor_seconds, repeated_solve_seconds};
+        modal::finite_cell::AccelerateShiftInvert repeated_inverse{p1.Stiffness, p1.Mass, repeated_factor_seconds, repeated_solve_seconds};
         repeated_inverse.set_shift(-Shift);
         repeated_inverse.solve_panel(rhs.data(), repeated_solve.data(), int(rhs.cols()));
         expect(bool((first_solve.array() == repeated_solve.array()).all()));
@@ -68,8 +69,8 @@ suite ConsolidationTests = [] {
         expect(repeated.Profile.FailedFactorFreeStagnated);
         expect(result.Profile.FailedFactorFreeIterations == repeated.Profile.FailedFactorFreeIterations);
         if (result.Eigenvalues.size() != count || repeated.Eigenvalues.size() != count) return;
-        const auto result_certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
-        const auto repeated_certification = modal::CertifyFiniteCellEigenpairs(operation, repeated.Eigenvalues, repeated.Eigenvectors);
+        const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
+        const auto repeated_certification = modal::finite_cell::CertifyEigenpairs(operation, repeated.Eigenvalues, repeated.Eigenvectors);
         const double residual = result_certification.RelativeResiduals.tail(count - 6).maxCoeff();
         const double repeated_residual = repeated_certification.RelativeResiduals.tail(count - 6).maxCoeff();
         const double spectrum = (repeated.Eigenvalues.tail(count - 6) - result.Eigenvalues.tail(count - 6)).norm() /
@@ -118,8 +119,8 @@ suite ConsolidationTests = [] {
         if (repeated.Profile.FailedFactorFreeIterations) expect(repeated.Profile.FailedFactorFreeStagnated);
         expect(result.Profile.FailedFactorFreeIterations == repeated.Profile.FailedFactorFreeIterations);
         if (result.Eigenvalues.size() != count || repeated.Eigenvalues.size() != count) return;
-        const auto result_certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
-        const auto repeated_certification = modal::CertifyFiniteCellEigenpairs(operation, repeated.Eigenvalues, repeated.Eigenvectors);
+        const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
+        const auto repeated_certification = modal::finite_cell::CertifyEigenpairs(operation, repeated.Eigenvalues, repeated.Eigenvectors);
         const double spectrum = (repeated.Eigenvalues.tail(count - 6) - result.Eigenvalues.tail(count - 6)).norm() /
             result.Eigenvalues.tail(count - 6).norm();
         const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
@@ -156,7 +157,7 @@ suite ConsolidationTests = [] {
         const auto result = modal::finite_cell::SolveAssembledCholesky(operation, ModeCount, Shift, 1e-8, 100);
         expect(result.Eigenvalues.size() == Eigen::Index(ModeCount));
         if (result.Eigenvalues.size() != ModeCount) return;
-        const auto result_certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
+        const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
         const double residual = result_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();
         std::println(
             "exact fallback refinement dofs={} residual={:.3e} orthogonality={:.3e}",
@@ -194,8 +195,8 @@ suite ConsolidationTests = [] {
             expect(production.Eigenvalues.size() == Eigen::Index(ModeCount)) << entry.Geometry;
             expect(production.Profile.FailedFactorFreeIterations == 0_u) << entry.Geometry;
             if (assembled.Eigenvalues.size() != ModeCount || production.Eigenvalues.size() != ModeCount) continue;
-            const auto assembled_certification = modal::CertifyFiniteCellEigenpairs(operation, assembled.Eigenvalues, assembled.Eigenvectors);
-            const auto production_certification = modal::CertifyFiniteCellEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
+            const auto assembled_certification = modal::finite_cell::CertifyEigenpairs(operation, assembled.Eigenvalues, assembled.Eigenvectors);
+            const auto production_certification = modal::finite_cell::CertifyEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
             const double assembled_residual = assembled_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();
             expect(assembled_residual < 1e-8) << entry.Geometry << assembled_residual;
             expect(assembled_certification.MassOrthogonalityError < 1e-9) << entry.Geometry << assembled_certification.MassOrthogonalityError;
@@ -206,7 +207,7 @@ suite ConsolidationTests = [] {
                 operation, assembled.Eigenvalues, assembled.Eigenvectors, production.Eigenvectors
             );
             std::println(
-                "consolidation geometry={} dofs={} cut={} nu={:.2f} fictitious={:.0e} offset={:.2f}/{:.2f}/{:.2f} iterations={} spectrum={:.3e} residual={:.3e} orthogonality={:.3e} cluster_mac={:.6f}",
+                "robustness geometry={} dofs={} cut={} nu={:.2f} fictitious={:.0e} offset={:.2f}/{:.2f}/{:.2f} iterations={} spectrum={:.3e} residual={:.3e} orthogonality={:.3e} cluster_mac={:.6f}",
                 entry.Geometry, operation.Dofs(), operation.Profile.CutCells, entry.PoissonRatio, entry.FictitiousScale,
                 entry.GridOffset.x, entry.GridOffset.y, entry.GridOffset.z, production.Iterations, spectrum, residual,
                 production_certification.MassOrthogonalityError, shapes.ClusterMacMinimum
@@ -218,7 +219,7 @@ suite ConsolidationTests = [] {
             if (entry.Geometry == "cup") {
                 const auto fallback = modal::SolveFiniteCellEigenpairs(operation, ModeCount, Shift, 1e-8, 12);
                 expect(fallback.Profile.FailedFactorFreeIterations > 0_u);
-                const auto fallback_certification = modal::CertifyFiniteCellEigenpairs(operation, fallback.Eigenvalues, fallback.Eigenvectors);
+                const auto fallback_certification = modal::finite_cell::CertifyEigenpairs(operation, fallback.Eigenvalues, fallback.Eigenvectors);
                 expect(fallback_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff() < 1e-8);
                 expect(fallback_certification.MassOrthogonalityError < 1e-9);
             }

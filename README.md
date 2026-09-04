@@ -77,7 +77,7 @@ Its matrix-free path combines:
 It applies the same factor-free solver to every geometry and problem size.
 An unconverged factor-free result selects assembled FP64 Cholesky shift-invert.
 If neither solver converges within the supplied iteration budget, `SolveFiniteCellEigenpairs` returns an error.
-Validation code calls `CertifyFiniteCellEigenpairs` to recompute residuals and mass orthogonality independently.
+Validation code calls `modal::finite_cell::CertifyEigenpairs` to recompute residuals and mass orthogonality independently.
 Validation compares the factor-free solve against assembled Cholesky and moment-fitted integration against uncompressed octree quadrature.
 
 ## Correctness corpus
@@ -115,14 +115,14 @@ The benchmark measures native factorization over structured or tetrahedralized T
 ./build/FastFEMTet10CholeskyBenchmark --obj model.obj 5 16
 ```
 
-The dedicated resolution-eight 256-mode tapered-key stress is part of `FastFEMFiniteCellConsolidationTest`.
+The dedicated resolution-eight 256-mode tapered-key stress is part of `FastFEMFiniteCellRobustnessTest`.
 
 ## Optional corpora
 
 ```sh
 ./script/SetupTetCorpus --skip-realimpact --thingi10k
 cmake -S . -B build -DFASTFEM_TET_CORPUS_DIR="$PWD/external/TetCorpus"
-ctest --test-dir build -R 'FastFEMTetCorpus|FastFEMFiniteCellRealMeshConsolidation' --output-on-failure -j1
+ctest --test-dir build -R 'FastFEMTetCorpus|FastFEMFiniteCellRealMesh' --output-on-failure -j1
 ```
 
 Set `FASTFEM_REALIMPACT_DATASET_DIR` to enable optional RealImpact cases.

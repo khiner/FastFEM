@@ -9,13 +9,13 @@
 #include <limits>
 #include <numbers>
 
-struct TetReferenceEigenpairs {
+struct Tet10Eigenpairs {
     Eigen::VectorXd Eigenvalues;
     Eigen::MatrixXd Eigenvectors;
     double RelativeResidual{};
 };
 
-inline TetReferenceEigenpairs SolveTetReference(
+inline Tet10Eigenpairs SolveTet10Eigenpairs(
     const TetMesh &mesh, const AcousticMaterialProperties &material, uint32_t count,
     double alpha, double tolerance, uint32_t max_restarts
 ) {

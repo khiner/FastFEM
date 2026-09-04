@@ -1,5 +1,7 @@
 #include "FiniteCell.h"
+
 #include "finite_cell/OctreeQuadrature.h"
+#include "finite_cell/OperatorValidation.h"
 
 #include <dispatch/dispatch.h>
 
@@ -1286,8 +1288,8 @@ void modal::FiniteCellOperator::ProlongP1(const double *input, double *output, u
             }
 }
 
-Eigen::VectorXd modal::FiniteCellOperator::ShiftedDiagonal(double alpha) const {
-    return ::ShiftedDiagonal(*this, alpha);
+Eigen::VectorXd modal::finite_cell::ShiftedDiagonal(const FiniteCellOperator &operation, double alpha) {
+    return ::ShiftedDiagonal(operation, alpha);
 }
 
 void modal::FiniteCellOperator::PackCellShiftedLower(uint32_t cell, double alpha, std::span<double> packed) const {
@@ -1298,8 +1300,10 @@ void modal::FiniteCellOperator::PackCellShiftedLower(uint32_t cell, double alpha
     CellOperators<2, true>(*this, cell, alpha, nullptr, packed.data());
 }
 
-modal::FiniteCellOperator::PackedCutOperators modal::FiniteCellOperator::BuildPackedCutOperators(double alpha) const {
-    return ::BuildPackedCutOperators(*this, alpha);
+modal::FiniteCellOperator::PackedCutOperators modal::finite_cell::BuildPackedCutOperators(
+    const FiniteCellOperator &operation, double alpha
+) {
+    return ::BuildPackedCutOperators(operation, alpha);
 }
 
 modal::FiniteCellOperator::PackedCutOperators modal::FiniteCellOperator::BuildPackedCutOperators(
@@ -1311,11 +1315,11 @@ modal::FiniteCellOperator::PackedCutOperators modal::FiniteCellOperator::BuildPa
     return ::BuildPackedCutOperators(*this, alpha, packed_shifted_elements);
 }
 
-modal::FiniteCellOperator modal::FiniteCellOperator::WithFictitiousScale(double scale) const {
+modal::FiniteCellOperator modal::finite_cell::WithFictitiousScale(const FiniteCellOperator &operation, double scale) {
     if (!(scale > 0 && scale <= 1)) throw std::invalid_argument("Finite-cell fictitious scale must be in (0, 1].");
-    FiniteCellOperator result = *this;
+    FiniteCellOperator result = operation;
     for (auto &point : result.Quadrature)
-        if (point.Fictitious) point.Weight *= scale / FictitiousScale;
+        if (point.Fictitious) point.Weight *= scale / operation.FictitiousScale;
     result.FictitiousScale = scale;
     return result;
 }
@@ -1328,8 +1332,10 @@ modal::FiniteCellOperator::AssembledLower modal::FiniteCellOperator::AssembleP1L
     return Assemble<true>(*this);
 }
 
-Eigen::SparseMatrix<double> modal::FiniteCellOperator::AssembleP1ShiftedLower(double alpha) const {
-    auto assembled = AssembleP1Lower();
+Eigen::SparseMatrix<double> modal::finite_cell::AssembleP1ShiftedLower(
+    const FiniteCellOperator &operation, double alpha
+) {
+    auto assembled = operation.AssembleP1Lower();
     return assembled.Stiffness + alpha * assembled.Mass;
 }
 
@@ -1506,23 +1512,4 @@ std::optional<modal::FiniteCellOperator::InterpolationStencil> modal::FiniteCell
 
 modal::FiniteCellOperator modal::finite_cell::BuildOctreeOperator(const ImplicitDomain &domain, const AcousticMaterialProperties &material, FiniteCellConfig config) {
     return BuildOperator(domain, material, config, false);
-}
-
-modal::FiniteCellCertification modal::CertifyFiniteCellEigenpairs(
-    const FiniteCellOperator &operation, const Eigen::VectorXd &eigenvalues, const Eigen::MatrixXd &eigenvectors
-) {
-    FiniteCellCertification result;
-    if (eigenvectors.rows() != operation.Dofs() || eigenvectors.cols() != eigenvalues.size()) return result;
-    Eigen::MatrixXd mass(operation.Dofs(), eigenvectors.cols()), stiffness(operation.Dofs(), eigenvectors.cols());
-    // Alpha zero computes independent mass and stiffness actions in one traversal.
-    operation.ApplyMassShifted(eigenvectors.data(), mass.data(), stiffness.data(), uint32_t(eigenvectors.cols()), 0);
-    const Eigen::MatrixXd residual = stiffness - mass * eigenvalues.asDiagonal();
-    result.RelativeResiduals.resize(eigenvalues.size());
-    for (Eigen::Index mode = 0; mode < eigenvalues.size(); ++mode) {
-        const double scale = stiffness.col(mode).norm() + std::abs(eigenvalues[mode]) * mass.col(mode).norm();
-        result.RelativeResiduals[mode] = scale == 0 ? residual.col(mode).norm() : residual.col(mode).norm() / scale;
-    }
-    result.MassOrthogonalityError =
-        (eigenvectors.transpose() * mass - Eigen::MatrixXd::Identity(eigenvalues.size(), eigenvalues.size())).norm();
-    return result;
 }

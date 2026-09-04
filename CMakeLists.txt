@@ -38,10 +38,11 @@ find_library(FASTFEM_METAL_FRAMEWORK Metal REQUIRED)
 
 add_library(FastFEM
     src/audio/Tet10Cholesky.cpp
-    src/audio/AccelerateShiftInvert.cpp
+    src/audio/finite_cell/AccelerateShiftInvert.cpp
+    src/audio/finite_cell/EigenpairCertification.cpp
     src/audio/FiniteCell.cpp
     src/audio/FiniteCellEigensolver.cpp
-    src/audio/FiniteCellMetal.mm
+    src/audio/finite_cell/MetalOperations.mm
     src/audio/MassProperties.cpp
     src/audio/AccelerateSparseCholesky.cpp
     src/audio/surface2modes.cpp
@@ -72,7 +73,7 @@ if(FASTFEM_METAL_RESULT EQUAL 0 AND FASTFEM_METALLIB_RESULT EQUAL 0 AND FASTFEM_
         list(APPEND FASTFEM_FINITE_CELL_ARCHIVE_OUTPUTS "${FASTFEM_FINITE_CELL_BINARY_ARCHIVE}")
         list(APPEND FASTFEM_FINITE_CELL_ARCHIVE_COMMANDS
             COMMAND "${CMAKE_COMMAND}"
-                -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/audio/FiniteCellMetal.mm
+                -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/audio/finite_cell/MetalOperations.mm
                 -DOUTPUT=${FASTFEM_FINITE_CELL_PIPELINES}
                 -DLIBRARY=${FASTFEM_FINITE_CELL_METALLIB}
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PrepareMetalPipelineScript.cmake"
@@ -84,7 +85,7 @@ if(FASTFEM_METAL_RESULT EQUAL 0 AND FASTFEM_METALLIB_RESULT EQUAL 0 AND FASTFEM_
         OUTPUT "${FASTFEM_FINITE_CELL_METALLIB_HEADER}" ${FASTFEM_FINITE_CELL_ARCHIVE_OUTPUTS}
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${FASTFEM_METAL_GENERATED_DIR}"
         COMMAND "${CMAKE_COMMAND}"
-            -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/src/audio/FiniteCellMetal.mm
+            -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/src/audio/finite_cell/MetalOperations.mm
             -DOUTPUT=${FASTFEM_FINITE_CELL_METAL_SOURCE}
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ExtractMetalSource.cmake"
         COMMAND xcrun --sdk macosx metal -c "${FASTFEM_FINITE_CELL_METAL_SOURCE}" -o "${FASTFEM_FINITE_CELL_AIR}"
@@ -93,7 +94,7 @@ if(FASTFEM_METAL_RESULT EQUAL 0 AND FASTFEM_METALLIB_RESULT EQUAL 0 AND FASTFEM_
         COMMAND "${FASTFEM_XXD}" -i -n FastFEMFiniteCellMetallib
             "${FASTFEM_FINITE_CELL_METALLIB}" "${FASTFEM_FINITE_CELL_METALLIB_HEADER}"
         DEPENDS
-            src/audio/FiniteCellMetal.mm
+            src/audio/finite_cell/MetalOperations.mm
             cmake/ExtractMetalSource.cmake
             cmake/PrepareMetalPipelineScript.cmake
         BYPRODUCTS
@@ -128,7 +129,7 @@ target_link_libraries(FastFEM
         ${FASTFEM_FOUNDATION_FRAMEWORK}
         ${FASTFEM_METAL_FRAMEWORK}
 )
-set_source_files_properties(src/audio/FiniteCellMetal.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+set_source_files_properties(src/audio/finite_cell/MetalOperations.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
     target_compile_options(FastFEM PRIVATE
@@ -207,22 +208,22 @@ if(FASTFEM_BUILD_TESTS)
     target_link_libraries(FastFEMAnalyticalModalTest PRIVATE FastFEM::FastFEM Boost::ut)
     add_test(NAME FastFEMAnalyticalModal COMMAND FastFEMAnalyticalModalTest)
 
-    add_executable(FastFEMFiniteCellConsolidationTest tests/FiniteCellConsolidationTest.cpp)
-    target_include_directories(FastFEMFiniteCellConsolidationTest PRIVATE tests tools)
-    target_link_libraries(FastFEMFiniteCellConsolidationTest PRIVATE FastFEM::FastFEM Boost::ut)
-    add_test(NAME FastFEMFiniteCellConsolidation COMMAND FastFEMFiniteCellConsolidationTest)
+    add_executable(FastFEMFiniteCellRobustnessTest tests/FiniteCellRobustnessTest.cpp)
+    target_include_directories(FastFEMFiniteCellRobustnessTest PRIVATE tests tools)
+    target_link_libraries(FastFEMFiniteCellRobustnessTest PRIVATE FastFEM::FastFEM Boost::ut)
+    add_test(NAME FastFEMFiniteCellRobustness COMMAND FastFEMFiniteCellRobustnessTest)
 
-    add_executable(FastFEMFiniteCellRealMeshConsolidationTest tests/FiniteCellRealMeshConsolidationTest.cpp)
-    target_compile_definitions(FastFEMFiniteCellRealMeshConsolidationTest PRIVATE
+    add_executable(FastFEMFiniteCellRealMeshTest tests/FiniteCellRealMeshTest.cpp)
+    target_compile_definitions(FastFEMFiniteCellRealMeshTest PRIVATE
         FASTFEM_TET_CORPUS_DIR="${FASTFEM_TET_CORPUS_DIR}"
     )
-    target_include_directories(FastFEMFiniteCellRealMeshConsolidationTest PRIVATE tests tools)
-    target_link_libraries(FastFEMFiniteCellRealMeshConsolidationTest PRIVATE FastFEM::FastFEM ${FASTFEM_TINYOBJLOADER_TARGET})
+    target_include_directories(FastFEMFiniteCellRealMeshTest PRIVATE tests tools)
+    target_link_libraries(FastFEMFiniteCellRealMeshTest PRIVATE FastFEM::FastFEM ${FASTFEM_TINYOBJLOADER_TARGET})
     add_test(
-        NAME FastFEMFiniteCellRealMeshConsolidation
-        COMMAND FastFEMFiniteCellRealMeshConsolidationTest --expected-fallbacks 3 --expected-stagnations 3
+        NAME FastFEMFiniteCellRealMesh
+        COMMAND FastFEMFiniteCellRealMeshTest --expected-fallbacks 3 --expected-stagnations 3
     )
-    set_tests_properties(FastFEMFiniteCellRealMeshConsolidation PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
+    set_tests_properties(FastFEMFiniteCellRealMesh PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
 
     add_executable(FastFEMTetCorpusTest tests/TetCorpusTest.cpp)
     target_compile_definitions(FastFEMTetCorpusTest PRIVATE

@@ -4,6 +4,7 @@
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellEigensolver.h"
 #include "audio/finite_cell/AssembledCholesky.h"
+#include "audio/finite_cell/EigenpairCertification.h"
 
 #include <algorithm>
 #include <charconv>
@@ -131,8 +132,8 @@ RunResult Run(const fs::path &path, uint32_t resolution, uint32_t max_iterations
     const auto production = modal::SolveFiniteCellEigenpairs(operation, SolvedModeCount, Shift, 1e-8, max_iterations);
     if (assembled.Eigenvalues.size() != SolvedModeCount || production.Eigenvalues.size() != SolvedModeCount)
         throw std::runtime_error("assembled or production solve did not converge");
-    const auto assembled_certification = modal::CertifyFiniteCellEigenpairs(operation, assembled.Eigenvalues, assembled.Eigenvectors);
-    const auto production_certification = modal::CertifyFiniteCellEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
+    const auto assembled_certification = modal::finite_cell::CertifyEigenpairs(operation, assembled.Eigenvalues, assembled.Eigenvectors);
+    const auto production_certification = modal::finite_cell::CertifyEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
     const double spectrum = (production.Eigenvalues.segment(6, AcceptedModeCount - 6) - assembled.Eigenvalues.segment(6, AcceptedModeCount - 6)).norm() /
         assembled.Eigenvalues.segment(6, AcceptedModeCount - 6).norm();
     const double residual = production_certification.RelativeResiduals.segment(6, AcceptedModeCount - 6).maxCoeff();
@@ -189,7 +190,7 @@ int main(int argc, char **argv) try {
     }
     const auto objects = Objects(root, datasets, names);
     if (objects.empty()) throw std::invalid_argument("no matching OBJ files in " + root.string());
-    std::println("finite-cell real-mesh consolidation: {} objects at longitudinal resolution {}", objects.size(), resolution);
+    std::println("finite-cell real-mesh validation: {} objects at longitudinal resolution {}", objects.size(), resolution);
     uint32_t failures{}, fallbacks{}, stagnations{};
     for (const auto &object : objects)
         try {
@@ -202,15 +203,15 @@ int main(int argc, char **argv) try {
             ++failures;
         }
     if (expected_fallbacks && fallbacks != *expected_fallbacks) {
-        std::println(stderr, "finite-cell real-mesh consolidation: expected {} fallbacks, got {}", *expected_fallbacks, fallbacks);
+        std::println(stderr, "finite-cell real-mesh validation: expected {} fallbacks, got {}", *expected_fallbacks, fallbacks);
         ++failures;
     }
     if (expected_stagnations && stagnations != *expected_stagnations) {
-        std::println(stderr, "finite-cell real-mesh consolidation: expected {} stagnations, got {}", *expected_stagnations, stagnations);
+        std::println(stderr, "finite-cell real-mesh validation: expected {} stagnations, got {}", *expected_stagnations, stagnations);
         ++failures;
     }
     std::println(
-        "finite-cell real-mesh consolidation: {} objects, {} fallbacks, {} stagnations, {} failures",
+        "finite-cell real-mesh validation: {} objects, {} fallbacks, {} stagnations, {} failures",
         objects.size(), fallbacks, stagnations, failures
     );
     return failures ? 1 : 0;

@@ -1,4 +1,4 @@
-#include "FiniteCellMetal.h"
+#include "MetalOperations.h"
 
 #import <Metal/Metal.h>
 
@@ -346,11 +346,11 @@ void EncodeCooperative(
 
 } // namespace
 
-struct modal::FiniteCellMetal::Block::Implementation {
+struct modal::finite_cell::MetalOperations::Block::Implementation {
     id<MTLBuffer> Buffer;
 };
 
-struct modal::FiniteCellMetal::Implementation {
+struct modal::finite_cell::MetalOperations::Implementation {
     struct MultigridLevel {
         id<MTLBuffer> Offsets, Columns, Values, Diagonal;
         id<MTLBuffer> ProlongationOffsets, ProlongationColumns, ProlongationValues;
@@ -403,20 +403,20 @@ struct modal::FiniteCellMetal::Implementation {
     }
 };
 
-modal::FiniteCellMetal::SharedFloats::SharedFloats() = default;
+modal::finite_cell::MetalOperations::SharedFloats::SharedFloats() = default;
 
-modal::FiniteCellMetal::SharedFloats::SharedFloats(size_t size) : Size{size} {
+modal::finite_cell::MetalOperations::SharedFloats::SharedFloats(size_t size) : Size{size} {
     const size_t bytes = size * sizeof(float), page = size_t(getpagesize());
     CapacityBytes = (bytes + page - 1) / page * page;
     if (CapacityBytes && posix_memalign(reinterpret_cast<void **>(&Data), page, CapacityBytes)) throw std::bad_alloc{};
 }
 
-modal::FiniteCellMetal::SharedFloats::SharedFloats(SharedFloats &&other) noexcept : Data{other.Data}, Size{other.Size}, CapacityBytes{other.CapacityBytes} {
+modal::finite_cell::MetalOperations::SharedFloats::SharedFloats(SharedFloats &&other) noexcept : Data{other.Data}, Size{other.Size}, CapacityBytes{other.CapacityBytes} {
     other.Data = nullptr;
     other.Size = other.CapacityBytes = 0;
 }
 
-modal::FiniteCellMetal::SharedFloats &modal::FiniteCellMetal::SharedFloats::operator=(SharedFloats &&other) noexcept {
+modal::finite_cell::MetalOperations::SharedFloats &modal::finite_cell::MetalOperations::SharedFloats::operator=(SharedFloats &&other) noexcept {
     if (this == &other) return *this;
     std::free(Data);
     Data = other.Data;
@@ -427,21 +427,21 @@ modal::FiniteCellMetal::SharedFloats &modal::FiniteCellMetal::SharedFloats::oper
     return *this;
 }
 
-modal::FiniteCellMetal::SharedFloats::~SharedFloats() { std::free(Data); }
-std::span<float> modal::FiniteCellMetal::SharedFloats::Values() const { return {Data, Size}; }
-float *modal::FiniteCellMetal::SharedFloats::Release() {
+modal::finite_cell::MetalOperations::SharedFloats::~SharedFloats() { std::free(Data); }
+std::span<float> modal::finite_cell::MetalOperations::SharedFloats::Values() const { return {Data, Size}; }
+float *modal::finite_cell::MetalOperations::SharedFloats::Release() {
     auto *result = Data;
     Data = nullptr;
     Size = CapacityBytes = 0;
     return result;
 }
 
-modal::FiniteCellMetal::Block::Block() : Impl(std::make_unique<Implementation>()) {}
-modal::FiniteCellMetal::Block::Block(Block &&) noexcept = default;
-modal::FiniteCellMetal::Block &modal::FiniteCellMetal::Block::operator=(Block &&) noexcept = default;
-modal::FiniteCellMetal::Block::~Block() = default;
+modal::finite_cell::MetalOperations::Block::Block() : Impl(std::make_unique<Implementation>()) {}
+modal::finite_cell::MetalOperations::Block::Block(Block &&) noexcept = default;
+modal::finite_cell::MetalOperations::Block &modal::finite_cell::MetalOperations::Block::operator=(Block &&) noexcept = default;
+modal::finite_cell::MetalOperations::Block::~Block() = default;
 
-modal::FiniteCellMetal::FiniteCellMetal(const FiniteCellOperator &operation) : Impl(std::make_unique<Implementation>()) {
+modal::finite_cell::MetalOperations::MetalOperations(const FiniteCellOperator &operation) : Impl(std::make_unique<Implementation>()) {
     @autoreleasepool {
         Impl->Device = MTLCreateSystemDefaultDevice();
         if (!Impl->Device) throw MetalError(@"No Metal device");
@@ -558,13 +558,13 @@ modal::FiniteCellMetal::FiniteCellMetal(const FiniteCellOperator &operation) : I
     }
 }
 
-modal::FiniteCellMetal::~FiniteCellMetal() = default;
+modal::finite_cell::MetalOperations::~MetalOperations() = default;
 
 namespace {
-modal::FiniteCellMetal::Block NewBlock(
+modal::finite_cell::MetalOperations::Block NewBlock(
     id<MTLDevice> device, uint32_t rows, uint32_t width, MTLResourceOptions options
 ) {
-    modal::FiniteCellMetal::Block result;
+    modal::finite_cell::MetalOperations::Block result;
     result.Rows = rows;
     result.Width = width;
     if (width == 0) return result;
@@ -574,19 +574,19 @@ modal::FiniteCellMetal::Block NewBlock(
 }
 } // namespace
 
-modal::FiniteCellMetal::Block modal::FiniteCellMetal::CreateBlock(uint32_t width) const {
+modal::finite_cell::MetalOperations::Block modal::finite_cell::MetalOperations::CreateBlock(uint32_t width) const {
     return NewBlock(Impl->Device, 3 * Impl->NumNodes, width, MTLResourceStorageModePrivate);
 }
 
-modal::FiniteCellMetal::Block modal::FiniteCellMetal::CreateSharedBlock(uint32_t width) const {
+modal::finite_cell::MetalOperations::Block modal::finite_cell::MetalOperations::CreateSharedBlock(uint32_t width) const {
     return NewBlock(Impl->Device, 3 * Impl->NumNodes, width, MTLResourceStorageModeShared);
 }
 
-modal::FiniteCellMetal::Block modal::FiniteCellMetal::CreateP1Block(uint32_t width) const {
+modal::finite_cell::MetalOperations::Block modal::finite_cell::MetalOperations::CreateP1Block(uint32_t width) const {
     return NewBlock(Impl->Device, 3 * Impl->NumP1Nodes, width, MTLResourceStorageModePrivate);
 }
 
-void modal::FiniteCellMetal::Synchronize() const {
+void modal::finite_cell::MetalOperations::Synchronize() const {
     if (!Impl->PendingCommand) return;
     id<MTLCommandBuffer> command = Impl->PendingCommand;
     Impl->PendingCommand = nil;
@@ -598,7 +598,7 @@ void modal::FiniteCellMetal::Synchronize() const {
 
 namespace {
 Eigen::Map<Eigen::VectorXf> SharedValues(
-    const modal::FiniteCellMetal::Implementation &impl, const modal::FiniteCellMetal::Block &block, const char *what
+    const modal::finite_cell::MetalOperations::Implementation &impl, const modal::finite_cell::MetalOperations::Block &block, const char *what
 ) {
     if (!block.Impl || !block.Impl->Buffer || !block.Impl->Buffer.contents ||
         block.Impl->Buffer.device != impl.Device)
@@ -608,13 +608,13 @@ Eigen::Map<Eigen::VectorXf> SharedValues(
 } // namespace
 
 // Host I/O blocks use shared FP32 storage, converting directly to and from the caller's FP64 panel.
-void modal::FiniteCellMetal::Upload(Block &block, const double *input) const {
+void modal::finite_cell::MetalOperations::Upload(Block &block, const double *input) const {
     Synchronize();
     auto values = SharedValues(*Impl, block, "upload");
     values = Eigen::Map<const Eigen::VectorXd>{input, values.size()}.cast<float>();
 }
 
-void modal::FiniteCellMetal::Download(const Block &block, double *output) const {
+void modal::finite_cell::MetalOperations::Download(const Block &block, double *output) const {
     Synchronize();
     const auto values = SharedValues(*Impl, block, "download");
     Eigen::Map<Eigen::VectorXd>{output, values.size()} = values.cast<double>();
@@ -622,8 +622,8 @@ void modal::FiniteCellMetal::Download(const Block &block, double *output) const 
 
 namespace {
 void RequireMatching(
-    const modal::FiniteCellMetal::Implementation &impl,
-    const modal::FiniteCellMetal::Block &input, const modal::FiniteCellMetal::Block &output
+    const modal::finite_cell::MetalOperations::Implementation &impl,
+    const modal::finite_cell::MetalOperations::Block &input, const modal::finite_cell::MetalOperations::Block &output
 ) {
     if (!input.Impl || !output.Impl || input.Rows != output.Rows || input.Width != output.Width ||
         (input.Width && (!input.Impl->Buffer || !output.Impl->Buffer || input.Impl->Buffer.device != impl.Device || output.Impl->Buffer.device != impl.Device)))
@@ -633,16 +633,16 @@ void RequireMatching(
 }
 
 void RequireFine(
-    const modal::FiniteCellMetal::Implementation &impl,
-    const modal::FiniteCellMetal::Block &input, const modal::FiniteCellMetal::Block &output
+    const modal::finite_cell::MetalOperations::Implementation &impl,
+    const modal::finite_cell::MetalOperations::Block &input, const modal::finite_cell::MetalOperations::Block &output
 ) {
     RequireMatching(impl, input, output);
     if (input.Rows != 3 * impl.NumNodes) throw std::invalid_argument("Finite-cell Metal actions require fine-grid blocks.");
 }
 
 void RequireTransfer(
-    const modal::FiniteCellMetal::Implementation &impl,
-    const modal::FiniteCellMetal::Block &fine, const modal::FiniteCellMetal::Block &coarse, const char *what
+    const modal::finite_cell::MetalOperations::Implementation &impl,
+    const modal::finite_cell::MetalOperations::Block &fine, const modal::finite_cell::MetalOperations::Block &coarse, const char *what
 ) {
     if (!fine.Impl || !coarse.Impl || fine.Rows != 3 * impl.NumNodes || coarse.Rows != 3 * impl.NumP1Nodes ||
         fine.Width != coarse.Width ||
@@ -773,17 +773,17 @@ std::vector<CpuMultigridLevel> BuildP1Hierarchy(
 
 } // namespace
 
-struct modal::FiniteCellMetal::P1Multigrid::Implementation {
+struct modal::finite_cell::MetalOperations::P1Multigrid::Implementation {
     std::vector<CpuMultigridLevel> Levels;
     uint32_t Dofs{}, P1Nodes{};
 };
 
-modal::FiniteCellMetal::P1Multigrid::P1Multigrid() : Impl(std::make_unique<Implementation>()) {}
-modal::FiniteCellMetal::P1Multigrid::P1Multigrid(P1Multigrid &&) noexcept = default;
-modal::FiniteCellMetal::P1Multigrid &modal::FiniteCellMetal::P1Multigrid::operator=(P1Multigrid &&) noexcept = default;
-modal::FiniteCellMetal::P1Multigrid::~P1Multigrid() = default;
+modal::finite_cell::MetalOperations::P1Multigrid::P1Multigrid() : Impl(std::make_unique<Implementation>()) {}
+modal::finite_cell::MetalOperations::P1Multigrid::P1Multigrid(P1Multigrid &&) noexcept = default;
+modal::finite_cell::MetalOperations::P1Multigrid &modal::finite_cell::MetalOperations::P1Multigrid::operator=(P1Multigrid &&) noexcept = default;
+modal::finite_cell::MetalOperations::P1Multigrid::~P1Multigrid() = default;
 
-modal::FiniteCellMetal::P1Multigrid modal::FiniteCellMetal::PrepareP1Multigrid(
+modal::finite_cell::MetalOperations::P1Multigrid modal::finite_cell::MetalOperations::PrepareP1Multigrid(
     const FiniteCellOperator &operation, double alpha, const FiniteCellOperator::AssembledLower &assembly
 ) {
     P1Multigrid result;
@@ -793,7 +793,7 @@ modal::FiniteCellMetal::P1Multigrid modal::FiniteCellMetal::PrepareP1Multigrid(
     return result;
 }
 
-void modal::FiniteCellMetal::ConfigureP1Multigrid(P1Multigrid &&prepared) const {
+void modal::finite_cell::MetalOperations::ConfigureP1Multigrid(P1Multigrid &&prepared) const {
     if (!prepared.Impl || prepared.Impl->Dofs != 3 * Impl->NumNodes || prepared.Impl->P1Nodes != Impl->NumP1Nodes)
         throw std::invalid_argument("Finite-cell Metal P1 hierarchy must match the configured fine operator.");
     const auto &hierarchy = prepared.Impl->Levels;
@@ -845,7 +845,7 @@ void modal::FiniteCellMetal::ConfigureP1Multigrid(P1Multigrid &&prepared) const 
     }
 }
 
-void modal::FiniteCellMetal::ApplyP1Multigrid(
+void modal::finite_cell::MetalOperations::ApplyP1Multigrid(
     const Block &input, Block &output
 ) const {
     RequireMatching(*Impl, input, output);
@@ -958,7 +958,7 @@ void modal::FiniteCellMetal::ApplyP1Multigrid(
     }
 }
 
-void modal::FiniteCellMetal::LinearCombination(
+void modal::finite_cell::MetalOperations::LinearCombination(
     const Block &left, float left_scale, const Block &right, float right_scale, Block &output
 ) const {
     RequireMatching(*Impl, left, right);
@@ -978,7 +978,7 @@ void modal::FiniteCellMetal::LinearCombination(
     }
 }
 
-void modal::FiniteCellMetal::ConfigurePackedPatch(
+void modal::finite_cell::MetalOperations::ConfigurePackedPatch(
     SharedFloats inverse_matrices, std::span<const double> element_matrices
 ) const {
     constexpr uint32_t local_dofs = 3 * FiniteCellOperator::NodesPerCell;
@@ -1002,7 +1002,7 @@ void modal::FiniteCellMetal::ConfigurePackedPatch(
     });
 }
 
-void modal::FiniteCellMetal::ApplyElement(const Block &input, Block &output) const {
+void modal::finite_cell::MetalOperations::ApplyElement(const Block &input, Block &output) const {
     RequireFine(*Impl, input, output);
     if (!Impl->PackedElementMatrices)
         throw std::logic_error("Finite-cell Metal element operators have not been configured.");
@@ -1036,7 +1036,7 @@ void modal::FiniteCellMetal::ApplyElement(const Block &input, Block &output) con
     }
 }
 
-void modal::FiniteCellMetal::ApplyPackedLocalizedMultiplicativePatchSweep(
+void modal::finite_cell::MetalOperations::ApplyPackedLocalizedMultiplicativePatchSweep(
     const Block &input, Block &correction, Block &remaining, bool reverse, bool final_residual
 ) const {
     RequireFine(*Impl, input, correction);
@@ -1126,7 +1126,7 @@ void modal::FiniteCellMetal::ApplyPackedLocalizedMultiplicativePatchSweep(
     }
 }
 
-void modal::FiniteCellMetal::RestrictP1(const Block &fine, Block &coarse) const {
+void modal::finite_cell::MetalOperations::RestrictP1(const Block &fine, Block &coarse) const {
     RequireTransfer(*Impl, fine, coarse, "restriction requires matching fine and P1 blocks.");
     if (!fine.Width) return;
     @autoreleasepool {
@@ -1141,7 +1141,7 @@ void modal::FiniteCellMetal::RestrictP1(const Block &fine, Block &coarse) const 
     }
 }
 
-void modal::FiniteCellMetal::ProlongP1(const Block &coarse, Block &fine) const {
+void modal::finite_cell::MetalOperations::ProlongP1(const Block &coarse, Block &fine) const {
     RequireTransfer(*Impl, fine, coarse, "prolongation requires matching P1 and fine blocks.");
     if (!fine.Width) return;
     @autoreleasepool {

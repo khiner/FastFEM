@@ -2,10 +2,10 @@
 
 #include "FiniteCellEigensolver.h"
 
-#include "AccelerateShiftInvert.h"
-#include "FiniteCellMetal.h"
 #include "GeneralizedEigenSolver.h"
+#include "finite_cell/AccelerateShiftInvert.h"
 #include "finite_cell/AssembledCholesky.h"
+#include "finite_cell/MetalOperations.h"
 #include "numeric/Accelerate.h"
 
 #include <Eigen/Cholesky>
@@ -245,7 +245,7 @@ Eigen::MatrixXd InitialSpace(
     const uint32_t basis_size = std::min<uint32_t>(p1.Mass.rows(), std::max<uint32_t>(count + 2, 20));
     const double seed_tolerance = fem.Dofs() < 20'000 ? 1e-2 : 1e-1; // Fine iterations above 20k DOFs cost more than the additional P1 accuracy.
     double factor_seconds{}, solve_seconds{};
-    modal::AccelerateShiftInvert operation{p1.Stiffness, p1.Mass, factor_seconds, solve_seconds};
+    modal::finite_cell::AccelerateShiftInvert operation{p1.Stiffness, p1.Mass, factor_seconds, solve_seconds};
     const auto eigensolver = modal::eigensolver::SolveGeneralizedInverseIteration(
         operation, p1.Mass, p1.Stiffness,
         {
@@ -269,7 +269,7 @@ Eigen::MatrixXd InitialSpace(
 }
 
 struct MetalPatchData {
-    modal::FiniteCellMetal::SharedFloats Inverses;
+    modal::finite_cell::MetalOperations::SharedFloats Inverses;
     std::vector<double> Elements;
     modal::FiniteCellOperator::PackedCutOperators CutActions;
 };
@@ -290,7 +290,7 @@ MetalPatchData BuildMetalPatchData(const modal::FiniteCellOperator &fem, double 
         }
     );
     result.CutActions = fem.BuildPackedCutOperators(alpha, elements);
-    result.Inverses = modal::FiniteCellMetal::SharedFloats{fem.Cells.size() * PackedLocalValues};
+    result.Inverses = modal::finite_cell::MetalOperations::SharedFloats{fem.Cells.size() * PackedLocalValues};
     std::vector<uint32_t> destination(fem.Cells.size());
     uint32_t next{};
     for (uint8_t color = 0; color < 8; ++color)
@@ -373,9 +373,9 @@ MetalPatchData BuildMetalPatchData(const modal::FiniteCellOperator &fem, double 
 
 // Applies forward and reverse FP32 patch sweeps around a resident P1 multigrid correction and converts the result to FP64.
 struct MetalMultiplicativePreconditioner {
-    std::unique_ptr<modal::FiniteCellMetal> Metal;
+    std::unique_ptr<modal::finite_cell::MetalOperations> Metal;
     modal::FiniteCellOperator::PackedCutOperators CutActions;
-    mutable modal::FiniteCellMetal::Block Fine, Remaining, Result, CoarseResidual, CoarseCorrection, Scratch;
+    mutable modal::finite_cell::MetalOperations::Block Fine, Remaining, Result, CoarseResidual, CoarseCorrection, Scratch;
     mutable uint32_t Width{};
 
     MetalMultiplicativePreconditioner(
@@ -383,9 +383,9 @@ struct MetalMultiplicativePreconditioner {
         const modal::FiniteCellOperator::AssembledLower &p1_assembly
     ) {
         auto multigrid_future = std::async(std::launch::async, [&] {
-            return modal::FiniteCellMetal::PrepareP1Multigrid(fem, alpha, p1_assembly);
+            return modal::finite_cell::MetalOperations::PrepareP1Multigrid(fem, alpha, p1_assembly);
         });
-        auto metal_future = std::async(std::launch::async, [&] { return std::make_unique<modal::FiniteCellMetal>(fem); });
+        auto metal_future = std::async(std::launch::async, [&] { return std::make_unique<modal::finite_cell::MetalOperations>(fem); });
         auto patch = BuildMetalPatchData(fem, alpha);
         Metal = metal_future.get();
         CutActions = std::move(patch.CutActions);
@@ -762,7 +762,7 @@ modal::FiniteCellEigenpairs modal::finite_cell::SolveAssembledCholesky(
         }
     }
     double factor_seconds{}, solve_seconds{};
-    modal::AccelerateShiftInvert inverse{assembled.Stiffness, assembled.Mass, factor_seconds, solve_seconds};
+    modal::finite_cell::AccelerateShiftInvert inverse{assembled.Stiffness, assembled.Mass, factor_seconds, solve_seconds};
     const uint32_t solve_count = std::min<uint32_t>(fem.Dofs() - 1, count + 4);
     const uint32_t basis = std::min<uint32_t>(fem.Dofs(), solve_count + 20);
     const auto eigensolver = modal::eigensolver::SolveGeneralizedEigenproblem(

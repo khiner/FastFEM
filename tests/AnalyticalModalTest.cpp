@@ -1,9 +1,10 @@
 #include "FiniteCellBenchmarkGeometry.h"
 #include "ModeShapeComparison.h"
 #include "RunSuites.h"
-#include "TetReference.h"
+#include "Tet10Eigenpairs.h"
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellEigensolver.h"
+#include "audio/finite_cell/EigenpairCertification.h"
 
 #include <boost/ut.hpp>
 
@@ -401,7 +402,7 @@ SampledFinite SolveFiniteAndSample(
     const auto modes = modal::SolveFiniteCellEigenpairs(finite, count, shift, 1e-8, 300);
     expect(modes.Eigenvalues.size() == count);
     if (modes.Eigenvalues.size() != count) return {};
-    const auto modes_certification = modal::CertifyFiniteCellEigenpairs(finite, modes.Eigenvalues, modes.Eigenvectors);
+    const auto modes_certification = modal::finite_cell::CertifyEigenpairs(finite, modes.Eigenvalues, modes.Eigenvectors);
     std::vector<finite_cell_benchmark::InterpolationStencil> stencils;
     for (const dvec3 point : samples) {
         const auto stencil = finite_cell_benchmark::FiniteCellStencil(finite, point);
@@ -433,12 +434,12 @@ SampledPair SolveAndSample(
 ) {
     const auto domain = modal::MakeTriangleSurfaceDomain(surface.Points, surface.Triangles);
     SampledFinite finite = SolveFiniteAndSample(domain, finite_cells, count, samples, cut_depth);
-    const auto mesh = finite_cell_benchmark::TetrahedralReference(
+    const auto mesh = finite_cell_benchmark::TetrahedralizeSurface(
         surface, tet_cells.x, tet_cells.y, tet_cells.z, holes
     );
     const modal::Tet10Assembler tet{mesh, Material};
     const double shift = std::pow(2 * std::numbers::pi * 20, 2);
-    const auto tet_modes = SolveTetReference(mesh, Material, count, shift, 1e-8, 200);
+    const auto tet_modes = SolveTet10Eigenpairs(mesh, Material, count, shift, 1e-8, 200);
     expect(tet_modes.Eigenvalues.size() == count);
     if (tet_modes.Eigenvalues.size() != count) return {};
     std::vector<finite_cell_benchmark::InterpolationStencil> tet_stencils;

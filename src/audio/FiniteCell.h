@@ -113,24 +113,12 @@ struct FiniteCellOperator {
     void ApplyShifted(const double *input, double *output, uint32_t width, double alpha) const;
     void RestrictP1(const double *input, double *output, uint32_t width) const;
     void ProlongP1(const double *input, double *output, uint32_t width) const;
-    Eigen::VectorXd ShiftedDiagonal(double alpha) const;
     // Writes the lower triangle of cell `K + alpha*M` in row-packed order over `3 * NodesPerCell` rows.
     void PackCellShiftedLower(uint32_t cell, double alpha, std::span<double> packed) const;
-    PackedCutOperators BuildPackedCutOperators(double alpha) const;
     PackedCutOperators BuildPackedCutOperators(double alpha, std::span<const double> packed_shifted_elements) const;
-    FiniteCellOperator WithFictitiousScale(double scale) const;
     AssembledLower AssembleLower() const;
     AssembledLower AssembleP1Lower() const;
-    Eigen::SparseMatrix<double> AssembleP1ShiftedLower(double alpha) const;
-};
-
-struct FiniteCellCertification {
-    Eigen::VectorXd RelativeResiduals;
-    double MassOrthogonalityError{};
 };
 
 FiniteCellOperator BuildFiniteCellOperator(const ImplicitDomain &, const AcousticMaterialProperties &, FiniteCellConfig = {});
-FiniteCellCertification CertifyFiniteCellEigenpairs(
-    const FiniteCellOperator &, const Eigen::VectorXd &eigenvalues, const Eigen::MatrixXd &eigenvectors
-);
 } // namespace modal

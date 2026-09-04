@@ -2,10 +2,12 @@
 #include "FiniteCellBenchmarkGeometry.h"
 #include "ModeShapeComparison.h"
 #include "RunSuites.h"
-#include "TetReference.h"
+#include "Tet10Eigenpairs.h"
 #include "audio/FiniteCellEigensolver.h"
 #include "audio/finite_cell/AssembledCholesky.h"
+#include "audio/finite_cell/EigenpairCertification.h"
 #include "audio/finite_cell/OctreeQuadrature.h"
+#include "audio/finite_cell/OperatorValidation.h"
 #include "numeric/Accelerate.h"
 
 #include <boost/ut.hpp>
@@ -108,7 +110,7 @@ BarFrequencies ClassifyBarFrequencies(
 
 std::pair<BarFrequencies, BarFrequencies> SampleBarFrequencies(
     const modal::FiniteCellOperator &finite, const modal::FiniteCellEigenpairs &finite_modes,
-    const TetMesh &mesh, const modal::Tet10Assembler &tet, const TetReferenceEigenpairs &tet_modes, dvec3 extent
+    const TetMesh &mesh, const modal::Tet10Assembler &tet, const Tet10Eigenpairs &tet_modes, dvec3 extent
 ) {
     constexpr uvec3 samples{9, 3, 3};
     std::vector<finite_cell_benchmark::InterpolationStencil> finite_stencils, tet_stencils;
@@ -211,27 +213,27 @@ suite FiniteCellTests = [] {
         expect(cylinder.ClassifyBox({2, 0, 0}, dvec3{0.5}) == modal::DomainRegion::Cut);
     };
 
-    "finite-cell benchmark geometries build mesh-faithful references"_test = [] {
+    "finite-cell benchmark geometries build volume-preserving Tet meshes"_test = [] {
         for (const std::string_view name : finite_cell_benchmark::GeometryNames) {
             const auto geometry = finite_cell_benchmark::MakeGeometry(name);
             const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
             expect(domain.SignedDistance(geometry.InteriorPoint) < 0) << name;
             expect(domain.SignedDistance(domain.Max + numeric::Max(domain.Max - domain.Min, dvec3{1})) > 0) << name;
 
-            const uvec3 resolution = finite_cell_benchmark::ReferenceResolution(geometry, 3);
-            const auto reference = geometry.Reference(resolution.x, resolution.y, resolution.z);
-            expect(!reference.Points.empty()) << name;
-            expect(!reference.Tets.empty()) << name;
-            double reference_volume{};
-            for (const auto &tet : reference.Tets)
-                for (const uint32_t point : tet) expect(point < reference.Points.size()) << name;
-            for (const auto &tet : reference.Tets) {
-                const dvec3 a = reference.Points[tet[0]] - reference.Points[tet[3]];
-                const dvec3 b = reference.Points[tet[1]] - reference.Points[tet[3]];
-                const dvec3 c = reference.Points[tet[2]] - reference.Points[tet[3]];
-                reference_volume += std::abs(numeric::Dot(a, numeric::Cross(b, c))) / 6;
+            const uvec3 resolution = finite_cell_benchmark::TetResolution(geometry, 3);
+            const auto tet_mesh = geometry.BuildTetMesh(resolution.x, resolution.y, resolution.z);
+            expect(!tet_mesh.Points.empty()) << name;
+            expect(!tet_mesh.Tets.empty()) << name;
+            double tet_volume{};
+            for (const auto &tet : tet_mesh.Tets)
+                for (const uint32_t point : tet) expect(point < tet_mesh.Points.size()) << name;
+            for (const auto &tet : tet_mesh.Tets) {
+                const dvec3 a = tet_mesh.Points[tet[0]] - tet_mesh.Points[tet[3]];
+                const dvec3 b = tet_mesh.Points[tet[1]] - tet_mesh.Points[tet[3]];
+                const dvec3 c = tet_mesh.Points[tet[2]] - tet_mesh.Points[tet[3]];
+                tet_volume += std::abs(numeric::Dot(a, numeric::Cross(b, c))) / 6;
             }
-            expect(std::abs(reference_volume / geometry.PhysicalVolume - 1) < 1e-10) << name;
+            expect(std::abs(tet_volume / geometry.PhysicalVolume - 1) < 1e-10) << name;
         }
     };
 
@@ -255,18 +257,18 @@ suite FiniteCellTests = [] {
             const uvec3 cells = levels[level];
             const auto surface = GriddedBox(extent, cells);
             const auto domain = modal::MakeTriangleSurfaceDomain(surface.Points, surface.Triangles);
-            const TetMesh mesh = finite_cell_benchmark::TetrahedralReference(surface, cells.x, cells.y, cells.z);
+            const TetMesh mesh = finite_cell_benchmark::TetrahedralizeSurface(surface, cells.x, cells.y, cells.z);
             const modal::Tet10Assembler tet{mesh, Material};
             const auto finite = modal::BuildFiniteCellOperator(
                 domain, Material,
                 {.Cells = cells, .CutDepth = 3, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
             );
-            const auto tet_modes = SolveTetReference(mesh, Material, Count, shift, 1e-8, 150);
+            const auto tet_modes = SolveTet10Eigenpairs(mesh, Material, Count, shift, 1e-8, 150);
             const auto finite_modes = modal::SolveFiniteCellEigenpairs(finite, Count, shift, 1e-8, 150);
             expect(tet_modes.Eigenvalues.size() == Count) << level;
             expect(finite_modes.Eigenvalues.size() == Count) << level;
             if (tet_modes.Eigenvalues.size() != Count || finite_modes.Eigenvalues.size() != Count) continue;
-            const auto finite_certification = modal::CertifyFiniteCellEigenpairs(finite, finite_modes.Eigenvalues, finite_modes.Eigenvectors);
+            const auto finite_certification = modal::finite_cell::CertifyEigenpairs(finite, finite_modes.Eigenvalues, finite_modes.Eigenvectors);
             expect(tet_modes.RelativeResidual < 1e-7) << level;
             expect(finite_certification.RelativeResiduals.tail(Count - 6).maxCoeff() < 1e-7) << level;
             const auto [finite_frequencies, tet_frequencies] =
@@ -321,7 +323,7 @@ suite FiniteCellTests = [] {
             expect(assembled.Eigenvalues.size() == Count) << name;
             expect(production.Eigenvalues.size() == Count) << name;
             if (assembled.Eigenvalues.size() != Count || production.Eigenvalues.size() != Count) continue;
-            const auto production_certification = modal::CertifyFiniteCellEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
+            const auto production_certification = modal::finite_cell::CertifyEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
             const double spectrum_error = (production.Eigenvalues.tail(Count - 6) - assembled.Eigenvalues.tail(Count - 6)).norm() /
                 assembled.Eigenvalues.tail(Count - 6).norm();
             const double residual = production_certification.RelativeResiduals.tail(Count - 6).maxCoeff();
@@ -359,7 +361,7 @@ suite FiniteCellTests = [] {
             operation.ApplyStiffness(input.data(), stiffness.data(), Width);
             operation.ApplyShifted(input.data(), shifted.data(), Width, 19);
             operation.ApplyMassShifted(input.data(), paired_mass.data(), paired_shifted.data(), Width, 19);
-            auto packed_cut = operation.BuildPackedCutOperators(19);
+            auto packed_cut = modal::finite_cell::BuildPackedCutOperators(operation, 19);
             operation.ApplyMassShiftedExpandedPackedCut(
                 packed_cut, input.data(), expanded_packed_cut_mass.data(), expanded_packed_cut_shifted.data(), Width
             );
@@ -421,8 +423,8 @@ suite FiniteCellTests = [] {
             fitted.Quadrature, [](const auto &point) { return point.Weight < 0; }
         );
 
-        const auto scaled_octree = octree.WithFictitiousScale(1e-4);
-        const auto scaled_fitted = fitted.WithFictitiousScale(1e-4);
+        const auto scaled_octree = modal::finite_cell::WithFictitiousScale(octree, 1e-4);
+        const auto scaled_fitted = modal::finite_cell::WithFictitiousScale(fitted, 1e-4);
         scaled_octree.ApplyShifted(input.data(), expected.data(), Width, 13);
         scaled_fitted.ApplyShifted(input.data(), actual.data(), Width, 13);
         const double scaled_error = (actual - expected).norm() / expected.norm();
@@ -453,7 +455,7 @@ suite FiniteCellTests = [] {
         expect(scaled_error < 1e-9);
         expect(spectrum_error < 1e-10);
         if (fitted_modes.Eigenvalues.size() == ModeCount) {
-            const auto fitted_certification = modal::CertifyFiniteCellEigenpairs(fitted, fitted_modes.Eigenvalues, fitted_modes.Eigenvectors);
+            const auto fitted_certification = modal::finite_cell::CertifyEigenpairs(fitted, fitted_modes.Eigenvalues, fitted_modes.Eigenvectors);
             expect(fitted_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff() < 1e-8);
             expect(fitted_certification.MassOrthogonalityError < 1e-10);
         }
@@ -467,7 +469,7 @@ suite FiniteCellTests = [] {
                 modal::MakeBoxDomain({}, {0.3, 0.08, 0.05}), Material,
                 {.Cells = {4, 3, 2}, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.27}
             );
-            const auto stabilized = operation.WithFictitiousScale(1e-4);
+            const auto stabilized = modal::finite_cell::WithFictitiousScale(operation, 1e-4);
             expect(stabilized.FictitiousScale == 1e-4);
             double scale_error{};
             for (uint32_t point = 0; point < operation.Quadrature.size(); ++point) {
@@ -492,12 +494,12 @@ suite FiniteCellTests = [] {
             Eigen::MatrixXd fine_action(operation.Dofs(), Width), coarse_action(coarse_dofs, Width);
             operation.ApplyShifted(prolonged.data(), fine_action.data(), Width, Alpha);
             operation.RestrictP1(fine_action.data(), coarse_action.data(), Width);
-            const auto coarse_matrix = operation.AssembleP1ShiftedLower(Alpha);
+            const auto coarse_matrix = modal::finite_cell::AssembleP1ShiftedLower(operation, Alpha);
             const Eigen::MatrixXd assembled_action = coarse_matrix.selfadjointView<Eigen::Lower>() * coarse;
             const double galerkin_error = (coarse_action - assembled_action).norm() / assembled_action.norm();
 
             const auto assembled = operation.AssembleLower();
-            const Eigen::VectorXd diagonal = operation.ShiftedDiagonal(Alpha);
+            const Eigen::VectorXd diagonal = modal::finite_cell::ShiftedDiagonal(operation, Alpha);
             const Eigen::VectorXd assembled_diagonal = assembled.Stiffness.diagonal() + Alpha * assembled.Mass.diagonal();
             const double diagonal_error = (diagonal - assembled_diagonal).norm() / assembled_diagonal.norm();
             std::println(
@@ -523,7 +525,7 @@ suite FiniteCellTests = [] {
         expect(operation.Profile.CutCells == 0_u);
         expect(std::abs(operation.Profile.PhysicalVolume / (extent.x * extent.y * extent.z) - 1) < 1e-12);
         expect(result.Eigenvalues.head(6).cwiseAbs().maxCoeff() < 1e-3);
-        const auto certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
+        const auto certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
         expect(certification.RelativeResiduals.tail(6).maxCoeff() < 1e-8);
         expect(certification.MassOrthogonalityError < 1e-8);
         const double residual_difference = (certification.RelativeResiduals.tail(6) - result.RelativeResiduals.tail(6)).norm();
@@ -543,7 +545,7 @@ suite FiniteCellTests = [] {
         const double volume_error = std::abs(operation.Profile.PhysicalVolume / exact_volume - 1);
         expect(volume_error < 0.015);
         expect(operation.Profile.CutCells > 0_u);
-        const auto result_certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
+        const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
         expect(result_certification.RelativeResiduals.tail(14).maxCoeff() < 1e-7);
         expect(result_certification.MassOrthogonalityError < 1e-8);
 

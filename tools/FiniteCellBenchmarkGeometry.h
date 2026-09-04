@@ -26,9 +26,9 @@ struct Geometry {
     Surface Boundary;
     dvec3 InteriorPoint;
     dvec3 GridExtent;
-    dvec3 ReferenceExtent;
+    dvec3 TetExtent;
     double PhysicalVolume;
-    TetMesh (*Reference)(uint32_t, uint32_t, uint32_t);
+    TetMesh (*BuildTetMesh)(uint32_t, uint32_t, uint32_t);
 };
 
 inline dvec3 Rotate(dvec3 point, dvec3 center, double az, double ay) {
@@ -105,7 +105,7 @@ inline Surface AxisBarSurface() { return BoxSurface(BarExtent, 0, 0); }
 inline Surface RotatedBarSurface() { return BoxSurface(BarExtent, 0.23, -0.14); }
 inline Surface SteepBarSurface() { return BoxSurface(BarExtent, 0.61, 0.37); }
 
-inline TetMesh BarReference(uint32_t nx, uint32_t ny, uint32_t nz, double az, double ay) {
+inline TetMesh BuildBarTetMesh(uint32_t nx, uint32_t ny, uint32_t nz, double az, double ay) {
     constexpr dvec3 extent = BarExtent;
     TetMesh mesh = MakeStructuredBar(int(nx), int(ny), int(nz), extent);
     const dvec3 center = 0.5 * extent;
@@ -115,9 +115,9 @@ inline TetMesh BarReference(uint32_t nx, uint32_t ny, uint32_t nz, double az, do
     return mesh;
 }
 
-inline TetMesh AxisBarReference(uint32_t nx, uint32_t ny, uint32_t nz) { return BarReference(nx, ny, nz, 0, 0); }
-inline TetMesh RotatedBarReference(uint32_t nx, uint32_t ny, uint32_t nz) { return BarReference(nx, ny, nz, 0.23, -0.14); }
-inline TetMesh SteepBarReference(uint32_t nx, uint32_t ny, uint32_t nz) { return BarReference(nx, ny, nz, 0.61, 0.37); }
+inline TetMesh BuildAxisBarTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) { return BuildBarTetMesh(nx, ny, nz, 0, 0); }
+inline TetMesh BuildRotatedBarTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) { return BuildBarTetMesh(nx, ny, nz, 0.23, -0.14); }
+inline TetMesh BuildSteepBarTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) { return BuildBarTetMesh(nx, ny, nz, 0.61, 0.37); }
 
 inline Surface Icosphere(uint32_t subdivisions) {
     constexpr double phi = std::numbers::phi;
@@ -383,28 +383,28 @@ inline double Volume(const Surface &surface) {
     return std::abs(volume);
 }
 
-inline TetMesh TetrahedralReference(
+inline TetMesh TetrahedralizeSurface(
     const Surface &surface, uint32_t nx, uint32_t ny, uint32_t nz, std::span<const dvec3> holes = {}
 ) {
     const auto [min, max] = Bounds(surface);
     const double max_volume = ((max.x - min.x) * (max.y - min.y) * (max.z - min.z)) / (6.0 * nx * ny * nz);
     auto result = tetra::Tetrahedralize(surface.Points, surface.Triangles, {.MaxVolume = max_volume, .Holes = holes});
-    if (!result) throw std::runtime_error("Reference tetrahedralization failed: " + result.error());
+    if (!result) throw std::runtime_error("Surface tetrahedralization failed: " + result.error());
     return std::move(result->Mesh);
 }
 
 inline Surface CoarseEllipsoidSurface() { return EllipsoidSurface(2); }
 inline Surface DenseEllipsoidSurface() { return EllipsoidSurface(4); }
 
-inline TetMesh EllipsoidReference(uint32_t nx, uint32_t ny, uint32_t nz) {
-    return TetrahedralReference(CoarseEllipsoidSurface(), nx, ny, nz);
+inline TetMesh BuildEllipsoidTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) {
+    return TetrahedralizeSurface(CoarseEllipsoidSurface(), nx, ny, nz);
 }
 
-inline TetMesh DenseEllipsoidReference(uint32_t nx, uint32_t ny, uint32_t nz) {
-    return TetrahedralReference(DenseEllipsoidSurface(), nx, ny, nz);
+inline TetMesh BuildDenseEllipsoidTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) {
+    return TetrahedralizeSurface(DenseEllipsoidSurface(), nx, ny, nz);
 }
 
-inline TetMesh LBracketReference(uint32_t nx, uint32_t ny, uint32_t nz) {
+inline TetMesh BuildLBracketTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) {
     constexpr double length = 0.24, arm = 0.08, thickness = 0.045;
     const uint32_t bx = std::clamp(uint32_t(std::lround(nx * arm / length)), 1u, nx - 1);
     const uint32_t by = std::clamp(uint32_t(std::lround(ny * arm / length)), 1u, ny - 1);
@@ -442,39 +442,39 @@ inline TetMesh LBracketReference(uint32_t nx, uint32_t ny, uint32_t nz) {
     return mesh;
 }
 
-inline TetMesh ThinPlateReference(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralReference(ThinPlateSurface(), nx, ny, nz); }
-inline TetMesh DiscReference(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralReference(DiscSurface(), nx, ny, nz); }
-inline TetMesh TorusReference(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralReference(TorusSurface(), nx, ny, nz); }
-inline TetMesh TaperedKeyReference(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralReference(TaperedKeySurface(), nx, ny, nz); }
-inline TetMesh NarrowWaistReference(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralReference(NarrowWaistSurface(), nx, ny, nz); }
-inline TetMesh CupReference(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralReference(CupSurface(), nx, ny, nz); }
+inline TetMesh BuildThinPlateTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralizeSurface(ThinPlateSurface(), nx, ny, nz); }
+inline TetMesh BuildDiscTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralizeSurface(DiscSurface(), nx, ny, nz); }
+inline TetMesh BuildTorusTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralizeSurface(TorusSurface(), nx, ny, nz); }
+inline TetMesh BuildTaperedKeyTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralizeSurface(TaperedKeySurface(), nx, ny, nz); }
+inline TetMesh BuildNarrowWaistTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralizeSurface(NarrowWaistSurface(), nx, ny, nz); }
+inline TetMesh BuildCupTetMesh(uint32_t nx, uint32_t ny, uint32_t nz) { return TetrahedralizeSurface(CupSurface(), nx, ny, nz); }
 
 // Derives grid extent and physical volume from the boundary surface unless an entry overrides them.
 // The `bar` preserves an axis-aligned grid, while the polyhedral bars and bracket use exact analytical volumes.
 struct GeometrySpec {
     std::string_view Name, Description;
     Surface (*Boundary)();
-    dvec3 InteriorPoint, ReferenceExtent;
-    TetMesh (*Reference)(uint32_t, uint32_t, uint32_t);
+    dvec3 InteriorPoint, TetExtent;
+    TetMesh (*BuildTetMesh)(uint32_t, uint32_t, uint32_t);
     dvec3 GridExtent{};
     double PhysicalVolume{};
 };
 
 inline Geometry MakeGeometry(std::string_view name) {
     static const std::array specs{
-        GeometrySpec{"bar-axis", "axis-aligned rectangular bar", AxisBarSurface, 0.5 * BarExtent, BarExtent, AxisBarReference, BarExtent, BarExtent.x * BarExtent.y * BarExtent.z},
-        GeometrySpec{"bar", "historical rotated rectangular bar", RotatedBarSurface, 0.5 * BarExtent, BarExtent, RotatedBarReference, BarExtent, BarExtent.x * BarExtent.y * BarExtent.z},
-        GeometrySpec{"bar-rotated", "rotated rectangular bar", RotatedBarSurface, 0.5 * BarExtent, BarExtent, RotatedBarReference, {}, BarExtent.x * BarExtent.y * BarExtent.z},
-        GeometrySpec{"bar-steep", "steeply rotated rectangular bar", SteepBarSurface, 0.5 * BarExtent, BarExtent, SteepBarReference, {}, BarExtent.x * BarExtent.y * BarExtent.z},
-        GeometrySpec{"ellipsoid", "curved ellipsoid", CoarseEllipsoidSurface, {0.15, 0.09, 0.065}, {0.3, 0.18, 0.13}, EllipsoidReference},
-        GeometrySpec{"ellipsoid-dense", "dense curved ellipsoid", DenseEllipsoidSurface, {0.15, 0.09, 0.065}, {0.3, 0.18, 0.13}, DenseEllipsoidReference},
-        GeometrySpec{"l-bracket", "non-convex L bracket", LBracketSurface, Rotate({0.04, 0.12, 0.0225}, {0.12, 0.12, 0.0225}, -0.24, 0.16), {0.24, 0.24, 0.045}, LBracketReference, {}, (2 * 0.24 * 0.08 - 0.08 * 0.08) * 0.045},
-        GeometrySpec{"thin-plate", "thin rectangular plate", ThinPlateSurface, Rotate({0.12, 0.09, 0.004}, {0.12, 0.09, 0.004}, 0.17, -0.11), {0.24, 0.18, 0.008}, ThinPlateReference},
-        GeometrySpec{"disc", "thin circular disc", DiscSurface, Rotate({0, 0, 0.004}, {0, 0, 0.004}, 0.13, -0.09), {0.24, 0.24, 0.008}, DiscReference},
-        GeometrySpec{"torus", "solid resonant ring", TorusSurface, Rotate({0.09, 0, 0}, {}, 0.21, -0.16), {0.216, 0.216, 0.036}, TorusReference},
-        GeometrySpec{"tapered-key", "tapered percussion key", TaperedKeySurface, {0.125, 0, 0}, {0.25, 0.064, 0.018}, TaperedKeyReference},
-        GeometrySpec{"narrow-waist", "weakly coupled narrow-waist resonator", NarrowWaistSurface, Rotate({0, 0, 0.12}, {0, 0, 0.12}, 0.24, -0.13), {0.128, 0.128, 0.24}, NarrowWaistReference},
-        GeometrySpec{"cup", "hollow cup resonator", CupSurface, Rotate({0, 0, 0.006}, {0, 0, 0.07}, -0.17, 0.10), {0.2, 0.2, 0.14}, CupReference},
+        GeometrySpec{"bar-axis", "axis-aligned rectangular bar", AxisBarSurface, 0.5 * BarExtent, BarExtent, BuildAxisBarTetMesh, BarExtent, BarExtent.x * BarExtent.y * BarExtent.z},
+        GeometrySpec{"bar", "historical rotated rectangular bar", RotatedBarSurface, 0.5 * BarExtent, BarExtent, BuildRotatedBarTetMesh, BarExtent, BarExtent.x * BarExtent.y * BarExtent.z},
+        GeometrySpec{"bar-rotated", "rotated rectangular bar", RotatedBarSurface, 0.5 * BarExtent, BarExtent, BuildRotatedBarTetMesh, {}, BarExtent.x * BarExtent.y * BarExtent.z},
+        GeometrySpec{"bar-steep", "steeply rotated rectangular bar", SteepBarSurface, 0.5 * BarExtent, BarExtent, BuildSteepBarTetMesh, {}, BarExtent.x * BarExtent.y * BarExtent.z},
+        GeometrySpec{"ellipsoid", "curved ellipsoid", CoarseEllipsoidSurface, {0.15, 0.09, 0.065}, {0.3, 0.18, 0.13}, BuildEllipsoidTetMesh},
+        GeometrySpec{"ellipsoid-dense", "dense curved ellipsoid", DenseEllipsoidSurface, {0.15, 0.09, 0.065}, {0.3, 0.18, 0.13}, BuildDenseEllipsoidTetMesh},
+        GeometrySpec{"l-bracket", "non-convex L bracket", LBracketSurface, Rotate({0.04, 0.12, 0.0225}, {0.12, 0.12, 0.0225}, -0.24, 0.16), {0.24, 0.24, 0.045}, BuildLBracketTetMesh, {}, (2 * 0.24 * 0.08 - 0.08 * 0.08) * 0.045},
+        GeometrySpec{"thin-plate", "thin rectangular plate", ThinPlateSurface, Rotate({0.12, 0.09, 0.004}, {0.12, 0.09, 0.004}, 0.17, -0.11), {0.24, 0.18, 0.008}, BuildThinPlateTetMesh},
+        GeometrySpec{"disc", "thin circular disc", DiscSurface, Rotate({0, 0, 0.004}, {0, 0, 0.004}, 0.13, -0.09), {0.24, 0.24, 0.008}, BuildDiscTetMesh},
+        GeometrySpec{"torus", "solid resonant ring", TorusSurface, Rotate({0.09, 0, 0}, {}, 0.21, -0.16), {0.216, 0.216, 0.036}, BuildTorusTetMesh},
+        GeometrySpec{"tapered-key", "tapered percussion key", TaperedKeySurface, {0.125, 0, 0}, {0.25, 0.064, 0.018}, BuildTaperedKeyTetMesh},
+        GeometrySpec{"narrow-waist", "weakly coupled narrow-waist resonator", NarrowWaistSurface, Rotate({0, 0, 0.12}, {0, 0, 0.12}, 0.24, -0.13), {0.128, 0.128, 0.24}, BuildNarrowWaistTetMesh},
+        GeometrySpec{"cup", "hollow cup resonator", CupSurface, Rotate({0, 0, 0.006}, {0, 0, 0.07}, -0.17, 0.10), {0.2, 0.2, 0.14}, BuildCupTetMesh},
     };
     const auto spec = std::ranges::find(specs, name, &GeometrySpec::Name);
     if (spec == specs.end()) throw std::invalid_argument("Unknown finite-cell geometry: " + std::string{name});
@@ -484,9 +484,9 @@ inline Geometry MakeGeometry(std::string_view name) {
         .Boundary = spec->Boundary(),
         .InteriorPoint = spec->InteriorPoint,
         .GridExtent = spec->GridExtent,
-        .ReferenceExtent = spec->ReferenceExtent,
+        .TetExtent = spec->TetExtent,
         .PhysicalVolume = spec->PhysicalVolume,
-        .Reference = spec->Reference,
+        .BuildTetMesh = spec->BuildTetMesh,
     };
     const auto [min, max] = Bounds(result.Boundary);
     if (result.GridExtent == dvec3{}) result.GridExtent = max - min;
@@ -532,7 +532,7 @@ inline uvec3 GridResolution(const Geometry &geometry, uint32_t longitudinal) {
     return Resolution(geometry.GridExtent, longitudinal);
 }
 
-inline uvec3 ReferenceResolution(const Geometry &geometry, uint32_t longitudinal) {
-    return Resolution(geometry.ReferenceExtent, longitudinal);
+inline uvec3 TetResolution(const Geometry &geometry, uint32_t longitudinal) {
+    return Resolution(geometry.TetExtent, longitudinal);
 }
 } // namespace finite_cell_benchmark
