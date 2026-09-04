@@ -5,11 +5,9 @@
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellEigensolver.h"
 #include "audio/finite_cell/EigenpairCertification.h"
+#include "numeric/Accelerate.h"
 
 #include <boost/ut.hpp>
-
-#include <Eigen/QR>
-#include <Eigen/SVD>
 
 #include <algorithm>
 #include <array>
@@ -272,10 +270,10 @@ std::vector<dvec3> CylinderSamples(double radius, double length) {
     return result;
 }
 
-Eigen::MatrixXd CylinderTorsionalSubspace(
+numeric::Matrix<double> CylinderTorsionalSubspace(
     const std::vector<dvec3> &samples, double length
 ) {
-    Eigen::MatrixXd result(3 * samples.size(), 1);
+    numeric::Matrix<double> result(3 * samples.size(), 1);
     for (uint32_t sample = 0; sample < samples.size(); ++sample) {
         const dvec3 point = samples[sample];
         const dvec3 displacement = std::sin(std::numbers::pi * point.z / length) * dvec3{-point.y, point.x, 0};
@@ -301,8 +299,8 @@ double PlateFlexuralWaveNumber() {
                      0.1, 12);
 }
 
-Eigen::MatrixXd DiskRadialSubspace(const std::vector<dvec3> &samples, double radius, double wave_number) {
-    Eigen::MatrixXd result(3 * samples.size(), 1);
+numeric::Matrix<double> DiskRadialSubspace(const std::vector<dvec3> &samples, double radius, double wave_number) {
+    numeric::Matrix<double> result(3 * samples.size(), 1);
     for (uint32_t sample = 0; sample < samples.size(); ++sample) {
         const dvec3 point = samples[sample];
         const double radial_position = std::hypot(point.x, point.y);
@@ -313,10 +311,10 @@ Eigen::MatrixXd DiskRadialSubspace(const std::vector<dvec3> &samples, double rad
     return result;
 }
 
-Eigen::MatrixXd PlateFlexuralSubspace(
+numeric::Matrix<double> PlateFlexuralSubspace(
     const std::vector<dvec3> &samples, double radius, double wave_number
 ) {
-    Eigen::MatrixXd result(3 * samples.size(), 1);
+    numeric::Matrix<double> result(3 * samples.size(), 1);
     const double coefficient = -CylindricalJ1(wave_number) / ModifiedI1(wave_number);
     for (uint32_t sample = 0; sample < samples.size(); ++sample) {
         const dvec3 point = samples[sample];
@@ -334,10 +332,10 @@ Eigen::MatrixXd PlateFlexuralSubspace(
     return result;
 }
 
-Eigen::MatrixXd SphereRadialSubspace(
+numeric::Matrix<double> SphereRadialSubspace(
     const std::vector<dvec3> &samples, double inner_radius, double outer_radius, double wave_number
 ) {
-    Eigen::MatrixXd result(3 * samples.size(), 1);
+    numeric::Matrix<double> result(3 * samples.size(), 1);
     double j_coefficient{1}, y_coefficient{};
     if (inner_radius > 0) {
         j_coefficient = RadialTractionY(wave_number * inner_radius / outer_radius);
@@ -353,10 +351,10 @@ Eigen::MatrixXd SphereRadialSubspace(
     return result;
 }
 
-Eigen::MatrixXd SphereTorsionalSubspace(
+numeric::Matrix<double> SphereTorsionalSubspace(
     const std::vector<dvec3> &samples, double inner_radius, double outer_radius, double wave_number
 ) {
-    Eigen::MatrixXd result(3 * samples.size(), 5);
+    numeric::Matrix<double> result(3 * samples.size(), 5);
     double j_coefficient{1}, y_coefficient{};
     if (inner_radius > 0) {
         j_coefficient = TorsionalTractionY(2, wave_number * inner_radius / outer_radius);
@@ -383,8 +381,8 @@ Eigen::MatrixXd SphereTorsionalSubspace(
 }
 
 struct SampledFinite {
-    Eigen::VectorXd Values;
-    Eigen::MatrixXd Modes;
+    numeric::Vector<double> Values;
+    numeric::Matrix<double> Modes;
     double Residual{}, Volume{};
     uint32_t Dofs{}, Iterations{};
     uint64_t QuadraturePoints{};
@@ -412,7 +410,7 @@ SampledFinite SolveFiniteAndSample(
     return {
         .Values = modes.Eigenvalues,
         .Modes = finite_cell_benchmark::SampleModes(stencils, modes.Eigenvectors, 6),
-        .Residual = modes_certification.RelativeResiduals.tail(count - 6).maxCoeff(),
+        .Residual = numeric::Maximum(modes_certification.RelativeResiduals.Last(count - 6)),
         .Volume = finite.Profile.PhysicalVolume,
         .Dofs = finite.Dofs(),
         .Iterations = modes.Iterations,
@@ -422,8 +420,8 @@ SampledFinite SolveFiniteAndSample(
 
 struct SampledPair {
     SampledFinite Finite;
-    Eigen::VectorXd TetValues;
-    Eigen::MatrixXd TetModes;
+    numeric::Vector<double> TetValues;
+    numeric::Matrix<double> TetModes;
     double TetResidual{};
     uint32_t TetDofs{};
 };
@@ -462,35 +460,38 @@ struct ModeMatch {
 };
 
 ModeMatch MatchModes(
-    const Eigen::VectorXd &eigenvalues, const Eigen::MatrixXd &sampled, const Eigen::MatrixXd &analytical,
+    const numeric::Vector<double> &eigenvalues, const numeric::Matrix<double> &sampled,
+    const numeric::Matrix<double> &analytical,
     double exact_frequency
 ) {
-    Eigen::HouseholderQR<Eigen::MatrixXd> analytical_qr{analytical};
-    const Eigen::MatrixXd analytical_q = analytical_qr.householderQ() *
-        Eigen::MatrixXd::Identity(analytical.rows(), analytical.cols());
-    std::vector<std::pair<double, Eigen::Index>> scores;
-    for (Eigen::Index mode = 0; mode < sampled.cols(); ++mode) {
-        const Eigen::VectorXd normalized = sampled.col(mode).normalized();
+    auto analytical_q = analytical;
+    expect(numeric::ThinQr(analytical_q));
+    std::vector<std::pair<double, size_t>> scores;
+    for (size_t mode = 0; mode < sampled.cols(); ++mode) {
+        auto normalized = numeric::Copy(sampled.Column(mode));
+        numeric::Scale(1 / numeric::Norm(normalized.View()), normalized.View());
         const double frequency = std::sqrt(std::max(0.0, eigenvalues[mode + 6])) / (2 * std::numbers::pi);
         const double relative_frequency = (frequency - exact_frequency) / exact_frequency;
         const double frequency_weight = std::exp(-0.5 * std::pow(relative_frequency / 0.1, 2));
-        scores.emplace_back(frequency_weight * (analytical_q.transpose() * normalized).squaredNorm(), mode);
+        const auto projection = numeric::TransposeMultiply(analytical_q.View(), numeric::MatrixView<const double>{normalized.data(), normalized.size(), 1, normalized.size()});
+        scores.emplace_back(frequency_weight * std::pow(numeric::Norm(projection.View()), 2), mode);
     }
-    std::ranges::sort(scores, std::greater{}, &std::pair<double, Eigen::Index>::first);
-    Eigen::MatrixXd selected(sampled.rows(), analytical.cols());
+    std::ranges::sort(scores, std::greater{}, &std::pair<double, size_t>::first);
+    numeric::Matrix<double> selected(sampled.rows(), analytical.cols());
     ModeMatch result;
-    for (Eigen::Index column = 0; column < analytical.cols(); ++column) {
-        selected.col(column) = sampled.col(scores[column].second).normalized();
+    for (size_t column = 0; column < analytical.cols(); ++column) {
+        numeric::Copy(sampled.Column(scores[column].second), selected.Column(column));
+        numeric::Scale(1 / numeric::Norm(selected.Column(column)), selected.Column(column));
         const double frequency = std::sqrt(std::max(0.0, eigenvalues[scores[column].second + 6])) /
             (2 * std::numbers::pi);
         result.Frequency += frequency / analytical.cols();
         result.MaximumFrequencyError = std::max(result.MaximumFrequencyError, std::abs(frequency / exact_frequency - 1));
     }
-    Eigen::HouseholderQR<Eigen::MatrixXd> selected_qr{selected};
-    const Eigen::MatrixXd selected_q = selected_qr.householderQ() *
-        Eigen::MatrixXd::Identity(selected.rows(), selected.cols());
-    const Eigen::JacobiSVD<Eigen::MatrixXd> svd{analytical_q.transpose() * selected_q};
-    result.MinimumSubspaceMac = std::pow(svd.singularValues().minCoeff(), 2);
+    expect(numeric::ThinQr(selected));
+    const auto overlap = numeric::TransposeMultiply(analytical_q.View(), selected.View());
+    numeric::Vector<double> singular_values;
+    expect(numeric::SingularValues(overlap.View(), singular_values));
+    result.MinimumSubspaceMac = std::pow(*std::ranges::min_element(singular_values), 2);
     return result;
 }
 } // namespace
@@ -500,8 +501,8 @@ suite AnalyticalModalTests = [] {
         constexpr double radius{0.1};
         const SphereReference reference = SolidSphereReference();
         const auto samples = SphereSamples(0, 0.72 * radius);
-        const Eigen::MatrixXd radial = SphereRadialSubspace(samples, 0, radius, reference.RadialWaveNumber);
-        const Eigen::MatrixXd torsional = SphereTorsionalSubspace(samples, 0, radius, reference.TorsionalWaveNumber);
+        const auto radial = SphereRadialSubspace(samples, 0, radius, reference.RadialWaveNumber);
+        const auto torsional = SphereTorsionalSubspace(samples, 0, radius, reference.TorsionalWaveNumber);
         std::array<double, 3> finite_errors{}, exact_errors{}, tet_errors{};
         for (uint32_t level = 0; level < 3; ++level) {
             const uint32_t subdivisions = level + 1, resolution = 6 + 2 * level;
@@ -561,10 +562,10 @@ suite AnalyticalModalTests = [] {
         constexpr double inner_radius{0.055}, outer_radius{0.1};
         const SphereReference reference = HollowSphereReference(inner_radius / outer_radius);
         const auto samples = SphereSamples(0.06, 0.075);
-        const Eigen::MatrixXd radial = SphereRadialSubspace(
+        const auto radial = SphereRadialSubspace(
             samples, inner_radius, outer_radius, reference.RadialWaveNumber
         );
-        const Eigen::MatrixXd torsional = SphereTorsionalSubspace(
+        const auto torsional = SphereTorsionalSubspace(
             samples, inner_radius, outer_radius, reference.TorsionalWaveNumber
         );
         const std::array holes{dvec3{0}};
@@ -647,7 +648,7 @@ suite AnalyticalModalTests = [] {
         constexpr std::array cells{uvec3{4, 4, 12}, uvec3{5, 5, 18}, uvec3{6, 6, 24}};
         const double exact_frequency = std::sqrt(Material.Mu() / Material.Density) / (2 * length);
         const auto samples = CylinderSamples(radius, length);
-        const Eigen::MatrixXd torsional = CylinderTorsionalSubspace(samples, length);
+        const auto torsional = CylinderTorsionalSubspace(samples, length);
         std::array<double, 3> finite_errors{}, exact_errors{}, tet_errors{};
         for (uint32_t level = 0; level < segments.size(); ++level) {
             const auto result = SolveAndSample(
@@ -713,8 +714,8 @@ suite AnalyticalModalTests = [] {
             const double flexural_frequency = std::pow(flexural_wave_number / radius, 2) * thickness /
                 (2 * std::numbers::pi) * std::sqrt(Material.YoungModulus / (12 * Material.Density * (1 - std::pow(Material.PoissonRatio, 2))));
             const auto samples = CylinderSamples(radius, thickness);
-            const Eigen::MatrixXd radial = DiskRadialSubspace(samples, radius, radial_wave_number);
-            const Eigen::MatrixXd flexural = PlateFlexuralSubspace(samples, radius, flexural_wave_number);
+            const auto radial = DiskRadialSubspace(samples, radius, radial_wave_number);
+            const auto flexural = PlateFlexuralSubspace(samples, radius, flexural_wave_number);
             const auto result = SolveAndSample(
                 CylinderSurface(radius, thickness, segments[level], 2, radial_cells[level]), finite_cells[level],
                 tet_cells[level], 60, samples
@@ -784,10 +785,10 @@ suite AnalyticalModalTests = [] {
         constexpr double sphere_radius{0.1};
         const SphereReference sphere_reference = SolidSphereReference();
         const auto sphere_samples = SphereSamples(0, 0.72 * sphere_radius);
-        const Eigen::MatrixXd sphere_radial = SphereRadialSubspace(
+        const auto sphere_radial = SphereRadialSubspace(
             sphere_samples, 0, sphere_radius, sphere_reference.RadialWaveNumber
         );
-        const Eigen::MatrixXd sphere_torsional = SphereTorsionalSubspace(
+        const auto sphere_torsional = SphereTorsionalSubspace(
             sphere_samples, 0, sphere_radius, sphere_reference.TorsionalWaveNumber
         );
         std::array<double, 3> sphere_errors{}, sphere_volume_errors{};
@@ -822,7 +823,7 @@ suite AnalyticalModalTests = [] {
         const double flexural_frequency = std::pow(flexural_wave_number / disk_radius, 2) * disk_thickness /
             (2 * std::numbers::pi) * std::sqrt(Material.YoungModulus / (12 * Material.Density * (1 - std::pow(Material.PoissonRatio, 2))));
         const auto disk_samples = CylinderSamples(disk_radius, disk_thickness);
-        const Eigen::MatrixXd disk_flexural = PlateFlexuralSubspace(
+        const auto disk_flexural = PlateFlexuralSubspace(
             disk_samples, disk_radius, flexural_wave_number
         );
         std::array<double, 4> disk_volume_errors{}, disk_flexural_frequencies{};

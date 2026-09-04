@@ -4,9 +4,6 @@
 #include "AssembledPencil.h"
 #include "numeric/vec3.h"
 
-#include <Eigen/Core>
-#include <Eigen/SparseCore>
-
 #include <array>
 #include <cstdint>
 #include <functional>

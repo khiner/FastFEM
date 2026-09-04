@@ -134,10 +134,12 @@ RunResult Run(const fs::path &path, uint32_t resolution, uint32_t max_iterations
         throw std::runtime_error("assembled or production solve did not converge");
     const auto assembled_certification = modal::finite_cell::CertifyEigenpairs(operation, assembled.Eigenvalues, assembled.Eigenvectors);
     const auto production_certification = modal::finite_cell::CertifyEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
-    const double spectrum = (production.Eigenvalues.segment(6, AcceptedModeCount - 6) - assembled.Eigenvalues.segment(6, AcceptedModeCount - 6)).norm() /
-        assembled.Eigenvalues.segment(6, AcceptedModeCount - 6).norm();
-    const double residual = production_certification.RelativeResiduals.segment(6, AcceptedModeCount - 6).maxCoeff();
-    const double assembled_residual = assembled_certification.RelativeResiduals.segment(6, AcceptedModeCount - 6).maxCoeff();
+    auto spectrum_difference = numeric::Copy(production.Eigenvalues.Subvector(6, AcceptedModeCount - 6));
+    numeric::AddScaled(-1, assembled.Eigenvalues.Subvector(6, AcceptedModeCount - 6), spectrum_difference.View());
+    const double spectrum = numeric::Norm(spectrum_difference.View()) /
+        numeric::Norm(assembled.Eigenvalues.Subvector(6, AcceptedModeCount - 6));
+    const double residual = numeric::Maximum(production_certification.RelativeResiduals.Subvector(6, AcceptedModeCount - 6));
+    const double assembled_residual = numeric::Maximum(assembled_certification.RelativeResiduals.Subvector(6, AcceptedModeCount - 6));
     const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
         operation, assembled.Eigenvalues, assembled.Eigenvectors, production.Eigenvectors, 6, AcceptedModeCount
     );

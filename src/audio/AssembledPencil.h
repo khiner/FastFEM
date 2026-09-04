@@ -1,11 +1,11 @@
 #pragma once
 
-#include <Eigen/SparseCore>
+#include "numeric/SparseMatrix.h"
 
 namespace modal {
 // Stores the lower triangles of assembled mass and stiffness matrices.
 struct AssembledPencil {
-    Eigen::SparseMatrix<double> Mass;
-    Eigen::SparseMatrix<double> Stiffness;
+    numeric::SparseMatrix Mass;
+    numeric::SparseMatrix Stiffness;
 };
 } // namespace modal

@@ -60,7 +60,7 @@ std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const v
     profile.OpSolve = eigenpairs.Profile.Preconditioner;
     profile.Restarts = eigenpairs.Iterations;
     if (eigenpairs.Eigenvalues.size() != count || eigenpairs.Eigenvectors.cols() != count) return std::unexpected("The finite-cell eigensolver did not return the requested modes.");
-    if (eigenpairs.RelativeResiduals.size() == count && count > 6) profile.PhysicalResidual = eigenpairs.RelativeResiduals.tail(count - 6).maxCoeff();
+    if (eigenpairs.RelativeResiduals.size() == count && count > 6) profile.PhysicalResidual = numeric::Maximum(eigenpairs.RelativeResiduals.Last(count - 6));
     if (monitor) monitor->Progress.store(0.95f, std::memory_order_relaxed);
     if (monitor && monitor->Cancelled()) return modal::ModalResult{};
 
@@ -74,7 +74,7 @@ std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const v
         const auto stencil = operation.InterpolationAt(dvec3{position});
         if (!stencil) return std::unexpected("An excitation position lies outside the active finite-cell grid.");
         auto &shape = shapes.emplace_back(eigenpairs.Eigenvalues.size());
-        for (Eigen::Index mode = 0; mode < eigenpairs.Eigenvalues.size(); ++mode)
+        for (size_t mode = 0; mode < eigenpairs.Eigenvalues.size(); ++mode)
             for (uint32_t node = 0; node < stencil->Count; ++node)
                 for (uint32_t component = 0; component < 3; ++component)
                     shape[size_t(mode)][component] += float(stencil->Weights[node] * eigenpairs.Eigenvectors(3 * stencil->Nodes[node] + component, mode));
@@ -84,8 +84,8 @@ std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const v
 
     const double length_to_si = (double(baked_scale.x) + baked_scale.y + baked_scale.z) / 3;
     auto mass_properties = Timed(profile.MassProps, [&] { return ComputeFiniteCellMassProperties(operation, material.Density, baked_scale, length_to_si); });
-    Eigen::MatrixXf basis;
-    if (reuse.KeepBasis) basis = eigenpairs.Eigenvectors.cast<float>();
+    numeric::Matrix<float> basis;
+    if (reuse.KeepBasis) basis = numeric::Cast<float>(eigenpairs.Eigenvectors.View());
     std::vector<uint32_t> sample_point_of(excitation_positions.size());
     for (uint32_t point = 0; point < sample_point_of.size(); ++point) sample_point_of[point] = point;
     if (monitor) monitor->Progress.store(1, std::memory_order_relaxed);

@@ -3,8 +3,6 @@
 #include "AcousticMaterialProperties.h"
 #include "AssembledPencil.h"
 
-#include <Eigen/SparseCore>
-
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -26,6 +24,9 @@ struct Tet10Assembler {
 
     struct Topology {
         std::vector<Element> Elements;
+        std::vector<long> BlockColumnStarts;
+        std::vector<int> BlockRows;
+        std::vector<std::array<uint32_t, LowerBlocksPerElement>> ElementBlockEntries;
         uint32_t NumNodes{};
     };
 

@@ -2,8 +2,6 @@
 
 #include "audio/AccelerateSparseCholesky.h"
 
-#include <Eigen/SparseCore>
-
 #include <memory>
 
 // Computes y = (K - sigma*M)^-1 x from the lower triangles of K and M.
@@ -12,7 +10,7 @@
 namespace modal::finite_cell {
 struct AccelerateShiftInvert {
     AccelerateShiftInvert(
-        const Eigen::SparseMatrix<double> &k, const Eigen::SparseMatrix<double> &m,
+        const numeric::SparseMatrix &k, const numeric::SparseMatrix &m,
         double &factorize_seconds, double &solve_seconds
     );
     ~AccelerateShiftInvert();
@@ -21,7 +19,7 @@ struct AccelerateShiftInvert {
     // Solves a column-major panel of `width` right-hand sides in one factor traversal.
     void solve_panel(const double *input, double *output, int width) const;
 
-    const Eigen::SparseMatrix<double> &K, &M;
+    const numeric::SparseMatrix &K, &M;
     double &FactorizeSeconds, &SolveSeconds;
     std::unique_ptr<AccelerateSparseCholesky> Factor;
 };

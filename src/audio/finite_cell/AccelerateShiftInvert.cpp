@@ -9,7 +9,7 @@ double SecondsSince(std::chrono::steady_clock::time_point start) {
 } // namespace
 
 modal::finite_cell::AccelerateShiftInvert::AccelerateShiftInvert(
-    const Eigen::SparseMatrix<double> &k, const Eigen::SparseMatrix<double> &m,
+    const numeric::SparseMatrix &k, const numeric::SparseMatrix &m,
     double &factorize_seconds, double &solve_seconds
 ) : K(k), M(m), FactorizeSeconds(factorize_seconds), SolveSeconds(solve_seconds) {}
 
@@ -17,7 +17,7 @@ modal::finite_cell::AccelerateShiftInvert::~AccelerateShiftInvert() = default;
 
 void modal::finite_cell::AccelerateShiftInvert::set_shift(double sigma) {
     const auto start = std::chrono::steady_clock::now();
-    Eigen::SparseMatrix<double> shifted = K - sigma * M;
+    numeric::SparseMatrix shifted = numeric::Add(K, -sigma, M);
     Factor = std::make_unique<AccelerateSparseCholesky>(shifted);
     FactorizeSeconds += SecondsSince(start);
 }

@@ -3,7 +3,7 @@
 #include "MassProperties.h"
 #include "ModalEigenSummary.h"
 #include "ModalModes.h"
-#include <Eigen/Core>
+#include "numeric/Matrix.h"
 
 #include <atomic>
 #include <cstdint>
@@ -49,7 +49,7 @@ struct ModalResult {
     MassProperties MassProps;
     SolveProfile Profile;
     ModalEigenSummary Summary; // Raw eigenpairs sampled at the excitation positions
-    Eigen::MatrixXf Basis; // Full eigenvector basis, filled when SolveReuse::KeepBasis
+    numeric::Matrix<float> Basis; // Full eigenvector basis, filled when SolveReuse::KeepBasis
     // Maps each requested excitation position to Modes.Positions in request order.
     // Excitation positions mapped to one tetrahedral point share one entry.
     std::vector<uint32_t> SamplePointOfExcitation;
@@ -68,7 +68,7 @@ struct SolveCache {
 };
 
 struct SolveReuse {
-    const Eigen::MatrixXf *SeedBasis{};
+    const numeric::Matrix<float> *SeedBasis{};
     SolveCache *Cache{}; // Optional lifetime override for the bounded default cache
     bool KeepBasis{}; // Fill ModalResult::Basis
 };

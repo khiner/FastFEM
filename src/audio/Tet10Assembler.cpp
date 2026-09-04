@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace {
@@ -146,6 +147,34 @@ std::shared_ptr<const modal::Tet10Assembler::Topology> modal::Tet10Assembler::Bu
         element.Volume = std::abs(det / 6);
         element.Gradients = ShapeGradients(mesh, tet, det);
     }
+
+    std::vector<std::vector<int>> column_rows(state->NumNodes);
+    for (const auto &element : state->Elements)
+        for (uint32_t a = 0; a < NodesPerElement; ++a)
+            for (uint32_t c = 0; c <= a; ++c)
+                column_rows[std::min(element.Nodes[a], element.Nodes[c])].push_back(int(std::max(element.Nodes[a], element.Nodes[c])));
+    state->BlockColumnStarts.resize(size_t(state->NumNodes) + 1);
+    for (uint32_t column = 0; column < state->NumNodes; ++column) {
+        auto &rows = column_rows[column];
+        std::ranges::sort(rows);
+        rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+        state->BlockColumnStarts[column + 1] = state->BlockColumnStarts[column] + long(rows.size());
+        state->BlockRows.insert(state->BlockRows.end(), rows.begin(), rows.end());
+    }
+    state->ElementBlockEntries.resize(state->Elements.size());
+    for (size_t element_index = 0; element_index < state->Elements.size(); ++element_index) {
+        const auto &nodes = state->Elements[element_index].Nodes;
+        uint32_t pair{};
+        for (uint32_t a = 0; a < NodesPerElement; ++a)
+            for (uint32_t c = 0; c <= a; ++c) {
+                const uint32_t row = std::max(nodes[a], nodes[c]), column = std::min(nodes[a], nodes[c]);
+                const auto begin = state->BlockRows.begin() + state->BlockColumnStarts[column];
+                const auto end = state->BlockRows.begin() + state->BlockColumnStarts[column + 1];
+                const auto entry = std::lower_bound(begin, end, int(row));
+                if (entry == end || *entry != int(row)) throw std::logic_error("Tet10 block pattern is incomplete.");
+                state->ElementBlockEntries[element_index][pair++] = uint32_t(entry - state->BlockRows.begin());
+            }
+    }
     return state;
 }
 
@@ -164,29 +193,50 @@ void modal::Tet10Assembler::EvaluateBlock(
 }
 
 modal::AssembledPencil modal::Tet10Assembler::AssembleLower() const {
-    std::vector<Eigen::Triplet<double>> mass_triplets, stiffness_triplets;
-    mass_triplets.reserve(Elements().size() * LowerBlocksPerElement * 3);
-    stiffness_triplets.reserve(Elements().size() * LowerBlocksPerElement * 9);
-
-    for (const auto &element : Elements()) {
+    std::vector<ElementBlock> block_stiffness(State->BlockRows.size());
+    std::vector<double> block_mass(State->BlockRows.size());
+    for (size_t element_index = 0; element_index < Elements().size(); ++element_index) {
+        const auto &element = Elements()[element_index];
+        uint32_t pair{};
         for (uint a = 0; a < NodesPerElement; ++a) {
             for (uint c = 0; c <= a; ++c) {
                 const bool transpose = element.Nodes[a] < element.Nodes[c];
                 const uint local_row = transpose ? c : a, local_column = transpose ? a : c;
-                const uint row = 3 * element.Nodes[local_row], column = 3 * element.Nodes[local_column];
                 ElementBlock stiffness;
                 double mass;
                 EvaluateBlock(element, local_row, local_column, stiffness, mass);
-                for (uint component = 0; component < 3; ++component) mass_triplets.emplace_back(row + component, column + component, mass);
-                for (uint p = 0; p < 3; ++p) {
-                    for (uint q = 0; q < (row == column ? p + 1 : 3u); ++q) stiffness_triplets.emplace_back(row + p, column + q, stiffness[p + 3 * q]);
-                }
+                const uint32_t entry = State->ElementBlockEntries[element_index][pair++];
+                block_mass[entry] += mass;
+                for (uint32_t value = 0; value < stiffness.size(); ++value) block_stiffness[entry][value] += stiffness[value];
             }
         }
     }
 
-    AssembledPencil assembled{Eigen::SparseMatrix<double>{Dofs(), Dofs()}, Eigen::SparseMatrix<double>{Dofs(), Dofs()}};
-    assembled.Mass.setFromTriplets(mass_triplets.begin(), mass_triplets.end());
-    assembled.Stiffness.setFromTriplets(stiffness_triplets.begin(), stiffness_triplets.end());
-    return assembled;
+    numeric::SparseMatrix mass{int(Dofs()), int(Dofs())}, stiffness{int(Dofs()), int(Dofs())};
+    mass.RowIndices.reserve(3 * State->BlockRows.size());
+    mass.Values.reserve(3 * State->BlockRows.size());
+    stiffness.RowIndices.reserve(9 * State->BlockRows.size());
+    stiffness.Values.reserve(9 * State->BlockRows.size());
+    for (uint32_t block_column = 0; block_column < NumNodes; ++block_column) {
+        for (uint32_t column_component = 0; column_component < 3; ++column_component) {
+            const uint32_t column = 3 * block_column + column_component;
+            for (long entry = State->BlockColumnStarts[block_column]; entry < State->BlockColumnStarts[block_column + 1]; ++entry) {
+                const uint32_t block_row = uint32_t(State->BlockRows[entry]);
+                if (const double value = block_mass[entry]; value != 0) {
+                    mass.RowIndices.push_back(int(3 * block_row + column_component));
+                    mass.Values.push_back(value);
+                }
+                const uint32_t first_row_component = block_row == block_column ? column_component : 0;
+                for (uint32_t row_component = first_row_component; row_component < 3; ++row_component) {
+                    const double value = block_stiffness[entry][row_component + 3 * column_component];
+                    if (value == 0) continue;
+                    stiffness.RowIndices.push_back(int(3 * block_row + row_component));
+                    stiffness.Values.push_back(value);
+                }
+            }
+            mass.ColumnStarts[column + 1] = long(mass.Values.size());
+            stiffness.ColumnStarts[column + 1] = long(stiffness.Values.size());
+        }
+    }
+    return {std::move(mass), std::move(stiffness)};
 }

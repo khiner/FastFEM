@@ -14,8 +14,8 @@ struct FiniteCellSolveProfile {
 };
 
 struct FiniteCellEigenpairs {
-    Eigen::VectorXd Eigenvalues, RelativeResiduals;
-    Eigen::MatrixXd Eigenvectors;
+    numeric::Vector<double> Eigenvalues, RelativeResiduals;
+    numeric::Matrix<double> Eigenvectors;
     FiniteCellSolveProfile Profile;
     uint32_t Iterations{};
 };

@@ -1,8 +1,7 @@
 #include "MetalOperations.h"
+#include "numeric/Accelerate.h"
 
 #import <Metal/Metal.h>
-
-#include <Eigen/Cholesky>
 
 #include <algorithm>
 #include <array>
@@ -11,6 +10,7 @@
 #include <dispatch/dispatch.h>
 #include <map>
 #include <numbers>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -597,13 +597,13 @@ void modal::finite_cell::MetalOperations::Synchronize() const {
 }
 
 namespace {
-Eigen::Map<Eigen::VectorXf> SharedValues(
+std::span<float> SharedValues(
     const modal::finite_cell::MetalOperations::Implementation &impl, const modal::finite_cell::MetalOperations::Block &block, const char *what
 ) {
     if (!block.Impl || !block.Impl->Buffer || !block.Impl->Buffer.contents ||
         block.Impl->Buffer.device != impl.Device)
         throw std::invalid_argument(std::string{"Finite-cell Metal "} + what + " block must be allocated by the same device.");
-    return {static_cast<float *>(block.Impl->Buffer.contents), Eigen::Index(block.Rows) * block.Width};
+    return {static_cast<float *>(block.Impl->Buffer.contents), size_t(block.Rows) * block.Width};
 }
 } // namespace
 
@@ -611,13 +611,13 @@ Eigen::Map<Eigen::VectorXf> SharedValues(
 void modal::finite_cell::MetalOperations::Upload(Block &block, const double *input) const {
     Synchronize();
     auto values = SharedValues(*Impl, block, "upload");
-    values = Eigen::Map<const Eigen::VectorXd>{input, values.size()}.cast<float>();
+    for (size_t index = 0; index < values.size(); ++index) values[index] = float(input[index]);
 }
 
 void modal::finite_cell::MetalOperations::Download(const Block &block, double *output) const {
     Synchronize();
     const auto values = SharedValues(*Impl, block, "download");
-    Eigen::Map<Eigen::VectorXd>{output, values.size()} = values.cast<double>();
+    for (size_t index = 0; index < values.size(); ++index) output[index] = values[index];
 }
 
 namespace {
@@ -650,28 +650,38 @@ void RequireTransfer(
         throw std::invalid_argument(std::string{"Finite-cell Metal "} + what);
 }
 
-using RowSparse = Eigen::SparseMatrix<double, Eigen::RowMajor>;
+using Sparse = numeric::SparseMatrix;
 using GridPoint = std::array<double, 3>;
 
 struct CpuMultigridLevel {
-    RowSparse Operator, Prolongation, Restriction;
+    Sparse Operator, Prolongation, Restriction;
     std::vector<GridPoint> Nodes;
-    Eigen::MatrixXf Inverse;
+    numeric::Matrix<float> Inverse;
     double Maximum{};
 };
 
-double JacobiMaximum(const RowSparse &matrix) {
-    const Eigen::VectorXd diagonal = matrix.diagonal();
-    Eigen::VectorXd vector(matrix.rows()), action(matrix.rows());
-    for (Eigen::Index row = 0; row < vector.size(); ++row) vector[row] = std::sin(0.37 * double(row + 1));
-    vector /= std::sqrt(vector.dot(diagonal.cwiseProduct(vector)));
+double JacobiMaximum(const Sparse &matrix) {
+    const numeric::Vector<double> diagonal = matrix.Diagonal();
+    numeric::Vector<double> vector(size_t(matrix.rows())), action(size_t(matrix.rows()));
+    for (size_t row = 0; row < vector.size(); ++row) vector[row] = std::sin(0.37 * double(row + 1));
+    const auto weighted_norm = [&] {
+        double sum{};
+        for (size_t row = 0; row < vector.size(); ++row) sum += vector[row] * diagonal[row] * vector[row];
+        return std::sqrt(sum);
+    };
+    numeric::Scale(1 / weighted_norm(), vector.View());
     for (uint32_t iteration = 0; iteration < 16; ++iteration) {
-        action = matrix * vector;
-        vector = action.cwiseQuotient(diagonal);
-        vector /= std::sqrt(vector.dot(diagonal.cwiseProduct(vector)));
+        numeric::Multiply(matrix, numeric::MatrixView<const double>{vector.data(), vector.size(), 1, vector.size()}, numeric::MatrixView<double>{action.data(), action.size(), 1, action.size()});
+        for (size_t row = 0; row < vector.size(); ++row) vector[row] = action[row] / diagonal[row];
+        numeric::Scale(1 / weighted_norm(), vector.View());
     }
-    action = matrix * vector;
-    return 1.05 * vector.dot(action) / vector.dot(diagonal.cwiseProduct(vector));
+    numeric::Multiply(matrix, numeric::MatrixView<const double>{vector.data(), vector.size(), 1, vector.size()}, numeric::MatrixView<double>{action.data(), action.size(), 1, action.size()});
+    double numerator{}, denominator{};
+    for (size_t row = 0; row < vector.size(); ++row) {
+        numerator += vector[row] * action[row];
+        denominator += vector[row] * diagonal[row] * vector[row];
+    }
+    return 1.05 * numerator / denominator;
 }
 
 std::vector<GridPoint> P1Nodes(const modal::FiniteCellOperator &operation) {
@@ -689,7 +699,7 @@ std::vector<GridPoint> P1Nodes(const modal::FiniteCellOperator &operation) {
     return result;
 }
 
-std::pair<RowSparse, std::vector<GridPoint>> Coarsen(const std::vector<GridPoint> &fine_nodes) {
+std::pair<Sparse, std::vector<GridPoint>> Coarsen(const std::vector<GridPoint> &fine_nodes) {
     std::array<std::vector<double>, 3> axes;
     for (const auto &node : fine_nodes)
         for (uint32_t axis = 0; axis < 3; ++axis) axes[axis].push_back(node[axis]);
@@ -705,7 +715,7 @@ std::pair<RowSparse, std::vector<GridPoint>> Coarsen(const std::vector<GridPoint
 
     std::map<GridPoint, uint32_t> coarse_map;
     std::vector<GridPoint> coarse_nodes;
-    std::vector<Eigen::Triplet<double>> scalar_triplets;
+    std::vector<numeric::Triplet> scalar_triplets;
     for (uint32_t fine = 0; fine < fine_nodes.size(); ++fine) {
         std::array<std::array<double, 2>, 3> coordinates{}, weights{};
         std::array<uint32_t, 3> counts{};
@@ -731,43 +741,41 @@ std::pair<RowSparse, std::vector<GridPoint>> Coarsen(const std::vector<GridPoint
                     const GridPoint point{coordinates[0][x], coordinates[1][y], coordinates[2][z]};
                     const auto [entry, inserted] = coarse_map.try_emplace(point, uint32_t(coarse_nodes.size()));
                     if (inserted) coarse_nodes.push_back(point);
-                    scalar_triplets.emplace_back(fine, entry->second, weight);
+                    scalar_triplets.push_back({int(fine), int(entry->second), weight});
                 }
     }
 
-    std::vector<Eigen::Triplet<double>> triplets;
+    std::vector<numeric::Triplet> triplets;
     triplets.reserve(3 * scalar_triplets.size());
     for (const auto &entry : scalar_triplets)
         for (uint32_t component = 0; component < 3; ++component)
-            triplets.emplace_back(3 * entry.row() + component, 3 * entry.col() + component, entry.value());
-    RowSparse prolongation(3 * fine_nodes.size(), 3 * coarse_nodes.size());
-    prolongation.setFromTriplets(triplets.begin(), triplets.end());
-    prolongation.makeCompressed();
-    return {std::move(prolongation), std::move(coarse_nodes)};
+            triplets.push_back({3 * entry.Row + int(component), 3 * entry.Column + int(component), entry.Value});
+    return {
+        Sparse::FromTriplets(int(3 * fine_nodes.size()), int(3 * coarse_nodes.size()), std::move(triplets)),
+        std::move(coarse_nodes),
+    };
 }
 
 std::vector<CpuMultigridLevel> BuildP1Hierarchy(
     const modal::FiniteCellOperator &operation, double alpha,
     const modal::AssembledPencil &prepared
 ) {
-    const RowSparse stiffness = prepared.Stiffness.selfadjointView<Eigen::Lower>();
-    const RowSparse mass = prepared.Mass.selfadjointView<Eigen::Lower>();
-    std::vector<CpuMultigridLevel> result{{.Operator = stiffness + alpha * mass, .Nodes = P1Nodes(operation)}};
+    const Sparse stiffness = numeric::ExpandSymmetric(prepared.Stiffness);
+    const Sparse mass = numeric::ExpandSymmetric(prepared.Mass);
+    std::vector<CpuMultigridLevel> result{{.Operator = numeric::Add(stiffness, alpha, mass), .Nodes = P1Nodes(operation)}};
     while (result.back().Operator.rows() > 96 && result.size() < 8) {
         auto [prolongation, coarse_nodes] = Coarsen(result.back().Nodes);
         if (prolongation.cols() >= prolongation.rows()) break;
         result.back().Prolongation = std::move(prolongation);
-        result.back().Restriction = result.back().Prolongation.transpose();
-        RowSparse coarse = result.back().Restriction * result.back().Operator * result.back().Prolongation;
-        coarse.makeCompressed();
+        result.back().Restriction = numeric::Transpose(result.back().Prolongation);
+        Sparse coarse = numeric::Multiply(numeric::Multiply(result.back().Restriction, result.back().Operator), result.back().Prolongation);
         result.push_back({.Operator = std::move(coarse), .Nodes = std::move(coarse_nodes)});
     }
     for (auto &level : result) level.Maximum = JacobiMaximum(level.Operator);
-    const Eigen::MatrixXd coarsest = Eigen::MatrixXd{result.back().Operator};
-    const Eigen::LLT<Eigen::MatrixXd> factor{coarsest};
-    if (factor.info() != Eigen::Success)
+    numeric::Matrix<double> coarsest = result.back().Operator.Dense();
+    if (!numeric::CholeskyInverse(coarsest.data(), uint32_t(coarsest.rows())))
         throw std::runtime_error("Finite-cell P1 multigrid coarse operator is not positive definite.");
-    result.back().Inverse = factor.solve(Eigen::MatrixXd::Identity(coarsest.rows(), coarsest.cols())).cast<float>();
+    result.back().Inverse = numeric::Cast<float>(coarsest.View());
     return result;
 }
 
@@ -807,14 +815,15 @@ void modal::finite_cell::MetalOperations::ConfigureP1Multigrid(P1Multigrid &&pre
             if (!result) throw MetalError(@"Allocating finite-cell Metal P1 hierarchy failed");
             return result;
         };
-        const auto sparse = [&](const RowSparse &matrix, id<MTLBuffer> __strong &offsets,
+        const auto sparse = [&](const Sparse &matrix, id<MTLBuffer> __strong &offsets,
                                 id<MTLBuffer> __strong &columns, id<MTLBuffer> __strong &values) {
-            std::vector<uint32_t> row_offsets(matrix.rows() + 1), column_indices(matrix.nonZeros());
-            std::vector<float> entries(matrix.nonZeros());
-            for (int row = 0; row <= matrix.rows(); ++row) row_offsets[row] = uint32_t(matrix.outerIndexPtr()[row]);
-            for (int entry = 0; entry < matrix.nonZeros(); ++entry) {
-                column_indices[entry] = uint32_t(matrix.innerIndexPtr()[entry]);
-                entries[entry] = float(matrix.valuePtr()[entry]);
+            const Sparse transposed = numeric::Transpose(matrix);
+            std::vector<uint32_t> row_offsets(size_t(matrix.rows()) + 1), column_indices(matrix.NonZeros());
+            std::vector<float> entries(matrix.NonZeros());
+            for (int row = 0; row <= matrix.rows(); ++row) row_offsets[row] = uint32_t(transposed.ColumnStarts[row]);
+            for (size_t entry = 0; entry < matrix.NonZeros(); ++entry) {
+                column_indices[entry] = uint32_t(transposed.RowIndices[entry]);
+                entries[entry] = float(transposed.Values[entry]);
             }
             offsets = buffer(row_offsets.data(), row_offsets.size() * sizeof(uint32_t));
             columns = buffer(column_indices.data(), column_indices.size() * sizeof(uint32_t));
@@ -826,8 +835,10 @@ void modal::finite_cell::MetalOperations::ConfigureP1Multigrid(P1Multigrid &&pre
             level.Rows = uint32_t(source.Operator.rows());
             level.Maximum = float(source.Maximum);
             sparse(source.Operator, level.Offsets, level.Columns, level.Values);
-            const Eigen::VectorXf diagonal = source.Operator.diagonal().cast<float>();
-            level.Diagonal = buffer(diagonal.data(), diagonal.size() * sizeof(float));
+            const numeric::Vector<double> diagonal = source.Operator.Diagonal();
+            std::vector<float> compact_diagonal(diagonal.size());
+            std::ranges::transform(diagonal, compact_diagonal.begin(), [](double value) { return float(value); });
+            level.Diagonal = buffer(compact_diagonal.data(), compact_diagonal.size() * sizeof(float));
             if (index + 1 < hierarchy.size()) {
                 level.CoarseRows = uint32_t(source.Prolongation.cols());
                 sparse(

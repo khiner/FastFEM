@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Eigen/SparseCore>
+#include "numeric/SparseMatrix.h"
 
 #include <memory>
 
@@ -11,7 +11,7 @@ struct AccelerateSparseCholesky {
 
     std::unique_ptr<Factorization> Factor;
 
-    explicit AccelerateSparseCholesky(const Eigen::SparseMatrix<double> &);
+    explicit AccelerateSparseCholesky(const numeric::SparseMatrix &);
     ~AccelerateSparseCholesky();
 
     void Solve(const double *input, double *output, int width = 1) const;

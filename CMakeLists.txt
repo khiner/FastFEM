@@ -12,8 +12,6 @@ option(FASTFEM_PARALLEL_SPARSE "Allow nondeterministic multithreaded Accelerate 
 set(FASTFEM_REALIMPACT_DATASET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/RealImpact/dataset" CACHE PATH "Optional RealImpact dataset directory")
 set(FASTFEM_TET_CORPUS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/TetCorpus" CACHE PATH "Tetrahedralizer OBJ corpus root")
 
-find_package(Eigen3 CONFIG REQUIRED)
-
 function(fastfem_require_submodule path)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${path}/.git")
         message(FATAL_ERROR "Missing ${path}; run: git submodule update --init --recursive")
@@ -52,7 +50,9 @@ add_library(FastFEM
     src/mesh/Tetrahedralize.cpp
     src/mesh/Tets.cpp
     src/numeric/Accelerate.cpp
+    src/numeric/Matrix.cpp
     src/numeric/Predicates.cpp
+    src/numeric/SparseMatrix.cpp
 )
 add_library(FastFEM::FastFEM ALIAS FastFEM)
 
@@ -122,8 +122,6 @@ target_include_directories(FastFEM PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
 target_link_libraries(FastFEM
-    PUBLIC
-        Eigen3::Eigen
     PRIVATE
         ${FASTFEM_MESHOPTIMIZER_TARGET}
         ${FASTFEM_ACCELERATE_FRAMEWORK}

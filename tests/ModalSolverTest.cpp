@@ -9,8 +9,10 @@
 #include "audio/Tet10Cholesky.h"
 #include "audio/Tet10Modes.h"
 #include "mesh/Tets.h"
+#include "numeric/Accelerate.h"
+#include "numeric/Matrix.h"
+#include "numeric/SparseMatrix.h"
 
-#include <Eigen/Eigenvalues>
 #include <boost/ut.hpp>
 
 #include <algorithm>
@@ -187,6 +189,24 @@ void CheckFamily(std::string_view name, const std::vector<double> &fem, const st
     }
 }
 
+double DifferenceNorm(numeric::MatrixView<const double> a, numeric::MatrixView<const double> b) {
+    auto difference = numeric::Copy(a);
+    numeric::AddScaled(-1, b, difference.View());
+    return numeric::Norm(difference.View());
+}
+
+double DifferenceNorm(numeric::VectorView<const double> a, numeric::VectorView<const double> b) {
+    auto difference = numeric::Copy(a);
+    numeric::AddScaled(-1, b, difference.View());
+    return numeric::Norm(difference.View());
+}
+
+double StoredNorm(const numeric::SparseMatrix &matrix) {
+    double squared{};
+    for (const double value : matrix.Values) squared += value * value;
+    return std::sqrt(squared);
+}
+
 } // namespace
 
 int main() {
@@ -200,14 +220,14 @@ int main() {
             material
         };
         const auto [mass, stiffness] = fem.AssembleLower();
-        const auto mass_action = mass.selfadjointView<Eigen::Lower>();
-        const auto stiffness_action = stiffness.selfadjointView<Eigen::Lower>();
         const double physical_mass = material.Density * fem.Elements().front().Volume;
         for (uint32_t component = 0; component < 3; ++component) {
-            Eigen::VectorXd translation = Eigen::VectorXd::Zero(fem.Dofs());
-            for (uint32_t node = 0; node < fem.NumNodes; ++node) translation[3 * node + component] = 1;
-            expect(std::abs(translation.dot(mass_action * translation) / physical_mass - 1) < 1e-14);
-            expect((stiffness_action * translation).norm() < 1e-14 * stiffness.norm() * translation.norm());
+            numeric::Matrix<double> translation(fem.Dofs(), 1);
+            for (uint32_t node = 0; node < fem.NumNodes; ++node) translation(3 * node + component, 0) = 1;
+            const auto mass_translation = numeric::SymmetricMultiply(mass, translation.View());
+            const auto stiffness_translation = numeric::SymmetricMultiply(stiffness, translation.View());
+            expect(std::abs(numeric::Dot(translation.Column(0), mass_translation.Column(0)) / physical_mass - 1) < 1e-14);
+            expect(numeric::Norm(stiffness_translation.View()) < 1e-14 * StoredNorm(stiffness) * numeric::Norm(translation.View()));
         }
     };
 
@@ -217,21 +237,22 @@ int main() {
         const modal::Tet10Assembler fem{MakeStructuredBar(2, 1, 1), material};
         const auto [mass, stiffness] = fem.AssembleLower();
         modal::Tet10Cholesky native{fem};
-        Eigen::MatrixXd rhs(fem.Dofs(), 4), solution(fem.Dofs(), 4), first_solution, reference(fem.Dofs(), 4);
-        for (Eigen::Index column = 0; column < rhs.cols(); ++column)
-            for (Eigen::Index row = 0; row < rhs.rows(); ++row) rhs(row, column) = std::sin(0.05 * double((row + 2) * (column + 1)));
+        numeric::Matrix<double> rhs(fem.Dofs(), 4), solution(fem.Dofs(), 4), first_solution, reference(fem.Dofs(), 4);
+        for (size_t column = 0; column < rhs.cols(); ++column)
+            for (size_t row = 0; row < rhs.rows(); ++row) rhs(row, column) = std::sin(0.05 * double((row + 2) * (column + 1)));
         for (const double scale : {1.0, 2.0, 1.0}) {
             native.SetShift(-scale * alpha);
-            native.Solve(rhs.data(), solution.data(), rhs.cols());
-            const Eigen::SparseMatrix<double> shifted = stiffness + scale * alpha * mass;
+            native.Solve(rhs.data(), solution.data(), int(rhs.cols()));
+            const auto shifted = numeric::Add(stiffness, scale * alpha, mass);
             modal::AccelerateSparseCholesky accelerate{shifted};
-            accelerate.Solve(rhs.data(), reference.data(), rhs.cols());
-            const double residual = (shifted.selfadjointView<Eigen::Lower>() * solution - rhs).norm() / rhs.norm();
-            const double difference = (solution - reference).norm() / reference.norm();
-            expect(residual < 1e-8) << residual << solution.norm() << reference.norm();
-            expect(difference < 1e-8) << difference << solution.norm() << reference.norm();
-            if (first_solution.size() == 0) first_solution = solution;
-            else if (scale == 1.0) expect((solution.array() == first_solution.array()).all());
+            accelerate.Solve(rhs.data(), reference.data(), int(rhs.cols()));
+            const auto action = numeric::SymmetricMultiply(shifted, solution.View());
+            const double residual = DifferenceNorm(action.View(), rhs.View()) / numeric::Norm(rhs.View());
+            const double difference = DifferenceNorm(solution.View(), reference.View()) / numeric::Norm(reference.View());
+            expect(residual < 1e-8) << residual << numeric::Norm(solution.View()) << numeric::Norm(reference.View());
+            expect(difference < 1e-8) << difference << numeric::Norm(solution.View()) << numeric::Norm(reference.View());
+            if (first_solution.empty()) first_solution = solution;
+            else if (scale == 1.0) expect(solution.Values == first_solution.Values);
         }
     };
 
@@ -255,24 +276,19 @@ int main() {
             }
         );
         expect(eigenpairs.Converged);
-        Eigen::MatrixXd dense_mass{mass}, dense_stiffness{stiffness};
-        dense_mass = dense_mass.selfadjointView<Eigen::Lower>();
-        dense_stiffness = dense_stiffness.selfadjointView<Eigen::Lower>();
-        const Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> reference_solver{
-            dense_stiffness,
-            dense_mass,
-        };
-        expect(reference_solver.info() == Eigen::Success);
-        const Eigen::VectorXd reference = reference_solver.eigenvalues().head(count);
-        const Eigen::VectorXd values = eigenpairs.Eigenvalues;
-        expect((values - reference).norm() / reference.norm() < 1e-9);
-        const Eigen::MatrixXd vectors = eigenpairs.Eigenvectors;
-        const auto k = stiffness.selfadjointView<Eigen::Lower>();
-        const auto m = mass.selfadjointView<Eigen::Lower>();
+        auto dense_mass = mass.DenseSymmetric();
+        auto dense_stiffness = stiffness.DenseSymmetric();
+        numeric::Vector<double> reference(dense_mass.rows());
+        expect(numeric::GeneralizedSelfAdjointEigenSolve(dense_stiffness.data(), dense_mass.data(), reference.data(), uint32_t(dense_mass.rows())));
+        expect(DifferenceNorm(eigenpairs.Eigenvalues.View(), reference.First(count)) / numeric::Norm(reference.First(count)) < 1e-9);
         double maximum_residual{};
         for (int mode = 6; mode < count; ++mode) {
-            const Eigen::VectorXd kx = k * vectors.col(mode), mx = m * vectors.col(mode);
-            maximum_residual = std::max(maximum_residual, (kx - values[mode] * mx).norm() / (kx.norm() + std::abs(values[mode]) * mx.norm()));
+            const auto vector = eigenpairs.Eigenvectors.ColumnsAt(size_t(mode), 1);
+            auto kx = numeric::SymmetricMultiply(stiffness, vector);
+            const auto mx = numeric::SymmetricMultiply(mass, vector);
+            const double kx_norm = numeric::Norm(kx.View()), mx_norm = numeric::Norm(mx.View());
+            numeric::AddScaled(-eigenpairs.Eigenvalues[size_t(mode)], mx.View(), kx.View());
+            maximum_residual = std::max(maximum_residual, numeric::Norm(kx.View()) / (kx_norm + std::abs(eigenpairs.Eigenvalues[size_t(mode)]) * mx_norm));
         }
         expect(maximum_residual < 1e-8) << maximum_residual;
     };
@@ -295,17 +311,20 @@ int main() {
         const modal::Tet10Assembler scaled{mesh, scaled_material};
         const auto [mass, stiffness] = scaled.AssembleLower();
         const double shift = std::pow(2 * std::numbers::pi * 20, 2);
-        const Eigen::SparseMatrix<double> shifted = stiffness + shift * mass;
-        Eigen::MatrixXd rhs(scaled.Dofs(), 4), solution(scaled.Dofs(), 4), reference(scaled.Dofs(), 4);
-        rhs.setRandom();
+        const auto shifted = numeric::Add(stiffness, shift, mass);
+        numeric::Matrix<double> rhs(scaled.Dofs(), 4), solution(scaled.Dofs(), 4), reference(scaled.Dofs(), 4);
+        std::mt19937 random{0};
+        std::uniform_real_distribution<double> distribution{-1, 1};
+        for (double &value : rhs) value = distribution(random);
         factor.SetShift(-shift);
         factor.Solve(rhs.data(), solution.data(), int(rhs.cols()));
         modal::AccelerateSparseCholesky accelerate{shifted};
         accelerate.Solve(rhs.data(), reference.data(), int(rhs.cols()));
-        const double residual_norm = (shifted.selfadjointView<Eigen::Lower>() * solution - rhs).norm();
-        const double residual = residual_norm / rhs.norm();
-        const double backward_error = residual_norm / (shifted.norm() * solution.norm() + rhs.norm());
-        const double difference = (solution - reference).norm() / reference.norm();
+        const auto action = numeric::SymmetricMultiply(shifted, solution.View());
+        const double residual_norm = DifferenceNorm(action.View(), rhs.View());
+        const double residual = residual_norm / numeric::Norm(rhs.View());
+        const double backward_error = residual_norm / (StoredNorm(shifted) * numeric::Norm(solution.View()) + numeric::Norm(rhs.View()));
+        const double difference = DifferenceNorm(solution.View(), reference.View()) / numeric::Norm(reference.View());
         expect(residual < 2e-8) << residual;
         expect(backward_error < 1e-12) << backward_error;
         expect(difference < 2e-8) << difference;
@@ -341,7 +360,7 @@ int main() {
         expect(deformed.Summary.Eigenvalues.size() == 12);
         expect(deformed_cold.Summary.Eigenvalues.size() == 12);
         expect(first.Summary.Eigenvalues == second.Summary.Eigenvalues);
-        expect(bool((first.Basis.array() == second.Basis.array()).all()));
+        expect(first.Basis.Values == second.Basis.Values);
         for (uint32_t mode = 6; mode < 12; ++mode) {
             expect(std::abs(second.Summary.Eigenvalues[mode] / first.Summary.Eigenvalues[mode] - 1) < 1e-8);
             expect(std::abs(changed.Summary.Eigenvalues[mode] / first.Summary.Eigenvalues[mode] - 1.5) < 1e-8);

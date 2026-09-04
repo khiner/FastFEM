@@ -5,7 +5,7 @@ The project began with FEM code from [MeshEditor commit `b1dbf2c`](https://githu
 
 ## Build
 
-The project requires macOS, C++23, CMake 3.28 or newer, and a CMake-discoverable Eigen installation.
+The project requires macOS, C++23, and CMake 3.28 or newer.
 
 ```sh
 git submodule update --init --recursive
@@ -57,7 +57,7 @@ A deterministic block shift-invert iteration extracts the modes, while Accelerat
 
 Pass a `SolveCache` to preserve the block pencil and symbolic factorization between compatible solve calls.
 `SolveTet10Modes` can seed a guarded block-subspace re-solve with modes from a geometry-compatible prior solution.
-Scalar Eigen matrices provide mass actions and independent certification.
+Project-owned column-major matrices call Accelerate BLAS and LAPACK directly for dense algebra and certification.
 
 ### Finite cell
 

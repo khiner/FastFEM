@@ -29,48 +29,16 @@ struct BlockPencil {
     std::vector<std::array<uint32_t, modal::Tet10Assembler::LowerBlocksPerElement>> ElementEntries;
 };
 
-uint32_t FindEntry(const BlockPencil &pencil, uint32_t row, uint32_t column) {
-    const auto begin = pencil.Rows.begin() + pencil.ColumnStarts[column];
-    const auto end = pencil.Rows.begin() + pencil.ColumnStarts[column + 1];
-    const auto found = std::lower_bound(begin, end, int(row));
-    if (found == end || *found != int(row)) throw std::logic_error("Tet10 Cholesky pencil pattern is incomplete.");
-    return uint32_t(found - pencil.Rows.begin());
-}
-
 BlockPencil MakePattern(const modal::Tet10Assembler &fem) {
     if (fem.NumNodes == 0 || fem.Elements().empty()) throw std::invalid_argument("Tet10 Cholesky requires a nonempty Tet10 mesh.");
-    BlockPencil pencil;
-    pencil.Nodes = int(fem.NumNodes);
-    std::vector<std::vector<int>> column_rows(fem.NumNodes);
-    for (const auto &element : fem.Elements()) {
-        for (uint32_t a = 0; a < modal::Tet10Assembler::NodesPerElement; ++a) {
-            for (uint32_t c = 0; c <= a; ++c) {
-                const uint32_t row = std::max(element.Nodes[a], element.Nodes[c]);
-                column_rows[std::min(element.Nodes[a], element.Nodes[c])].push_back(int(row));
-            }
-        }
-    }
-    pencil.ColumnStarts.resize(size_t(pencil.Nodes) + 1);
-    for (int column = 0; column < pencil.Nodes; ++column) {
-        auto &rows = column_rows[column];
-        std::ranges::sort(rows);
-        rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
-        pencil.ColumnStarts[column + 1] = pencil.ColumnStarts[column] + long(rows.size());
-        pencil.Rows.insert(pencil.Rows.end(), rows.begin(), rows.end());
-    }
+    BlockPencil pencil{
+        .Nodes = int(fem.NumNodes),
+        .ColumnStarts = fem.State->BlockColumnStarts,
+        .Rows = fem.State->BlockRows,
+        .ElementEntries = fem.State->ElementBlockEntries,
+    };
     pencil.Stiffness.resize(pencil.Rows.size());
     pencil.Mass.resize(pencil.Rows.size());
-    pencil.ElementEntries.resize(fem.Elements().size());
-    for (size_t element_index = 0; element_index < fem.Elements().size(); ++element_index) {
-        const auto &nodes = fem.Elements()[element_index].Nodes;
-        uint32_t pair{};
-        for (uint32_t a = 0; a < modal::Tet10Assembler::NodesPerElement; ++a) {
-            for (uint32_t c = 0; c <= a; ++c) {
-                const uint32_t row = std::max(nodes[a], nodes[c]), column = std::min(nodes[a], nodes[c]);
-                pencil.ElementEntries[element_index][pair++] = FindEntry(pencil, row, column);
-            }
-        }
-    }
     return pencil;
 }
 

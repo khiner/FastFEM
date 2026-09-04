@@ -1,14 +1,13 @@
 #include "MassPropertiesAccumulator.h"
-
-#include <Eigen/Eigenvalues>
+#include "numeric/Accelerate.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 
 namespace {
-quat QuaternionFromRotation(const Eigen::Matrix3f &rotation) {
-    const auto m = [&](int column, int row) { return rotation(row, column); };
+quat QuaternionFromRotation(const std::array<float, 9> &rotation) {
+    const auto m = [&](int column, int row) { return rotation[row + 3 * column]; };
     const std::array candidates{
         m(0, 0) + m(1, 1) + m(2, 2),
         m(0, 0) - m(1, 1) - m(2, 2),
@@ -49,16 +48,34 @@ void modal::MassPropertiesAccumulator::Add(dvec3 position, double volume) {
 MassProperties modal::MassPropertiesAccumulator::Finish(double density, double length_to_si) const {
     if (Volume <= 0) return {};
     const dvec3 local_center = FirstMoment / Volume, center = Origin + local_center;
-    Eigen::Matrix3d inertia;
-    inertia << Inertia[0], Inertia[3], Inertia[4], Inertia[3], Inertia[1], Inertia[5], Inertia[4], Inertia[5], Inertia[2];
-    const Eigen::Vector3d c{local_center.x, local_center.y, local_center.z};
-    inertia -= Volume * (c.squaredNorm() * Eigen::Matrix3d::Identity() - c * c.transpose());
-    inertia *= density * std::pow(length_to_si, 5);
+    std::array<double, 9> inertia{
+        Inertia[0],
+        Inertia[3],
+        Inertia[4],
+        Inertia[3],
+        Inertia[1],
+        Inertia[5],
+        Inertia[4],
+        Inertia[5],
+        Inertia[2],
+    };
+    const std::array c{local_center.x, local_center.y, local_center.z};
+    const double squared_norm = numeric::Dot(local_center, local_center);
+    for (size_t column = 0; column < 3; ++column)
+        for (size_t row = 0; row < 3; ++row)
+            inertia[row + 3 * column] -= Volume * ((row == column ? squared_norm : 0) - c[row] * c[column]);
+    for (double &value : inertia) value *= density * std::pow(length_to_si, 5);
 
-    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> decomposition{inertia};
-    const auto &values = decomposition.eigenvalues();
-    Eigen::Matrix3f axes = decomposition.eigenvectors().cast<float>();
-    if (axes.determinant() < 0) axes.col(0) = -axes.col(0);
+    std::array<double, 3> values{};
+    if (!numeric::SelfAdjointEigenSolve(inertia.data(), values.data(), 3)) return {};
+    std::array<float, 9> axes;
+    std::ranges::transform(inertia, axes.begin(), [](double value) { return float(value); });
+    const float determinant =
+        axes[0] * (axes[4] * axes[8] - axes[7] * axes[5]) -
+        axes[3] * (axes[1] * axes[8] - axes[7] * axes[2]) +
+        axes[6] * (axes[1] * axes[5] - axes[4] * axes[2]);
+    if (determinant < 0)
+        for (size_t row = 0; row < 3; ++row) axes[row] = -axes[row];
     return {
         density * Volume * std::pow(length_to_si, 3),
         vec3{center},

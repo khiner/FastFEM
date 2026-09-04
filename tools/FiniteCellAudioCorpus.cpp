@@ -42,14 +42,23 @@ bool Run(std::string_view name, uint32_t longitudinal, uint32_t count) {
         std::println(stderr, "audio geometry={} modes={}/{} did not converge", name, assembled.Eigenvalues.size(), result.Eigenvalues.size());
         return false;
     }
-    const double spectrum_error = (result.Eigenvalues.tail(count - 6) - assembled.Eigenvalues.tail(count - 6)).norm() /
-        assembled.Eigenvalues.tail(count - 6).norm();
+    double spectrum_difference{}, spectrum_norm{};
+    for (uint32_t mode = 6; mode < count; ++mode) {
+        spectrum_difference += std::pow(result.Eigenvalues[mode] - assembled.Eigenvalues[mode], 2);
+        spectrum_norm += std::pow(assembled.Eigenvalues[mode], 2);
+    }
+    const double spectrum_error = std::sqrt(spectrum_difference / spectrum_norm);
     const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
-    Eigen::Index worst_physical{};
-    const double residual = result_certification.RelativeResiduals.tail(count - 6).maxCoeff(&worst_physical);
-    const double recurrence_residual = result.RelativeResiduals.tail(count - 6).maxCoeff();
-    const uint32_t worst_mode = uint32_t(worst_physical) + 6;
-    const uint32_t uncertified = uint32_t((result_certification.RelativeResiduals.tail(count - 6).array() >= tolerance).count());
+    uint32_t worst_mode{6}, uncertified{};
+    double residual{};
+    for (uint32_t mode = 6; mode < count; ++mode) {
+        if (result_certification.RelativeResiduals[mode] > residual) {
+            residual = result_certification.RelativeResiduals[mode];
+            worst_mode = mode;
+        }
+        uncertified += result_certification.RelativeResiduals[mode] >= tolerance;
+    }
+    const double recurrence_residual = numeric::Maximum(result.RelativeResiduals.Last(count - 6));
     const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
         operation, assembled.Eigenvalues, assembled.Eigenvectors, result.Eigenvectors
     );

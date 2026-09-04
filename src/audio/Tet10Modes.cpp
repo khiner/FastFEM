@@ -1,6 +1,3 @@
-// Eigen delegates large dense products in block eigensolver orthogonalization to Accelerate BLAS.
-#define EIGEN_USE_BLAS
-
 #include "Tet10Modes.h"
 
 #include "AcousticMaterialProperties.h"
@@ -12,7 +9,6 @@
 #include "numeric/vec3.h"
 
 #include "mesh/TetMesh.h"
-#include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -88,8 +84,10 @@ std::shared_ptr<const modal::AssembledPencil> AcquireAssembly(
     }
     if (cache.Reuse->Assembly && cache.Reuse->AssemblyMaterial && cache.Reuse->AssemblyMaterial->PoissonRatio == properties.PoissonRatio) {
         auto scaled = std::make_shared<modal::AssembledPencil>(*cache.Reuse->Assembly);
-        scaled->Mass *= properties.Density / cache.Reuse->AssemblyMaterial->Density;
-        scaled->Stiffness *= properties.YoungModulus / cache.Reuse->AssemblyMaterial->YoungModulus;
+        const double mass_scale = properties.Density / cache.Reuse->AssemblyMaterial->Density;
+        const double stiffness_scale = properties.YoungModulus / cache.Reuse->AssemblyMaterial->YoungModulus;
+        for (double &value : scaled->Mass.Values) value *= mass_scale;
+        for (double &value : scaled->Stiffness.Values) value *= stiffness_scale;
         cache.Reuse->Assembly = std::move(scaled);
         reused = true;
     } else {
@@ -223,8 +221,8 @@ struct Tet10ShiftInvert {
 
 modal::eigensolver::GeneralizedEigenResult SolveTet10Eigenpairs(
     const modal::Tet10Assembler &fem,
-    const Eigen::SparseMatrix<double> &M,
-    const Eigen::SparseMatrix<double> &K,
+    const numeric::SparseMatrix &M,
+    const numeric::SparseMatrix &K,
     Tet10SolveOptions opts,
     modal::SolveProfile &profile
 ) {
@@ -241,8 +239,8 @@ modal::eigensolver::GeneralizedEigenResult SolveTet10Eigenpairs(
     const auto &reuse = opts.Reuse;
     OpType op{fem, opts.Material, profile.Factorize, profile.OpSolve, profile.SymbolicReuse, reuse.Cache};
     if (monitor) monitor->Progress.store(0.3f, std::memory_order_relaxed);
-    const bool use_subspace = reuse.SeedBasis != nullptr && reuse.SeedBasis->rows() == Eigen::Index(n) &&
-        reuse.SeedBasis->cols() >= Eigen::Index(fem_n_modes);
+    const bool use_subspace = reuse.SeedBasis != nullptr && reuse.SeedBasis->rows() == n &&
+        reuse.SeedBasis->cols() >= fem_n_modes;
     const auto eig_start = std::chrono::steady_clock::now();
     const auto subspace = modal::eigensolver::SolveGeneralizedEigenproblem(
         op, M, K,
@@ -271,7 +269,7 @@ modal::eigensolver::GeneralizedEigenResult SolveTet10Eigenpairs(
     if (subspace.RelativeResiduals.size()) {
         const uint32_t first_physical = std::min(6u, fem_n_modes);
         if (first_physical < fem_n_modes)
-            profile.PhysicalResidual = subspace.RelativeResiduals.tail(fem_n_modes - first_physical).maxCoeff();
+            profile.PhysicalResidual = numeric::Maximum(subspace.RelativeResiduals.Last(fem_n_modes - first_physical));
         profile.MassOrthogonality = subspace.MassOrthogonalityError;
     }
     if (!subspace.Converged) return subspace;
@@ -293,7 +291,7 @@ modal::ModalResult modal::SolveTet10Modes(const TetMesh &input_tets, const Acous
     const auto assembly = Timed(profile.Assemble, [&] { return AcquireAssembly(cache, fem, material, profile.AssemblyReuse); });
     const auto &M = assembly->Mass, &K = assembly->Stiffness;
     profile.Dofs = fem.Dofs();
-    profile.StiffnessNonZeros = K.nonZeros();
+    profile.StiffnessNonZeros = uint32_t(K.NonZeros());
     if (monitor && monitor->Cancelled()) return {};
 
     // Sample each excitation position at its nearest tetrahedral point and convert the result to node-local coordinates.
@@ -338,10 +336,10 @@ modal::ModalResult modal::SolveTet10Modes(const TetMesh &input_tets, const Acous
 
     std::vector<std::vector<vec3>> shapes(excite_points.size(), std::vector<vec3>(eigenpairs.Eigenvalues.size()));
     for (size_t point = 0; point < excite_points.size(); ++point)
-        for (Eigen::Index mode = 0; mode < eigenpairs.Eigenvalues.size(); ++mode)
+        for (size_t mode = 0; mode < eigenpairs.Eigenvalues.size(); ++mode)
             for (uint component = 0; component < 3; ++component)
                 shapes[point][size_t(mode)][component] = eigenpairs.Eigenvectors(3 * excite_points[point] + component, mode);
-    Eigen::MatrixXf basis;
-    if (reuse.KeepBasis) basis = eigenpairs.Eigenvectors.cast<float>();
+    numeric::Matrix<float> basis;
+    if (reuse.KeepBasis) basis = numeric::Cast<float>(eigenpairs.Eigenvectors.View());
     return BuildModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config, std::move(positions), baked_scale, std::move(mass_props), profile, std::move(basis), std::move(sample_point_of));
 }

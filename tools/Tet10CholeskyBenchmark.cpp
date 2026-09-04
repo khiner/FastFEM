@@ -4,8 +4,6 @@
 #include "audio/Tet10Cholesky.h"
 #include "mesh/Tets.h"
 
-#include <Eigen/Core>
-
 #include <algorithm>
 #include <bit>
 #include <chrono>
@@ -31,7 +29,7 @@ double Median(std::vector<double> values) {
     return values.size() % 2 ? values[middle] : 0.5 * (values[middle - 1] + values[middle]);
 }
 
-uint64_t Hash(const Eigen::MatrixXd &matrix) {
+uint64_t Hash(const numeric::Matrix<double> &matrix) {
     uint64_t hash{1469598103934665603ull};
     for (const double value : std::span{matrix.data(), size_t(matrix.size())}) {
         hash ^= std::bit_cast<uint64_t>(value);
@@ -55,15 +53,15 @@ struct Result {
 template<class Setup>
 Result Measure(
     int repetitions, Setup &&setup,
-    const std::array<double, 2> &shifts, const std::array<Eigen::SparseMatrix<double>, 2> &shifted,
-    const Eigen::MatrixXd &rhs
+    const std::array<double, 2> &shifts, const std::array<numeric::SparseMatrix, 2> &shifted,
+    const numeric::Matrix<double> &rhs
 ) {
     const auto setup_start = Clock::now();
     auto factor = std::forward<Setup>(setup)();
     Result result{.Setup = Seconds(setup_start)};
     std::vector<double> numeric_seconds, solve_seconds;
-    Eigen::MatrixXd solution(rhs.rows(), rhs.cols());
-    std::array<Eigen::MatrixXd, 2> first;
+    numeric::Matrix<double> solution(rhs.rows(), rhs.cols());
+    std::array<numeric::Matrix<double>, 2> first;
     std::array<bool, 2> seen{};
     numeric_seconds.reserve(repetitions);
     solve_seconds.reserve(repetitions);
@@ -80,13 +78,15 @@ Result Measure(
             first[shift] = solution;
             seen[shift] = true;
         } else {
-            result.Deterministic &= (solution.array() == first[shift].array()).all();
+            result.Deterministic &= solution.Values == first[shift].Values;
         }
     }
     result.Numeric = Median(std::move(numeric_seconds));
     result.Solve = Median(std::move(solve_seconds));
     const auto &final_shifted = shifted[size_t(repetitions - 1) % shifted.size()];
-    result.Residual = (final_shifted.selfadjointView<Eigen::Lower>() * solution - rhs).norm() / rhs.norm();
+    numeric::Matrix<double> residual = numeric::SymmetricMultiply(final_shifted, solution.View());
+    numeric::AddScaled(-1, rhs.View(), residual.View());
+    result.Residual = numeric::Norm(residual.View()) / numeric::Norm(rhs.View());
     result.SolutionHash = Hash(solution);
     return result;
 }
@@ -97,21 +97,21 @@ void Print(const Result &result) {
 
 template<class NativeSetup>
 void BenchmarkPencil(
-    std::string_view name, const Eigen::SparseMatrix<double> &mass, const Eigen::SparseMatrix<double> &stiffness,
+    std::string_view name, const numeric::SparseMatrix &mass, const numeric::SparseMatrix &stiffness,
     int repetitions, int width, NativeSetup &&native_setup
 ) {
     const double shift = std::pow(2 * std::numbers::pi * 20, 2);
     const std::array shifts{shift, 1.001 * shift};
-    const std::array<Eigen::SparseMatrix<double>, 2> shifted{
-        stiffness + shifts[0] * mass,
-        stiffness + shifts[1] * mass,
+    const std::array<numeric::SparseMatrix, 2> shifted{
+        numeric::Add(stiffness, shifts[0], mass),
+        numeric::Add(stiffness, shifts[1], mass),
     };
-    Eigen::MatrixXd rhs(stiffness.rows(), width);
-    for (Eigen::Index column = 0; column < rhs.cols(); ++column)
-        for (Eigen::Index row = 0; row < rhs.rows(); ++row)
+    numeric::Matrix<double> rhs{size_t(stiffness.rows()), size_t(width)};
+    for (size_t column = 0; column < rhs.cols(); ++column)
+        for (size_t row = 0; row < rhs.rows(); ++row)
             rhs(row, column) = std::sin(0.013 * double(row + 1) + 0.17 * double(column + 1));
 
-    std::println("{} dofs={} matrix_nnz={}", name, stiffness.rows(), shifted.front().nonZeros());
+    std::println("{} dofs={} matrix_nnz={}", name, stiffness.rows(), shifted.front().NonZeros());
     Print(Measure(repetitions, std::forward<NativeSetup>(native_setup), shifts, shifted, rhs));
     std::println("peak_resident={}B", PeakResidentBytes());
 }

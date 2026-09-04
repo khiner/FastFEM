@@ -70,12 +70,12 @@ struct BarFrequencies {
 };
 
 BarFrequencies ClassifyBarFrequencies(
-    const Eigen::MatrixXd &sampled, const Eigen::VectorXd &eigenvalues, dvec3 extent, uvec3 samples,
+    const numeric::Matrix<double> &sampled, const numeric::Vector<double> &eigenvalues, dvec3 extent, uvec3 samples,
     uint32_t first_mode = 6
 ) {
     BarFrequencies result;
-    for (Eigen::Index mode = first_mode; mode < eigenvalues.size(); ++mode) {
-        const Eigen::Index column = mode - first_mode;
+    for (size_t mode = first_mode; mode < eigenvalues.size(); ++mode) {
+        const size_t column = mode - first_mode;
         double axial{}, lateral_y{}, lateral_z{}, rotation{}, total{};
         for (uint32_t x = 0; x < samples.x; ++x) {
             double circulation{}, radius_squared{};
@@ -128,27 +128,46 @@ std::pair<BarFrequencies, BarFrequencies> SampleBarFrequencies(
                 finite_stencils.push_back(*finite_stencil);
                 tet_stencils.push_back(*tet_stencil);
             }
-    const Eigen::MatrixXd finite_sampled = finite_cell_benchmark::SampleModes(finite_stencils, finite_modes.Eigenvectors, 6);
-    const Eigen::MatrixXd tet_sampled = finite_cell_benchmark::SampleModes(tet_stencils, tet_modes.Eigenvectors, 6);
+    const auto finite_sampled = finite_cell_benchmark::SampleModes(finite_stencils, finite_modes.Eigenvectors, 6);
+    const auto tet_sampled = finite_cell_benchmark::SampleModes(tet_stencils, tet_modes.Eigenvectors, 6);
     return {
         ClassifyBarFrequencies(finite_sampled, finite_modes.Eigenvalues, extent, samples),
         ClassifyBarFrequencies(tet_sampled, tet_modes.Eigenvalues, extent, samples),
     };
 }
+
+double DifferenceNorm(numeric::MatrixView<const double> a, numeric::MatrixView<const double> b) {
+    auto difference = numeric::Copy(a);
+    numeric::AddScaled(-1, b, difference.View());
+    return numeric::Norm(difference.View());
+}
+
+double DifferenceNorm(numeric::VectorView<const double> a, numeric::VectorView<const double> b) {
+    auto difference = numeric::Copy(a);
+    numeric::AddScaled(-1, b, difference.View());
+    return numeric::Norm(difference.View());
+}
+
+double MatrixDot(numeric::MatrixView<const double> a, numeric::MatrixView<const double> b) {
+    double result{};
+    for (size_t column = 0; column < a.cols(); ++column)
+        result += numeric::Dot(a.Column(column), b.Column(column));
+    return result;
+}
 } // namespace
 
 suite FiniteCellTests = [] {
     "Accelerate symmetric cross-Gram matches explicit symmetrization"_test = [] {
-        Eigen::MatrixXd a(257, 37), b(257, 37), accelerated(37, 37);
-        for (Eigen::Index column = 0; column < a.cols(); ++column)
-            for (Eigen::Index row = 0; row < a.rows(); ++row) {
+        numeric::Matrix<double> a(257, 37), b(257, 37), accelerated(37, 37);
+        for (size_t column = 0; column < a.cols(); ++column)
+            for (size_t row = 0; row < a.rows(); ++row) {
                 a(row, column) = std::sin(0.17 * double(row + 1) + 0.31 * double(column + 1));
                 b(row, column) = std::cos(0.23 * double(row + 1) - 0.29 * double(column + 1));
             }
         numeric::SymmetricCrossGram(a.data(), b.data(), accelerated.data(), uint32_t(a.rows()), uint32_t(a.cols()));
-        const Eigen::MatrixXd product = a.transpose() * b;
-        const Eigen::MatrixXd expected = 0.5 * (product + product.transpose());
-        expect(lt((accelerated - expected).norm() / expected.norm(), 2e-15));
+        auto expected = numeric::TransposeMultiply(a.View(), b.View());
+        numeric::Symmetrize(expected.View());
+        expect(lt(DifferenceNorm(accelerated.View(), expected.View()) / numeric::Norm(expected.View()), 2e-15));
     };
 
     "cross-discretization mode-shape interpolation is affine exact"_test = [] {
@@ -270,7 +289,7 @@ suite FiniteCellTests = [] {
             if (tet_modes.Eigenvalues.size() != Count || finite_modes.Eigenvalues.size() != Count) continue;
             const auto finite_certification = modal::finite_cell::CertifyEigenpairs(finite, finite_modes.Eigenvalues, finite_modes.Eigenvectors);
             expect(tet_modes.RelativeResidual < 1e-7) << level;
-            expect(finite_certification.RelativeResiduals.tail(Count - 6).maxCoeff() < 1e-7) << level;
+            expect(numeric::Maximum(finite_certification.RelativeResiduals.Last(Count - 6)) < 1e-7) << level;
             const auto [finite_frequencies, tet_frequencies] =
                 SampleBarFrequencies(finite, finite_modes, mesh, tet, tet_modes, extent);
             finite_frequencies_by_level[level] = finite_frequencies;
@@ -324,9 +343,9 @@ suite FiniteCellTests = [] {
             expect(production.Eigenvalues.size() == Count) << name;
             if (assembled.Eigenvalues.size() != Count || production.Eigenvalues.size() != Count) continue;
             const auto production_certification = modal::finite_cell::CertifyEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
-            const double spectrum_error = (production.Eigenvalues.tail(Count - 6) - assembled.Eigenvalues.tail(Count - 6)).norm() /
-                assembled.Eigenvalues.tail(Count - 6).norm();
-            const double residual = production_certification.RelativeResiduals.tail(Count - 6).maxCoeff();
+            const double spectrum_error = DifferenceNorm(production.Eigenvalues.Last(Count - 6), assembled.Eigenvalues.Last(Count - 6)) /
+                numeric::Norm(assembled.Eigenvalues.Last(Count - 6));
+            const double residual = numeric::Maximum(production_certification.RelativeResiduals.Last(Count - 6));
             const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
                 operation, assembled.Eigenvalues, assembled.Eigenvectors, production.Eigenvectors
             );
@@ -350,12 +369,12 @@ suite FiniteCellTests = [] {
                 {.Cells = {4, 3, 2}, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.27}
             );
             const auto assembled = operation.AssembleLower();
-            Eigen::MatrixXd input(operation.Dofs(), Width), mass(operation.Dofs(), Width);
-            Eigen::MatrixXd paired_mass(operation.Dofs(), Width), paired_shifted(operation.Dofs(), Width);
-            Eigen::MatrixXd expanded_packed_cut_mass(operation.Dofs(), Width), expanded_packed_cut_shifted(operation.Dofs(), Width);
-            Eigen::MatrixXd stiffness(operation.Dofs(), Width), shifted(operation.Dofs(), Width);
-            for (Eigen::Index column = 0; column < input.cols(); ++column)
-                for (Eigen::Index row = 0; row < input.rows(); ++row)
+            numeric::Matrix<double> input(operation.Dofs(), Width), mass(operation.Dofs(), Width);
+            numeric::Matrix<double> paired_mass(operation.Dofs(), Width), paired_shifted(operation.Dofs(), Width);
+            numeric::Matrix<double> expanded_packed_cut_mass(operation.Dofs(), Width), expanded_packed_cut_shifted(operation.Dofs(), Width);
+            numeric::Matrix<double> stiffness(operation.Dofs(), Width), shifted(operation.Dofs(), Width);
+            for (size_t column = 0; column < input.cols(); ++column)
+                for (size_t row = 0; row < input.rows(); ++row)
                     input(row, column) = std::sin(0.31 * double(row + 1) + 0.17 * double(column + 1));
             operation.ApplyMass(input.data(), mass.data(), Width);
             operation.ApplyStiffness(input.data(), stiffness.data(), Width);
@@ -365,12 +384,13 @@ suite FiniteCellTests = [] {
             operation.ApplyMassShiftedExpandedPackedCut(
                 packed_cut, input.data(), expanded_packed_cut_mass.data(), expanded_packed_cut_shifted.data(), Width
             );
-            const Eigen::MatrixXd assembled_mass = assembled.Mass.selfadjointView<Eigen::Lower>() * input;
-            const Eigen::MatrixXd assembled_stiffness = assembled.Stiffness.selfadjointView<Eigen::Lower>() * input;
-            const double mass_error = (mass - assembled_mass).norm() / assembled_mass.norm();
-            const double stiffness_error = (stiffness - assembled_stiffness).norm() / assembled_stiffness.norm();
-            const double shifted_error = (shifted - assembled_stiffness - 19 * assembled_mass).norm() /
-                (assembled_stiffness + 19 * assembled_mass).norm();
+            const auto assembled_mass = numeric::SymmetricMultiply(assembled.Mass, input.View());
+            const auto assembled_stiffness = numeric::SymmetricMultiply(assembled.Stiffness, input.View());
+            const double mass_error = DifferenceNorm(mass.View(), assembled_mass.View()) / numeric::Norm(assembled_mass.View());
+            const double stiffness_error = DifferenceNorm(stiffness.View(), assembled_stiffness.View()) / numeric::Norm(assembled_stiffness.View());
+            auto assembled_shifted = assembled_stiffness;
+            numeric::AddScaled(19, assembled_mass.View(), assembled_shifted.View());
+            const double shifted_error = DifferenceNorm(shifted.View(), assembled_shifted.View()) / numeric::Norm(assembled_shifted.View());
             std::println(
                 "Q2 finite-cell action error: mass {:.3e}, stiffness {:.3e}, shifted {:.3e}",
                 mass_error, stiffness_error, shifted_error
@@ -378,10 +398,10 @@ suite FiniteCellTests = [] {
             expect(mass_error < 2e-14);
             expect(stiffness_error < 2e-14);
             expect(shifted_error < 2e-14);
-            expect((paired_mass.array() == mass.array()).all());
-            expect((paired_shifted.array() == shifted.array()).all());
-            expect((expanded_packed_cut_mass - paired_mass).norm() / paired_mass.norm() < 2e-14);
-            expect((expanded_packed_cut_shifted - paired_shifted).norm() / paired_shifted.norm() < 2e-14);
+            expect(paired_mass.Values == mass.Values);
+            expect(paired_shifted.Values == shifted.Values);
+            expect(DifferenceNorm(expanded_packed_cut_mass.View(), paired_mass.View()) / numeric::Norm(paired_mass.View()) < 2e-14);
+            expect(DifferenceNorm(expanded_packed_cut_shifted.View(), paired_shifted.View()) / numeric::Norm(paired_shifted.View()) < 2e-14);
             for (uint32_t node = 0; node < operation.Nodes.size(); ++node) {
                 uint32_t colors{};
                 for (uint32_t entry = operation.NodeOccurrenceOffsets[node]; entry < operation.NodeOccurrenceOffsets[node + 1]; ++entry) {
@@ -412,13 +432,13 @@ suite FiniteCellTests = [] {
                 expect(repeated.Quadrature[point].Fictitious == fitted.Quadrature[point].Fictitious);
             }
         constexpr uint32_t Width{3};
-        Eigen::MatrixXd input(octree.Dofs(), Width), expected(octree.Dofs(), Width), actual(octree.Dofs(), Width);
-        for (Eigen::Index column = 0; column < input.cols(); ++column)
-            for (Eigen::Index row = 0; row < input.rows(); ++row)
+        numeric::Matrix<double> input(octree.Dofs(), Width), expected(octree.Dofs(), Width), actual(octree.Dofs(), Width);
+        for (size_t column = 0; column < input.cols(); ++column)
+            for (size_t row = 0; row < input.rows(); ++row)
                 input(row, column) = std::cos(0.17 * double(row + 1) + 0.11 * double(column + 1));
         octree.ApplyShifted(input.data(), expected.data(), Width, 13);
         fitted.ApplyShifted(input.data(), actual.data(), Width, 13);
-        const double action_error = (actual - expected).norm() / expected.norm();
+        const double action_error = DifferenceNorm(actual.View(), expected.View()) / numeric::Norm(expected.View());
         const uint64_t negative_weights = std::ranges::count_if(
             fitted.Quadrature, [](const auto &point) { return point.Weight < 0; }
         );
@@ -427,7 +447,7 @@ suite FiniteCellTests = [] {
         const auto scaled_fitted = modal::finite_cell::WithFictitiousScale(fitted, 1e-4);
         scaled_octree.ApplyShifted(input.data(), expected.data(), Width, 13);
         scaled_fitted.ApplyShifted(input.data(), actual.data(), Width, 13);
-        const double scaled_error = (actual - expected).norm() / expected.norm();
+        const double scaled_error = DifferenceNorm(actual.View(), expected.View()) / numeric::Norm(expected.View());
 
         constexpr uint32_t ModeCount{18}, ComparedCount{12};
         const double shift = std::pow(2 * std::numbers::pi * 20, 2);
@@ -437,11 +457,10 @@ suite FiniteCellTests = [] {
         expect(fitted_modes.Eigenvalues.size() == ModeCount);
         double spectrum_error{std::numeric_limits<double>::infinity()};
         if (octree_modes.Eigenvalues.size() == ModeCount && fitted_modes.Eigenvalues.size() == ModeCount)
-            spectrum_error =
-                (fitted_modes.Eigenvalues.segment(6, ComparedCount - 6) -
-                 octree_modes.Eigenvalues.segment(6, ComparedCount - 6))
-                    .norm() /
-                octree_modes.Eigenvalues.segment(6, ComparedCount - 6).norm();
+            spectrum_error = DifferenceNorm(
+                                 fitted_modes.Eigenvalues.Subvector(6, ComparedCount - 6), octree_modes.Eigenvalues.Subvector(6, ComparedCount - 6)
+                             ) /
+                numeric::Norm(octree_modes.Eigenvalues.Subvector(6, ComparedCount - 6));
         std::println(
             "signed moment fitting: {} / {} points, {} negative weights, build {:.3f} / {:.3f} s, "
             "action {:.3e}, scaled {:.3e}, spectrum {:.3e}",
@@ -456,7 +475,7 @@ suite FiniteCellTests = [] {
         expect(spectrum_error < 1e-10);
         if (fitted_modes.Eigenvalues.size() == ModeCount) {
             const auto fitted_certification = modal::finite_cell::CertifyEigenpairs(fitted, fitted_modes.Eigenvalues, fitted_modes.Eigenvectors);
-            expect(fitted_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff() < 1e-8);
+            expect(numeric::Maximum(fitted_certification.RelativeResiduals.Last(ModeCount - 6)) < 1e-8);
             expect(fitted_certification.MassOrthogonalityError < 1e-10);
         }
     };
@@ -478,30 +497,32 @@ suite FiniteCellTests = [] {
             }
             expect(scale_error < 1e-10);
             const uint32_t coarse_dofs = 3 * operation.NumP1Nodes;
-            Eigen::MatrixXd coarse(coarse_dofs, Width), fine(operation.Dofs(), Width);
-            for (Eigen::Index column = 0; column < Width; ++column) {
-                for (Eigen::Index row = 0; row < coarse.rows(); ++row)
+            numeric::Matrix<double> coarse(coarse_dofs, Width), fine(operation.Dofs(), Width);
+            for (size_t column = 0; column < Width; ++column) {
+                for (size_t row = 0; row < coarse.rows(); ++row)
                     coarse(row, column) = std::sin(0.19 * double(row + 1) + 0.11 * double(column + 1));
-                for (Eigen::Index row = 0; row < fine.rows(); ++row)
+                for (size_t row = 0; row < fine.rows(); ++row)
                     fine(row, column) = std::cos(0.23 * double(row + 1) - 0.07 * double(column + 1));
             }
-            Eigen::MatrixXd prolonged(operation.Dofs(), Width), restricted(coarse_dofs, Width);
+            numeric::Matrix<double> prolonged(operation.Dofs(), Width), restricted(coarse_dofs, Width);
             operation.ProlongP1(coarse.data(), prolonged.data(), Width);
             operation.RestrictP1(fine.data(), restricted.data(), Width);
-            const double adjoint_error = std::abs(prolonged.cwiseProduct(fine).sum() - coarse.cwiseProduct(restricted).sum()) /
-                std::max(std::abs(prolonged.cwiseProduct(fine).sum()), 1.0);
+            const double fine_product = MatrixDot(prolonged.View(), fine.View());
+            const double adjoint_error = std::abs(fine_product - MatrixDot(coarse.View(), restricted.View())) /
+                std::max(std::abs(fine_product), 1.0);
 
-            Eigen::MatrixXd fine_action(operation.Dofs(), Width), coarse_action(coarse_dofs, Width);
+            numeric::Matrix<double> fine_action(operation.Dofs(), Width), coarse_action(coarse_dofs, Width);
             operation.ApplyShifted(prolonged.data(), fine_action.data(), Width, Alpha);
             operation.RestrictP1(fine_action.data(), coarse_action.data(), Width);
             const auto coarse_matrix = modal::finite_cell::AssembleP1ShiftedLower(operation, Alpha);
-            const Eigen::MatrixXd assembled_action = coarse_matrix.selfadjointView<Eigen::Lower>() * coarse;
-            const double galerkin_error = (coarse_action - assembled_action).norm() / assembled_action.norm();
+            const auto assembled_action = numeric::SymmetricMultiply(coarse_matrix, coarse.View());
+            const double galerkin_error = DifferenceNorm(coarse_action.View(), assembled_action.View()) / numeric::Norm(assembled_action.View());
 
             const auto assembled = operation.AssembleLower();
-            const Eigen::VectorXd diagonal = modal::finite_cell::ShiftedDiagonal(operation, Alpha);
-            const Eigen::VectorXd assembled_diagonal = assembled.Stiffness.diagonal() + Alpha * assembled.Mass.diagonal();
-            const double diagonal_error = (diagonal - assembled_diagonal).norm() / assembled_diagonal.norm();
+            const auto diagonal = modal::finite_cell::ShiftedDiagonal(operation, Alpha);
+            auto assembled_diagonal = assembled.Stiffness.Diagonal();
+            numeric::AddScaled(Alpha, assembled.Mass.Diagonal().View(), assembled_diagonal.View());
+            const double diagonal_error = DifferenceNorm(diagonal.View(), assembled_diagonal.View()) / numeric::Norm(assembled_diagonal.View());
             std::println(
                 "Q2 P1 transfer: {} fine / {} coarse dofs, adjoint {:.3e}, Galerkin {:.3e}, diagonal {:.3e}",
                 operation.Dofs(), coarse_dofs, adjoint_error, galerkin_error, diagonal_error
@@ -524,11 +545,11 @@ suite FiniteCellTests = [] {
         if (result.Eigenvalues.size() != 12) return;
         expect(operation.Profile.CutCells == 0_u);
         expect(std::abs(operation.Profile.PhysicalVolume / (extent.x * extent.y * extent.z) - 1) < 1e-12);
-        expect(result.Eigenvalues.head(6).cwiseAbs().maxCoeff() < 1e-3);
+        expect(numeric::MaximumAbsolute(result.Eigenvalues.First(6)) < 1e-3);
         const auto certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
-        expect(certification.RelativeResiduals.tail(6).maxCoeff() < 1e-8);
+        expect(numeric::Maximum(certification.RelativeResiduals.Last(6)) < 1e-8);
         expect(certification.MassOrthogonalityError < 1e-8);
-        const double residual_difference = (certification.RelativeResiduals.tail(6) - result.RelativeResiduals.tail(6)).norm();
+        const double residual_difference = DifferenceNorm(certification.RelativeResiduals.Last(6), result.RelativeResiduals.Last(6));
         expect(residual_difference < 1e-12) << residual_difference;
     };
 
@@ -546,16 +567,17 @@ suite FiniteCellTests = [] {
         expect(volume_error < 0.015);
         expect(operation.Profile.CutCells > 0_u);
         const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
-        expect(result_certification.RelativeResiduals.tail(14).maxCoeff() < 1e-7);
+        expect(numeric::Maximum(result_certification.RelativeResiduals.Last(14)) < 1e-7);
         expect(result_certification.MassOrthogonalityError < 1e-8);
 
         double longitudinal = std::numeric_limits<double>::infinity();
-        for (Eigen::Index mode = 6; mode < result.Eigenvalues.size(); ++mode) {
-            const auto vector = result.Eigenvectors.col(mode);
+        for (size_t mode = 6; mode < result.Eigenvalues.size(); ++mode) {
+            const auto vector = result.Eigenvectors.Column(mode);
             double axial{}, total{};
-            for (Eigen::Index node = 0; node < vector.size() / 3; ++node) {
+            for (size_t node = 0; node < vector.size() / 3; ++node) {
                 axial += vector[3 * node] * vector[3 * node];
-                total += vector.segment<3>(3 * node).squaredNorm();
+                for (size_t component = 0; component < 3; ++component)
+                    total += vector[3 * node + component] * vector[3 * node + component];
             }
             if (axial / total > 0.8)
                 longitudinal = std::min(longitudinal, std::sqrt(std::max(0.0, result.Eigenvalues[mode])) / (2 * std::numbers::pi));
@@ -598,7 +620,7 @@ suite FiniteCellTests = [] {
         expect(operation.Profile.QuadraturePoints < conservative.Profile.QuadraturePoints);
         expect(std::abs(operation.Profile.PhysicalVolume - conservative.Profile.PhysicalVolume) < 1e-14);
         expect(volume_error < 0.04);
-        expect((assembled.Mass.diagonal().array() > 0).all());
+        expect(std::ranges::all_of(assembled.Mass.Diagonal(), [](double value) { return value > 0; }));
     };
 };
 

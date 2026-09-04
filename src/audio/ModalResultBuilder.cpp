@@ -104,7 +104,7 @@ modal::ModalResult modal::BuildModalResult(
     std::vector<double> eigenvalues, std::vector<std::vector<vec3>> shapes,
     const AcousticMaterialProperties &material, const SolverConfig &config,
     std::vector<vec3> positions, vec3 baked_scale, MassProperties mass_properties,
-    SolveProfile profile, Eigen::MatrixXf basis, std::vector<uint32_t> sample_point_of
+    SolveProfile profile, numeric::Matrix<float> basis, std::vector<uint32_t> sample_point_of
 ) {
     ModalEigenSummary summary{
         .Eigenvalues = std::move(eigenvalues),

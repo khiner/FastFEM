@@ -3,15 +3,14 @@
 #include "audio/Tet10Modes.h"
 #include "mesh/TetMesh.h"
 
-#include <Eigen/Core>
-
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <numbers>
 
 struct Tet10Eigenpairs {
-    Eigen::VectorXd Eigenvalues;
-    Eigen::MatrixXd Eigenvectors;
+    numeric::Vector<double> Eigenvalues;
+    numeric::Matrix<double> Eigenvectors;
     double RelativeResidual{};
 };
 
@@ -32,11 +31,11 @@ inline Tet10Eigenpairs SolveTet10Eigenpairs(
         },
         {.Cache = &cache, .KeepBasis = true}
     );
+    numeric::Vector<double> eigenvalues(result.Summary.Eigenvalues.size());
+    std::ranges::copy(result.Summary.Eigenvalues, eigenvalues.begin());
     return {
-        .Eigenvalues = Eigen::Map<const Eigen::VectorXd>{
-            result.Summary.Eigenvalues.data(), Eigen::Index(result.Summary.Eigenvalues.size())
-        },
-        .Eigenvectors = result.Basis.cast<double>(),
+        .Eigenvalues = std::move(eigenvalues),
+        .Eigenvectors = numeric::Cast<double>(result.Basis.View()),
         .RelativeResidual = result.Profile.PhysicalResidual,
     };
 }

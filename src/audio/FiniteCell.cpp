@@ -2,13 +2,12 @@
 
 #include "finite_cell/OctreeQuadrature.h"
 #include "finite_cell/OperatorValidation.h"
+#include "numeric/Accelerate.h"
 
 #include <dispatch/dispatch.h>
 
 #define ACCELERATE_NEW_LAPACK
 #include <Accelerate/Accelerate.h>
-
-#include <Eigen/QR>
 
 #include <algorithm>
 #include <array>
@@ -380,7 +379,7 @@ struct CellIntegrator {
 };
 
 constexpr uint32_t MomentDegree{2 * BasisOrder}, MomentWidth{MomentDegree + 1}, MomentCount{MomentWidth * MomentWidth * MomentWidth};
-using MomentVector = Eigen::Matrix<double, MomentCount, 1>;
+using MomentVector = std::array<double, MomentCount>;
 
 MomentVector MomentBasis(const dvec3 &point) {
     std::array<std::array<double, MomentWidth>, 3> legendre{};
@@ -416,34 +415,44 @@ std::optional<MomentFitResult> FitCutCellMoments(
 
     std::array<double, 2> measures{};
     std::array<MomentVector, 2> moments{};
-    for (auto &moment : moments) moment.setZero();
     for (const auto &sample : uncompressed) {
         const uint32_t region = sample.Fictitious;
         measures[region] += sample.Weight;
-        moments[region] += sample.Weight * MomentBasis(sample.Reference);
+        const auto basis = MomentBasis(sample.Reference);
+        for (uint32_t moment = 0; moment < MomentCount; ++moment) moments[region][moment] += sample.Weight * basis[moment];
     }
     for (uint32_t region = 0; region < 2; ++region)
-        if (measures[region] > 0) moments[region] /= measures[region];
+        if (measures[region] > 0)
+            for (double &moment : moments[region]) moment /= measures[region];
     std::array<std::vector<double>, 2> candidate_weights{
         std::vector<double>(candidates.size()),
         std::vector<double>(candidates.size()),
     };
     std::vector<double> uncompressed_weights(uncompressed.size());
     double maximum_residual{};
-    Eigen::MatrixXd basis;
-    Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> decomposition;
+    numeric::Matrix<double> basis;
     if (candidates.size() >= MomentCount && (measures[0] > 0 || measures[1] > 0)) {
-        basis.resize(MomentCount, candidates.size());
-        for (uint32_t candidate = 0; candidate < candidates.size(); ++candidate)
-            basis.col(candidate) = MomentBasis(candidates[candidate].Reference);
-        decomposition.compute(basis);
+        basis.Resize(MomentCount, candidates.size());
+        for (uint32_t candidate = 0; candidate < candidates.size(); ++candidate) {
+            const auto values = MomentBasis(candidates[candidate].Reference);
+            std::copy(values.begin(), values.end(), basis.Column(candidate).Values);
+        }
     }
     for (uint32_t region = 0; region < 2; ++region) {
         bool fitted_region{};
-        if (basis.size() && measures[region] > 0) {
-            const Eigen::VectorXd fitted = decomposition.solve(moments[region]);
-            const double residual = (basis * fitted - moments[region]).norm() / moments[region].norm();
-            fitted_region = fitted.allFinite() && residual <= 1e-10;
+        if (!basis.empty() && measures[region] > 0) {
+            numeric::Vector<double> fitted;
+            const numeric::VectorView<const double> target{moments[region].data(), MomentCount, 1};
+            const bool solved = numeric::LeastSquaresMinimumNorm(basis.View(), target, fitted);
+            double residual_squared{}, target_squared{};
+            for (uint32_t row = 0; row < MomentCount; ++row) {
+                double reconstructed{};
+                for (uint32_t column = 0; column < fitted.size(); ++column) reconstructed += basis(row, column) * fitted[column];
+                residual_squared += std::pow(reconstructed - moments[region][row], 2);
+                target_squared += std::pow(moments[region][row], 2);
+            }
+            const double residual = std::sqrt(residual_squared / target_squared);
+            fitted_region = solved && numeric::AllFinite(fitted.View()) && residual <= 1e-10;
             if (fitted_region) {
                 maximum_residual = std::max(maximum_residual, residual);
                 for (uint32_t candidate = 0; candidate < candidates.size(); ++candidate)
@@ -1010,11 +1019,11 @@ template<bool P1>
 modal::AssembledPencil Assemble(const modal::FiniteCellOperator &operation) {
     constexpr uint32_t Basis{P1 ? 1 : BasisOrder}, Nodes{(Basis + 1) * (Basis + 1) * (Basis + 1)}, Dofs{3 * Nodes};
     constexpr uint32_t MassEntries{3 * Nodes * (Nodes + 1) / 2}, StiffnessEntries{Dofs * (Dofs + 1) / 2};
-    std::vector<Eigen::Triplet<double>> mass_triplets(operation.Cells.size() * MassEntries);
-    std::vector<Eigen::Triplet<double>> stiffness_triplets(operation.Cells.size() * StiffnessEntries);
+    std::vector<numeric::Triplet> mass_triplets(operation.Cells.size() * MassEntries);
+    std::vector<numeric::Triplet> stiffness_triplets(operation.Cells.size() * StiffnessEntries);
     struct Context {
         const modal::FiniteCellOperator &Operation;
-        Eigen::Triplet<double> *Mass, *Stiffness;
+        numeric::Triplet *Mass, *Stiffness;
     } context{operation, mass_triplets.data(), stiffness_triplets.data()};
     dispatch_apply_f(
         operation.Cells.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &context,
@@ -1032,8 +1041,8 @@ modal::AssembledPencil Assemble(const modal::FiniteCellOperator &operation) {
             } else {
                 std::copy_n(cell.Nodes.begin(), Nodes, nodes.begin());
             }
-            Eigen::Matrix<double, Nodes, Nodes> mass;
-            Eigen::Matrix<double, Dofs, Dofs> stiffness;
+            std::array<double, size_t(Nodes) * Nodes> mass{};
+            std::array<double, size_t(Dofs) * Dofs> stiffness{};
             CellOperators<Basis, false>(context.Operation, uint32_t(cell_index), 0, mass.data(), stiffness.data());
             auto *mass_triplet = context.Mass + cell_index * MassEntries;
             auto *stiffness_triplet = context.Stiffness + cell_index * StiffnessEntries;
@@ -1041,28 +1050,26 @@ modal::AssembledPencil Assemble(const modal::FiniteCellOperator &operation) {
                 for (uint32_t c = 0; c <= a; ++c)
                     for (uint32_t component = 0; component < 3; ++component) {
                         const uint32_t row = 3 * nodes[a] + component, column = 3 * nodes[c] + component;
-                        *mass_triplet++ = {int(std::max(row, column)), int(std::min(row, column)), mass(a, c)};
+                        *mass_triplet++ = {int(std::max(row, column)), int(std::min(row, column)), mass[a + size_t(c) * Nodes]};
                     }
             for (uint32_t a = 0; a < Nodes; ++a)
                 for (uint32_t p = 0; p < 3; ++p)
                     for (uint32_t c = 0; c < Nodes; ++c)
                         for (uint32_t q = 0; q < 3; ++q) {
                             const uint32_t row = 3 * nodes[a] + p, column = 3 * nodes[c] + q;
-                            if (row >= column) *stiffness_triplet++ = {int(row), int(column), stiffness(3 * a + p, 3 * c + q)};
+                            if (row >= column) *stiffness_triplet++ = {int(row), int(column), stiffness[3 * a + p + size_t(3 * c + q) * Dofs]};
                         }
         }
     );
     const uint32_t dofs = P1 ? 3 * operation.NumP1Nodes : operation.Dofs();
-    modal::AssembledPencil result{
-        Eigen::SparseMatrix<double>{dofs, dofs}, Eigen::SparseMatrix<double>{dofs, dofs}
+    return {
+        numeric::SparseMatrix::FromTriplets(int(dofs), int(dofs), std::move(mass_triplets)),
+        numeric::SparseMatrix::FromTriplets(int(dofs), int(dofs), std::move(stiffness_triplets)),
     };
-    result.Mass.setFromTriplets(mass_triplets.begin(), mass_triplets.end());
-    result.Stiffness.setFromTriplets(stiffness_triplets.begin(), stiffness_triplets.end());
-    return result;
 }
 
-Eigen::VectorXd ShiftedDiagonal(const modal::FiniteCellOperator &operation, double alpha) {
-    Eigen::VectorXd result = Eigen::VectorXd::Zero(operation.Dofs());
+numeric::Vector<double> ShiftedDiagonal(const modal::FiniteCellOperator &operation, double alpha) {
+    numeric::Vector<double> result(operation.Dofs());
     for (const auto &cell : operation.Cells) {
         for (uint32_t quadrature = cell.QuadratureOffset; quadrature < cell.QuadratureOffset + cell.QuadratureCount; ++quadrature) {
             const auto &point = operation.Quadrature[quadrature];
@@ -1109,13 +1116,13 @@ modal::FiniteCellOperator::PackedCutOperators BuildPackedCutOperators(
             const bool supplied = !context.PackedShiftedElements.empty();
             double *packed_mass = context.Result.Mass.data() + cut * PackedMass;
             double *packed_shifted = context.Result.Shifted.data() + cut * PackedShifted;
-            Eigen::Matrix<double, NodeCount, NodeCount> mass;
+            std::array<double, size_t(NodeCount) * NodeCount> mass{};
             CellOperators<BasisOrder, true>(
                 context.Operation, cell, context.Alpha, mass.data(), supplied ? nullptr : packed_shifted
             );
             for (uint32_t row = 0; row < NodeCount; ++row)
                 for (uint32_t column = 0; column <= row; ++column)
-                    packed_mass[size_t(row) * (row + 1) / 2 + column] = mass(row, column);
+                    packed_mass[size_t(row) * (row + 1) / 2 + column] = mass[row + size_t(column) * NodeCount];
             if (supplied)
                 std::copy_n(context.PackedShiftedElements.data() + size_t(cell) * PackedShifted, PackedShifted, packed_shifted);
         }
@@ -1287,7 +1294,7 @@ void modal::FiniteCellOperator::ProlongP1(const double *input, double *output, u
             }
 }
 
-Eigen::VectorXd modal::finite_cell::ShiftedDiagonal(const FiniteCellOperator &operation, double alpha) {
+numeric::Vector<double> modal::finite_cell::ShiftedDiagonal(const FiniteCellOperator &operation, double alpha) {
     return ::ShiftedDiagonal(operation, alpha);
 }
 
@@ -1331,11 +1338,11 @@ modal::AssembledPencil modal::FiniteCellOperator::AssembleP1Lower() const {
     return Assemble<true>(*this);
 }
 
-Eigen::SparseMatrix<double> modal::finite_cell::AssembleP1ShiftedLower(
+numeric::SparseMatrix modal::finite_cell::AssembleP1ShiftedLower(
     const FiniteCellOperator &operation, double alpha
 ) {
     auto assembled = operation.AssembleP1Lower();
-    return assembled.Stiffness + alpha * assembled.Mass;
+    return numeric::Add(assembled.Stiffness, alpha, assembled.Mass);
 }
 
 modal::ImplicitDomain modal::MakeBoxDomain(dvec3 min, dvec3 max) {

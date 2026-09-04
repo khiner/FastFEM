@@ -29,6 +29,12 @@ struct Case {
     dvec3 GridOffset;
 };
 
+double RelativeDifference(numeric::VectorView<const double> a, numeric::VectorView<const double> b) {
+    auto difference = numeric::Copy(a);
+    numeric::AddScaled(-1, b, difference.View());
+    return numeric::Norm(difference.View()) / numeric::Norm(b);
+}
+
 suite RobustnessTests = [] {
     "wide tapered-key eigenpairs certify with the assembled fallback"_test = [] {
         constexpr uint32_t count{256};
@@ -44,11 +50,11 @@ suite RobustnessTests = [] {
             }
         );
         const auto p1 = operation.AssembleP1Lower();
-        Eigen::MatrixXd rhs(p1.Mass.rows(), 8);
-        for (Eigen::Index column = 0; column < rhs.cols(); ++column)
-            for (Eigen::Index row = 0; row < rhs.rows(); ++row)
+        numeric::Matrix<double> rhs(p1.Mass.rows(), 8);
+        for (size_t column = 0; column < rhs.cols(); ++column)
+            for (size_t row = 0; row < rhs.rows(); ++row)
                 rhs(row, column) = std::sin(double(1 + row + 17 * column));
-        Eigen::MatrixXd first_solve(rhs.rows(), rhs.cols()), repeated_solve(rhs.rows(), rhs.cols());
+        numeric::Matrix<double> first_solve(rhs.rows(), rhs.cols()), repeated_solve(rhs.rows(), rhs.cols());
         double first_factor_seconds{}, first_solve_seconds{}, repeated_factor_seconds{}, repeated_solve_seconds{};
         modal::finite_cell::AccelerateShiftInvert first_inverse{p1.Stiffness, p1.Mass, first_factor_seconds, first_solve_seconds};
         first_inverse.set_shift(-Shift);
@@ -56,11 +62,11 @@ suite RobustnessTests = [] {
         modal::finite_cell::AccelerateShiftInvert repeated_inverse{p1.Stiffness, p1.Mass, repeated_factor_seconds, repeated_solve_seconds};
         repeated_inverse.set_shift(-Shift);
         repeated_inverse.solve_panel(rhs.data(), repeated_solve.data(), int(rhs.cols()));
-        expect(bool((first_solve.array() == repeated_solve.array()).all()));
+        expect(first_solve.Values == repeated_solve.Values);
         const auto result = modal::SolveFiniteCellEigenpairs(operation, count, Shift, 1e-8, 100);
         const auto repeated = modal::SolveFiniteCellEigenpairs(operation, count, Shift, 1e-8, 100);
-        expect(result.Eigenvalues.size() == Eigen::Index(count));
-        expect(repeated.Eigenvalues.size() == Eigen::Index(count));
+        expect(result.Eigenvalues.size() == count);
+        expect(repeated.Eigenvalues.size() == count);
         expect(result.Profile.FailedFactorFreeIterations > 0_u);
         expect(result.Profile.FailedFactorFreeIterations < 100_u);
         expect(result.Profile.FailedFactorFreeStagnated);
@@ -71,10 +77,9 @@ suite RobustnessTests = [] {
         if (result.Eigenvalues.size() != count || repeated.Eigenvalues.size() != count) return;
         const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
         const auto repeated_certification = modal::finite_cell::CertifyEigenpairs(operation, repeated.Eigenvalues, repeated.Eigenvectors);
-        const double residual = result_certification.RelativeResiduals.tail(count - 6).maxCoeff();
-        const double repeated_residual = repeated_certification.RelativeResiduals.tail(count - 6).maxCoeff();
-        const double spectrum = (repeated.Eigenvalues.tail(count - 6) - result.Eigenvalues.tail(count - 6)).norm() /
-            result.Eigenvalues.tail(count - 6).norm();
+        const double residual = numeric::Maximum(result_certification.RelativeResiduals.Last(count - 6));
+        const double repeated_residual = numeric::Maximum(repeated_certification.RelativeResiduals.Last(count - 6));
+        const double spectrum = RelativeDifference(repeated.Eigenvalues.Last(count - 6), result.Eigenvalues.Last(count - 6));
         const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
             operation, result.Eigenvalues, result.Eigenvectors, repeated.Eigenvectors
         );
@@ -90,8 +95,8 @@ suite RobustnessTests = [] {
         expect(result_certification.MassOrthogonalityError < 1e-9);
         expect(repeated_certification.MassOrthogonalityError < 1e-9);
         expect(spectrum == 0.0);
-        expect((result.Eigenvectors - repeated.Eigenvectors).squaredNorm() == 0.0);
-        expect((result_certification.RelativeResiduals - repeated_certification.RelativeResiduals).squaredNorm() == 0.0);
+        expect(result.Eigenvectors.Values == repeated.Eigenvectors.Values);
+        expect(result_certification.RelativeResiduals.Values == repeated_certification.RelativeResiduals.Values);
         expect(result_certification.MassOrthogonalityError == repeated_certification.MassOrthogonalityError);
         expect(shapes.ClusterMacMinimum > 0.99999);
     };
@@ -111,8 +116,8 @@ suite RobustnessTests = [] {
         );
         const auto result = modal::SolveFiniteCellEigenpairs(operation, count, Shift, 1e-8, 256);
         const auto repeated = modal::SolveFiniteCellEigenpairs(operation, count, Shift, 1e-8, 256);
-        expect(result.Eigenvalues.size() == Eigen::Index(count));
-        expect(repeated.Eigenvalues.size() == Eigen::Index(count));
+        expect(result.Eigenvalues.size() == count);
+        expect(repeated.Eigenvalues.size() == count);
         expect(result.Profile.FailedFactorFreeIterations == 0_u || result.Profile.FailedFactorFreeIterations < 100_u);
         if (result.Profile.FailedFactorFreeIterations) expect(result.Profile.FailedFactorFreeStagnated);
         expect(repeated.Profile.FailedFactorFreeIterations == 0_u || repeated.Profile.FailedFactorFreeIterations < 100_u);
@@ -121,8 +126,7 @@ suite RobustnessTests = [] {
         if (result.Eigenvalues.size() != count || repeated.Eigenvalues.size() != count) return;
         const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
         const auto repeated_certification = modal::finite_cell::CertifyEigenpairs(operation, repeated.Eigenvalues, repeated.Eigenvectors);
-        const double spectrum = (repeated.Eigenvalues.tail(count - 6) - result.Eigenvalues.tail(count - 6)).norm() /
-            result.Eigenvalues.tail(count - 6).norm();
+        const double spectrum = RelativeDifference(repeated.Eigenvalues.Last(count - 6), result.Eigenvalues.Last(count - 6));
         const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
             operation, result.Eigenvalues, result.Eigenvectors, repeated.Eigenvectors
         );
@@ -131,13 +135,13 @@ suite RobustnessTests = [] {
             operation.Dofs(), count, result.Profile.FailedFactorFreeIterations,
             repeated.Profile.FailedFactorFreeIterations, spectrum, shapes.ClusterMacMinimum
         );
-        expect(result_certification.RelativeResiduals.tail(count - 6).maxCoeff() < 1e-8);
-        expect(repeated_certification.RelativeResiduals.tail(count - 6).maxCoeff() < 1e-8);
+        expect(numeric::Maximum(result_certification.RelativeResiduals.Last(count - 6)) < 1e-8);
+        expect(numeric::Maximum(repeated_certification.RelativeResiduals.Last(count - 6)) < 1e-8);
         expect(result_certification.MassOrthogonalityError < 1e-9);
         expect(repeated_certification.MassOrthogonalityError < 1e-9);
         expect(spectrum == 0.0);
-        expect((result.Eigenvectors - repeated.Eigenvectors).squaredNorm() == 0.0);
-        expect((result_certification.RelativeResiduals - repeated_certification.RelativeResiduals).squaredNorm() == 0.0);
+        expect(result.Eigenvectors.Values == repeated.Eigenvectors.Values);
+        expect(result_certification.RelativeResiduals.Values == repeated_certification.RelativeResiduals.Values);
         expect(result_certification.MassOrthogonalityError == repeated_certification.MassOrthogonalityError);
         expect(shapes.ClusterMacMinimum > 0.99999);
     };
@@ -155,10 +159,10 @@ suite RobustnessTests = [] {
             }
         );
         const auto result = modal::finite_cell::SolveAssembledEigenpairs(operation, ModeCount, Shift, 1e-8, 100);
-        expect(result.Eigenvalues.size() == Eigen::Index(ModeCount));
+        expect(result.Eigenvalues.size() == ModeCount);
         if (result.Eigenvalues.size() != ModeCount) return;
         const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
-        const double residual = result_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();
+        const double residual = numeric::Maximum(result_certification.RelativeResiduals.Last(ModeCount - 6));
         std::println(
             "exact fallback refinement dofs={} residual={:.3e} orthogonality={:.3e}",
             operation.Dofs(), residual, result_certification.MassOrthogonalityError
@@ -191,18 +195,17 @@ suite RobustnessTests = [] {
             );
             const auto assembled = modal::finite_cell::SolveAssembledEigenpairs(operation, ModeCount, Shift, 1e-9, 1000);
             const auto production = modal::SolveFiniteCellEigenpairs(operation, ModeCount, Shift, 1e-8, 300);
-            expect(assembled.Eigenvalues.size() == Eigen::Index(ModeCount)) << entry.Geometry;
-            expect(production.Eigenvalues.size() == Eigen::Index(ModeCount)) << entry.Geometry;
+            expect(assembled.Eigenvalues.size() == ModeCount) << entry.Geometry;
+            expect(production.Eigenvalues.size() == ModeCount) << entry.Geometry;
             expect(production.Profile.FailedFactorFreeIterations == 0_u) << entry.Geometry;
             if (assembled.Eigenvalues.size() != ModeCount || production.Eigenvalues.size() != ModeCount) continue;
             const auto assembled_certification = modal::finite_cell::CertifyEigenpairs(operation, assembled.Eigenvalues, assembled.Eigenvectors);
             const auto production_certification = modal::finite_cell::CertifyEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
-            const double assembled_residual = assembled_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();
+            const double assembled_residual = numeric::Maximum(assembled_certification.RelativeResiduals.Last(ModeCount - 6));
             expect(assembled_residual < 1e-8) << entry.Geometry << assembled_residual;
             expect(assembled_certification.MassOrthogonalityError < 1e-9) << entry.Geometry << assembled_certification.MassOrthogonalityError;
-            const double spectrum = (production.Eigenvalues.tail(ModeCount - 6) - assembled.Eigenvalues.tail(ModeCount - 6)).norm() /
-                assembled.Eigenvalues.tail(ModeCount - 6).norm();
-            const double residual = production_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();
+            const double spectrum = RelativeDifference(production.Eigenvalues.Last(ModeCount - 6), assembled.Eigenvalues.Last(ModeCount - 6));
+            const double residual = numeric::Maximum(production_certification.RelativeResiduals.Last(ModeCount - 6));
             const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
                 operation, assembled.Eigenvalues, assembled.Eigenvectors, production.Eigenvectors
             );
@@ -220,7 +223,7 @@ suite RobustnessTests = [] {
                 const auto fallback = modal::SolveFiniteCellEigenpairs(operation, ModeCount, Shift, 1e-8, 12);
                 expect(fallback.Profile.FailedFactorFreeIterations > 0_u);
                 const auto fallback_certification = modal::finite_cell::CertifyEigenpairs(operation, fallback.Eigenvalues, fallback.Eigenvectors);
-                expect(fallback_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff() < 1e-8);
+                expect(numeric::Maximum(fallback_certification.RelativeResiduals.Last(ModeCount - 6)) < 1e-8);
                 expect(fallback_certification.MassOrthogonalityError < 1e-9);
             }
         }

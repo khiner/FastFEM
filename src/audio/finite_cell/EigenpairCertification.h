@@ -2,15 +2,13 @@
 
 #include "audio/FiniteCell.h"
 
-#include <Eigen/Core>
-
 namespace modal::finite_cell {
 struct EigenpairCertification {
-    Eigen::VectorXd RelativeResiduals;
+    numeric::Vector<double> RelativeResiduals;
     double MassOrthogonalityError{};
 };
 
 EigenpairCertification CertifyEigenpairs(
-    const FiniteCellOperator &, const Eigen::VectorXd &eigenvalues, const Eigen::MatrixXd &eigenvectors
+    const FiniteCellOperator &, const numeric::Vector<double> &eigenvalues, const numeric::Matrix<double> &eigenvectors
 );
 } // namespace modal::finite_cell
