@@ -56,40 +56,6 @@ BlockSparseLower ToBlock3(const Eigen::SparseMatrix<double> &matrix) {
     return result;
 }
 
-struct SparsePattern {
-    int Size{};
-    uint8_t BlockSize{};
-    std::vector<long> ColumnStarts;
-    std::vector<int> RowIndices;
-};
-
-bool Matches(const Eigen::SparseMatrix<double> &matrix, const SparsePattern &pattern) {
-    if (!matrix.isCompressed() || matrix.rows() != matrix.cols() ||
-        matrix.rows() != Eigen::Index(pattern.Size) * pattern.BlockSize)
-        return false;
-    if (pattern.BlockSize == 1) {
-        if (matrix.nonZeros() != Eigen::Index(pattern.RowIndices.size())) return false;
-        for (Eigen::Index column = 0; column <= matrix.cols(); ++column)
-            if (matrix.outerIndexPtr()[column] != pattern.ColumnStarts[column]) return false;
-        return std::equal(
-            pattern.RowIndices.begin(), pattern.RowIndices.end(), matrix.innerIndexPtr()
-        );
-    }
-    if (pattern.BlockSize != 3) return false;
-
-    std::vector<int> rows;
-    size_t offset{};
-    for (int block_column = 0; block_column < pattern.Size; ++block_column) {
-        GatherBlockRows(matrix, block_column, rows);
-        const size_t end = offset + rows.size();
-        if (end > pattern.RowIndices.size() || pattern.ColumnStarts[block_column] != long(offset) ||
-            !std::equal(rows.begin(), rows.end(), pattern.RowIndices.begin() + offset))
-            return false;
-        offset = end;
-    }
-    return offset == pattern.RowIndices.size() && pattern.ColumnStarts.back() == long(offset);
-}
-
 struct SparseMatrixView {
     std::vector<long> ScalarColumnStarts;
     BlockSparseLower Block;
@@ -113,17 +79,6 @@ struct SparseMatrixView {
                 .blockSize = uint8_t(blocked ? 3 : 1),
             },
             .data = blocked ? Block.Data.data() : const_cast<double *>(matrix.valuePtr()),
-        };
-    }
-
-    SparsePattern Pattern() const {
-        const auto &structure = Matrix.structure;
-        const long entries = structure.columnStarts[structure.columnCount];
-        return {
-            .Size = structure.rowCount,
-            .BlockSize = structure.blockSize,
-            .ColumnStarts = {structure.columnStarts, structure.columnStarts + structure.columnCount + 1},
-            .RowIndices = {structure.rowIndices, structure.rowIndices + entries},
         };
     }
 };
@@ -151,36 +106,11 @@ bool UseBlock3(const Eigen::SparseMatrix<double> &matrix) {
 }
 } // namespace
 
-struct SparseCholeskySymbolic::Factorization {
-    SparseOpaqueSymbolicFactorization Opaque;
-    SparsePattern Pattern;
-    ~Factorization() { SparseCleanup(Opaque); }
-};
-
 struct SparseCholesky::Factorization {
     SparseOpaqueFactorization_Double Opaque;
     int Size{};
     ~Factorization() { SparseCleanup(Opaque); }
 };
-
-SparseCholeskySymbolic::SparseCholeskySymbolic(const Eigen::SparseMatrix<double> &matrix) {
-    ConfigureAccelerateSparseExecution();
-    const bool large = matrix.rows() >= BlockCrossover;
-    const bool blocked = UseBlock3(matrix);
-    const SparseMatrixView view{matrix, blocked};
-    auto opaque = SparseFactor(SparseFactorizationCholesky, view.Matrix.structure, SymbolicOptions(large));
-    if (opaque.status != SparseStatusOK) {
-        SparseCleanup(opaque);
-        throw std::runtime_error("Sparse Cholesky symbolic factorization failed.");
-    }
-    Factor = std::make_unique<Factorization>(std::move(opaque), view.Pattern());
-}
-
-SparseCholeskySymbolic::~SparseCholeskySymbolic() = default;
-
-bool SparseCholeskySymbolic::Matches(const Eigen::SparseMatrix<double> &matrix) const {
-    return ::Matches(matrix, Factor->Pattern);
-}
 
 SparseCholesky::SparseCholesky(const Eigen::SparseMatrix<double> &matrix) {
     ConfigureAccelerateSparseExecution();
@@ -196,21 +126,6 @@ SparseCholesky::SparseCholesky(const Eigen::SparseMatrix<double> &matrix) {
     if (opaque.status != SparseStatusOK) {
         SparseCleanup(opaque);
         throw std::runtime_error("Sparse Cholesky factorization failed.");
-    }
-    Factor = std::make_unique<Factorization>(std::move(opaque), int(matrix.rows()));
-}
-
-SparseCholesky::SparseCholesky(const Eigen::SparseMatrix<double> &matrix, const SparseCholeskySymbolic &symbolic) {
-    ConfigureAccelerateSparseExecution();
-    if (matrix.rows() != Eigen::Index(symbolic.Factor->Pattern.Size) * symbolic.Factor->Pattern.BlockSize)
-        throw std::invalid_argument("Sparse Cholesky symbolic factorization size mismatch.");
-    const SparseMatrixView view{matrix, symbolic.Factor->Pattern.BlockSize == 3};
-    if (!::Matches(matrix, symbolic.Factor->Pattern))
-        throw std::invalid_argument("Sparse Cholesky symbolic factorization sparsity mismatch.");
-    auto opaque = SparseFactor(symbolic.Factor->Opaque, view.Matrix, NumericOptions());
-    if (opaque.status != SparseStatusOK) {
-        SparseCleanup(opaque);
-        throw std::runtime_error("Sparse Cholesky numeric factorization failed.");
     }
     Factor = std::make_unique<Factorization>(std::move(opaque), int(matrix.rows()));
 }

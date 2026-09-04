@@ -105,14 +105,14 @@ Cross-discretization agreement provides a secondary diagnostic.
 ./build/FastFEMFiniteCellAudioCorpus 6 128 all
 ```
 
-### Sparse-backend benchmark
+### Tet10 factorization benchmark
 
-The benchmark accepts structured or tetrahedralized Tet10 inputs, repetition counts, backend selection, and panel widths.
-`/usr/bin/time -l` reports peak memory for one backend process:
+The benchmark measures native factorization over structured or tetrahedralized Tet10 inputs with configurable repetition counts and panel widths.
+`/usr/bin/time -l` reports peak memory:
 
 ```sh
-./build/FastFEMBlockSparseBenchmark --tet 34 17 11 5 native 16
-./build/FastFEMBlockSparseBenchmark --obj model.obj 5 all 16
+./build/FastFEMBlockSparseBenchmark --tet 34 17 11 5 16
+./build/FastFEMBlockSparseBenchmark --obj model.obj 5 16
 ```
 
 The dedicated resolution-eight 256-mode tapered-key stress is part of `FastFEMFiniteCellConsolidationTest`.

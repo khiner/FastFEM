@@ -211,26 +211,6 @@ int main() {
         }
     };
 
-    "Accelerate Cholesky reuses symbolic analysis"_test = [] {
-        constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
-        const double alpha = std::pow(2 * std::numbers::pi * 20, 2);
-        const modal::Tet10Assembler fem{MakeStructuredBar(2, 1, 1), material};
-        const auto [mass, stiffness] = fem.AssembleLower();
-        const Eigen::SparseMatrix<double> first = stiffness + alpha * mass;
-        const Eigen::SparseMatrix<double> second = stiffness + 2 * alpha * mass;
-        SparseCholeskySymbolic symbolic{first};
-        Eigen::SparseMatrix<double> diagonal(first.rows(), first.cols());
-        diagonal.setIdentity();
-        expect(symbolic.Matches(second));
-        expect(!symbolic.Matches(diagonal));
-        SparseCholesky reused{second, symbolic};
-        Eigen::MatrixXd rhs(fem.Dofs(), 4), solution(fem.Dofs(), 4);
-        for (Eigen::Index column = 0; column < rhs.cols(); ++column)
-            for (Eigen::Index row = 0; row < rhs.rows(); ++row) rhs(row, column) = std::cos(0.07 * double((row + 3) * (column + 1)));
-        reused.Solve(rhs.data(), solution.data(), rhs.cols());
-        expect((second.selfadjointView<Eigen::Lower>() * solution - rhs).norm() / rhs.norm() < 1e-8);
-    };
-
     "block sparse Cholesky reuses symbolic analysis across shifts and solves panels"_test = [] {
         constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
         const double alpha = std::pow(2 * std::numbers::pi * 20, 2);
