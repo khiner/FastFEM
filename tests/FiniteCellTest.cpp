@@ -4,7 +4,8 @@
 #include "RunSuites.h"
 #include "TetReference.h"
 #include "audio/FiniteCellBlockEigensolver.h"
-#include "audio/FiniteCellOracle.h"
+#include "audio/finite_cell/AssembledCholesky.h"
+#include "audio/finite_cell/OctreeQuadrature.h"
 #include "numeric/Accelerate.h"
 
 #include <boost/ut.hpp>
@@ -305,7 +306,7 @@ suite FiniteCellTests = [] {
         }
     };
 
-    "preferred finite-cell route matches FP64 across audio geometries"_test = [] {
+    "finite-cell block solve matches assembled FP64 across audio geometries"_test = [] {
         constexpr uint32_t Count{18};
         const double shift = std::pow(2 * std::numbers::pi * 20, 2);
         for (const std::string_view name : finite_cell_benchmark::AudioGeometryNames) {
@@ -315,17 +316,17 @@ suite FiniteCellTests = [] {
                 domain, Material,
                 {.Cells = finite_cell_benchmark::GridResolution(geometry, 6), .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
             );
-            const auto reference = modal::oracle::SolveCholesky(operation, Count, shift, 5e-9, 150);
+            const auto assembled = modal::finite_cell::SolveAssembledCholesky(operation, Count, shift, 5e-9, 150);
             const auto preferred = modal::SolveFiniteCellBlock(operation, Count, shift, 5e-9, 150);
-            expect(reference.Eigenvalues.size() == Count) << name;
+            expect(assembled.Eigenvalues.size() == Count) << name;
             expect(preferred.Eigenvalues.size() == Count) << name;
-            if (reference.Eigenvalues.size() != Count || preferred.Eigenvalues.size() != Count) continue;
+            if (assembled.Eigenvalues.size() != Count || preferred.Eigenvalues.size() != Count) continue;
             const auto preferred_certification = modal::CertifyFiniteCellEigenpairs(operation, preferred.Eigenvalues, preferred.Eigenvectors);
-            const double spectrum_error = (preferred.Eigenvalues.tail(Count - 6) - reference.Eigenvalues.tail(Count - 6)).norm() /
-                reference.Eigenvalues.tail(Count - 6).norm();
+            const double spectrum_error = (preferred.Eigenvalues.tail(Count - 6) - assembled.Eigenvalues.tail(Count - 6)).norm() /
+                assembled.Eigenvalues.tail(Count - 6).norm();
             const double residual = preferred_certification.RelativeResiduals.tail(Count - 6).maxCoeff();
             const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
-                operation, reference.Eigenvalues, reference.Eigenvectors, preferred.Eigenvectors
+                operation, assembled.Eigenvalues, assembled.Eigenvectors, preferred.Eigenvectors
             );
             std::println(
                 "audio geometry {}: dofs={} cut={} iterations={} spectrum={:.3e} residual={:.3e} orthogonality={:.3e} paired_mac={:.6f} cluster_mac={:.6f}",
@@ -398,7 +399,7 @@ suite FiniteCellTests = [] {
             .FictitiousScale = 1e-8,
             .PaddingCells = 0.2,
         };
-        const auto oracle = modal::oracle::BuildOctree(domain, Material, config);
+        const auto octree = modal::finite_cell::BuildOctreeOperator(domain, Material, config);
         const auto fitted = modal::BuildFiniteCellOperator(domain, Material, config);
         const auto repeated = modal::BuildFiniteCellOperator(domain, Material, config);
         expect(repeated.Quadrature.size() == fitted.Quadrature.size());
@@ -409,44 +410,44 @@ suite FiniteCellTests = [] {
                 expect(repeated.Quadrature[point].Fictitious == fitted.Quadrature[point].Fictitious);
             }
         constexpr uint32_t Width{3};
-        Eigen::MatrixXd input(oracle.Dofs(), Width), expected(oracle.Dofs(), Width), actual(oracle.Dofs(), Width);
+        Eigen::MatrixXd input(octree.Dofs(), Width), expected(octree.Dofs(), Width), actual(octree.Dofs(), Width);
         for (Eigen::Index column = 0; column < input.cols(); ++column)
             for (Eigen::Index row = 0; row < input.rows(); ++row)
                 input(row, column) = std::cos(0.17 * double(row + 1) + 0.11 * double(column + 1));
-        oracle.ApplyShifted(input.data(), expected.data(), Width, 13);
+        octree.ApplyShifted(input.data(), expected.data(), Width, 13);
         fitted.ApplyShifted(input.data(), actual.data(), Width, 13);
         const double action_error = (actual - expected).norm() / expected.norm();
         const uint64_t negative_weights = std::ranges::count_if(
             fitted.Quadrature, [](const auto &point) { return point.Weight < 0; }
         );
 
-        const auto scaled_oracle = oracle.WithFictitiousScale(1e-4);
+        const auto scaled_octree = octree.WithFictitiousScale(1e-4);
         const auto scaled_fitted = fitted.WithFictitiousScale(1e-4);
-        scaled_oracle.ApplyShifted(input.data(), expected.data(), Width, 13);
+        scaled_octree.ApplyShifted(input.data(), expected.data(), Width, 13);
         scaled_fitted.ApplyShifted(input.data(), actual.data(), Width, 13);
         const double scaled_error = (actual - expected).norm() / expected.norm();
 
         constexpr uint32_t ModeCount{18}, ComparedCount{12};
         const double shift = std::pow(2 * std::numbers::pi * 20, 2);
-        const auto oracle_modes = modal::oracle::SolveCholesky(oracle, ModeCount, shift, 1e-8, 100);
-        const auto fitted_modes = modal::oracle::SolveCholesky(fitted, ModeCount, shift, 1e-8, 100);
-        expect(oracle_modes.Eigenvalues.size() == ModeCount);
+        const auto octree_modes = modal::finite_cell::SolveAssembledCholesky(octree, ModeCount, shift, 1e-8, 100);
+        const auto fitted_modes = modal::finite_cell::SolveAssembledCholesky(fitted, ModeCount, shift, 1e-8, 100);
+        expect(octree_modes.Eigenvalues.size() == ModeCount);
         expect(fitted_modes.Eigenvalues.size() == ModeCount);
         double spectrum_error{std::numeric_limits<double>::infinity()};
-        if (oracle_modes.Eigenvalues.size() == ModeCount && fitted_modes.Eigenvalues.size() == ModeCount)
+        if (octree_modes.Eigenvalues.size() == ModeCount && fitted_modes.Eigenvalues.size() == ModeCount)
             spectrum_error =
                 (fitted_modes.Eigenvalues.segment(6, ComparedCount - 6) -
-                 oracle_modes.Eigenvalues.segment(6, ComparedCount - 6))
+                 octree_modes.Eigenvalues.segment(6, ComparedCount - 6))
                     .norm() /
-                oracle_modes.Eigenvalues.segment(6, ComparedCount - 6).norm();
+                octree_modes.Eigenvalues.segment(6, ComparedCount - 6).norm();
         std::println(
             "signed moment fitting: {} / {} points, {} negative weights, build {:.3f} / {:.3f} s, "
             "action {:.3e}, scaled {:.3e}, spectrum {:.3e}",
-            fitted.Profile.QuadraturePoints, oracle.Profile.QuadraturePoints, negative_weights,
-            fitted.Profile.Assemble, oracle.Profile.Assemble, action_error, scaled_error, spectrum_error
+            fitted.Profile.QuadraturePoints, octree.Profile.QuadraturePoints, negative_weights,
+            fitted.Profile.Assemble, octree.Profile.Assemble, action_error, scaled_error, spectrum_error
         );
         expect(fitted.Profile.MomentFittedCells > 0u);
-        expect(fitted.Profile.QuadraturePoints < oracle.Profile.QuadraturePoints);
+        expect(fitted.Profile.QuadraturePoints < octree.Profile.QuadraturePoints);
         expect(negative_weights > 0u);
         expect(action_error < 1e-9);
         expect(scaled_error < 1e-9);

@@ -1,11 +1,10 @@
-#include "AssembledOracle.h"
 #include "FiniteCellBenchmarkGeometry.h"
 #include "ModeShapeComparison.h"
 #include "RunSuites.h"
 #include "audio/CholeskyShiftInvert.h"
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellBlockEigensolver.h"
-#include "audio/FiniteCellOracle.h"
+#include "audio/finite_cell/AssembledCholesky.h"
 
 #include <boost/ut.hpp>
 
@@ -154,7 +153,7 @@ suite ConsolidationTests = [] {
                 .PaddingCells = 0.25,
             }
         );
-        const auto result = modal::oracle::SolveCholesky(operation, ModeCount, Shift, 1e-8, 100);
+        const auto result = modal::finite_cell::SolveAssembledCholesky(operation, ModeCount, Shift, 1e-8, 100);
         expect(result.Eigenvalues.size() == Eigen::Index(ModeCount));
         if (result.Eigenvalues.size() != ModeCount) return;
         const auto result_certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
@@ -189,20 +188,22 @@ suite ConsolidationTests = [] {
                     .GridOffsetCells = entry.GridOffset,
                 }
             );
-            const auto reference = finite_cell_benchmark::AssembledOracle(operation, ModeCount, Shift);
+            const auto assembled = modal::finite_cell::SolveAssembledCholesky(operation, ModeCount, Shift, 1e-9, 1000);
             const auto preferred = modal::SolveFiniteCellBlock(operation, ModeCount, Shift, 1e-8, 300);
-            expect(reference.Values.size() == Eigen::Index(ModeCount)) << entry.Geometry;
+            expect(assembled.Eigenvalues.size() == Eigen::Index(ModeCount)) << entry.Geometry;
             expect(preferred.Eigenvalues.size() == Eigen::Index(ModeCount)) << entry.Geometry;
             expect(preferred.Profile.FallbackAttemptIterations == 0_u) << entry.Geometry;
-            if (reference.Values.size() != ModeCount || preferred.Eigenvalues.size() != ModeCount) continue;
+            if (assembled.Eigenvalues.size() != ModeCount || preferred.Eigenvalues.size() != ModeCount) continue;
+            const auto assembled_certification = modal::CertifyFiniteCellEigenpairs(operation, assembled.Eigenvalues, assembled.Eigenvectors);
             const auto preferred_certification = modal::CertifyFiniteCellEigenpairs(operation, preferred.Eigenvalues, preferred.Eigenvectors);
-            expect(reference.RelativeResidual < 1e-8) << entry.Geometry << reference.RelativeResidual;
-            expect(reference.MassOrthogonalityError < 1e-9) << entry.Geometry << reference.MassOrthogonalityError;
-            const double spectrum = (preferred.Eigenvalues.tail(ModeCount - 6) - reference.Values.tail(ModeCount - 6)).norm() /
-                reference.Values.tail(ModeCount - 6).norm();
+            const double assembled_residual = assembled_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();
+            expect(assembled_residual < 1e-8) << entry.Geometry << assembled_residual;
+            expect(assembled_certification.MassOrthogonalityError < 1e-9) << entry.Geometry << assembled_certification.MassOrthogonalityError;
+            const double spectrum = (preferred.Eigenvalues.tail(ModeCount - 6) - assembled.Eigenvalues.tail(ModeCount - 6)).norm() /
+                assembled.Eigenvalues.tail(ModeCount - 6).norm();
             const double residual = preferred_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();
             const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
-                operation, reference.Values, reference.Vectors, preferred.Eigenvectors
+                operation, assembled.Eigenvalues, assembled.Eigenvectors, preferred.Eigenvectors
             );
             std::println(
                 "consolidation geometry={} dofs={} cut={} nu={:.2f} fictitious={:.0e} offset={:.2f}/{:.2f}/{:.2f} iterations={} spectrum={:.3e} residual={:.3e} orthogonality={:.3e} cluster_mac={:.6f}",

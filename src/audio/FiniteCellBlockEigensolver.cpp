@@ -4,9 +4,9 @@
 
 #include "CholeskyShiftInvert.h"
 #include "FiniteCellMetal.h"
-#include "FiniteCellOracle.h"
 #include "GeneralizedEigenSolver.h"
 #include "SparseCholesky.h"
+#include "finite_cell/AssembledCholesky.h"
 #include "numeric/Accelerate.h"
 
 #include <Eigen/Cholesky>
@@ -721,7 +721,7 @@ modal::FiniteCellBlockResult modal::SolveFiniteCellBlock(
         physical_count ? std::numeric_limits<double>::infinity() :
                          0;
     preferred = {};
-    auto cholesky = oracle::SolveCholesky(fem, count, alpha, tolerance, max_iterations);
+    auto cholesky = finite_cell::SolveAssembledCholesky(fem, count, alpha, tolerance, max_iterations);
     if (!converged(cholesky)) throw std::runtime_error("Finite-cell default and fallback solvers did not converge within the iteration budget.");
     cholesky.Profile.FallbackAttempt = attempt_seconds;
     cholesky.Profile.FallbackAttemptIterations = attempt_iterations;
@@ -731,7 +731,7 @@ modal::FiniteCellBlockResult modal::SolveFiniteCellBlock(
     return cholesky;
 }
 
-modal::FiniteCellBlockResult modal::oracle::SolveCholesky(
+modal::FiniteCellBlockResult modal::finite_cell::SolveAssembledCholesky(
     const FiniteCellOperator &fem, uint32_t count, double alpha, double tolerance,
     uint32_t max_iterations
 ) {

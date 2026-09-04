@@ -78,7 +78,7 @@ It applies the same factor-free solver to every geometry and problem size.
 An unconverged factor-free result selects assembled FP64 Cholesky shift-invert.
 If neither solver converges within the supplied iteration budget, `SolveFiniteCellBlock` returns an error.
 Validation code calls `CertifyFiniteCellEigenpairs` to recompute residuals and mass orthogonality independently.
-`src/audio/FiniteCellOracle.h` exposes the fixed four-guard Cholesky solver to validation code.
+Validation compares the factor-free solve against assembled Cholesky and moment-fitted integration against uncompressed octree quadrature.
 
 ## Correctness corpus
 
@@ -96,7 +96,7 @@ The CTest suite includes:
 
 The test suite evaluates Tet10 and finite cell independently.
 Tests use analytical frequencies and sampled analytical eigenspaces where they exist.
-Other cases measure physical residuals and mass orthogonality, compare against an assembled FP64 oracle, and evaluate cluster-aware sampled-subspace MAC.
+Other cases measure physical residuals and mass orthogonality, compare against an assembled FP64 solve, and evaluate cluster-aware sampled-subspace MAC.
 Cross-discretization agreement provides a secondary diagnostic.
 
 ### Audio-scale corpus

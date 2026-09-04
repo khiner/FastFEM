@@ -44,7 +44,7 @@ struct FiniteCellConfig {
 struct FiniteCellProfile {
     double Assemble{}, PhysicalVolume{}, MomentFitMaximumResidual{};
     uint32_t BackgroundCells{}, ActiveCells{}, CutCells{}, MomentFittedCells{}, MomentFitFallbackCells{}, Dofs{};
-    uint64_t QuadraturePoints{}, OracleQuadraturePoints{};
+    uint64_t QuadraturePoints{}, UncompressedQuadraturePoints{};
 };
 
 struct FiniteCellOperator {
@@ -71,7 +71,7 @@ struct FiniteCellOperator {
     struct Cell {
         std::array<uint32_t, NodesPerCell> Nodes{};
         dvec3 InverseHalf{};
-        uint32_t QuadratureOffset{}, QuadratureCount{}, OracleQuadratureCount{};
+        uint32_t QuadratureOffset{}, QuadratureCount{}, UncompressedQuadratureCount{};
         uint8_t Color{}, Cut{}, MomentFitted{}, MomentFitFallback{};
     };
 

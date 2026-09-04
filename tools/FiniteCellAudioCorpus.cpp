@@ -1,8 +1,8 @@
-#include "AssembledOracle.h"
 #include "FiniteCellBenchmarkGeometry.h"
 #include "ModeShapeComparison.h"
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellBlockEigensolver.h"
+#include "audio/finite_cell/AssembledCholesky.h"
 
 #include <charconv>
 #include <cmath>
@@ -34,15 +34,15 @@ bool Run(std::string_view name, uint32_t longitudinal, uint32_t count) {
     );
     if (count + 4 >= operation.Dofs())
         throw std::invalid_argument("Audio-corpus mode count leaves no guard-vector space for " + std::string{name} + ".");
-    const auto reference = finite_cell_benchmark::AssembledOracle(operation, count, shift);
+    const auto assembled = modal::finite_cell::SolveAssembledCholesky(operation, count, shift, 1e-9, 1000);
     const uint32_t max_iterations = std::max(200u, 2 * count);
     const auto result = modal::SolveFiniteCellBlock(operation, count, shift, tolerance, max_iterations);
-    if (reference.Values.size() != count || result.Eigenvalues.size() != count) {
-        std::println(stderr, "audio geometry={} modes={}/{} did not converge", name, reference.Values.size(), result.Eigenvalues.size());
+    if (assembled.Eigenvalues.size() != count || result.Eigenvalues.size() != count) {
+        std::println(stderr, "audio geometry={} modes={}/{} did not converge", name, assembled.Eigenvalues.size(), result.Eigenvalues.size());
         return false;
     }
-    const double spectrum_error = (result.Eigenvalues.tail(count - 6) - reference.Values.tail(count - 6)).norm() /
-        reference.Values.tail(count - 6).norm();
+    const double spectrum_error = (result.Eigenvalues.tail(count - 6) - assembled.Eigenvalues.tail(count - 6)).norm() /
+        assembled.Eigenvalues.tail(count - 6).norm();
     const auto result_certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
     Eigen::Index worst_physical{};
     const double residual = result_certification.RelativeResiduals.tail(count - 6).maxCoeff(&worst_physical);
@@ -50,28 +50,28 @@ bool Run(std::string_view name, uint32_t longitudinal, uint32_t count) {
     const uint32_t worst_mode = uint32_t(worst_physical) + 6;
     const uint32_t uncertified = uint32_t((result_certification.RelativeResiduals.tail(count - 6).array() >= tolerance).count());
     const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
-        operation, reference.Values, reference.Vectors, result.Eigenvectors
+        operation, assembled.Eigenvalues, assembled.Eigenvectors, result.Eigenvectors
     );
     const double first_frequency = std::sqrt(std::max(0.0, result.Eigenvalues[6])) / (2 * std::numbers::pi);
     const double last_frequency = std::sqrt(std::max(0.0, result.Eigenvalues[count - 1])) / (2 * std::numbers::pi);
     std::println(
-        "audio geometry={} description={} grid={}x{}x{} dofs={} cut={} modes={} iterations={}/{} fallback={}/{}/{:.3e} reference_actions={} frequency={:.3f}/{:.3f} spectrum={:.3e} residual={:.3e}/{:.3e}@{} uncertified={} orthogonality={:.3e} paired_mac={:.6f} best_mac={:.6f} cluster_mac={:.6f} clusters={}/{}",
+        "audio geometry={} description={} grid={}x{}x{} dofs={} cut={} modes={} iterations={}/{} fallback={}/{}/{:.3e} assembled_iterations={} frequency={:.3f}/{:.3f} spectrum={:.3e} residual={:.3e}/{:.3e}@{} uncertified={} orthogonality={:.3e} paired_mac={:.6f} best_mac={:.6f} cluster_mac={:.6f} clusters={}/{}",
         name, geometry.Description, cells.x, cells.y, cells.z,
         operation.Dofs(), operation.Profile.CutCells, count, result.Iterations, max_iterations,
         result.Profile.FallbackAttemptIterations, result.Profile.FallbackAttemptStagnated,
         result.Profile.FallbackAttemptResidual,
-        reference.Applications, first_frequency, last_frequency,
+        assembled.Iterations, first_frequency, last_frequency,
         spectrum_error, recurrence_residual, residual, worst_mode, uncertified, result_certification.MassOrthogonalityError, shapes.PairedMacMinimum,
         shapes.BestMacMinimum, shapes.ClusterMacMinimum, shapes.Clusters, shapes.LargestCluster
     );
     if (spectrum_error >= 1e-9)
         for (uint32_t mode = 6; mode < count; ++mode) {
-            const double reference_frequency = std::sqrt(std::max(0.0, reference.Values[mode])) / (2 * std::numbers::pi);
+            const double assembled_frequency = std::sqrt(std::max(0.0, assembled.Eigenvalues[mode])) / (2 * std::numbers::pi);
             const double result_frequency = std::sqrt(std::max(0.0, result.Eigenvalues[mode])) / (2 * std::numbers::pi);
-            const double relative = std::abs(result.Eigenvalues[mode] - reference.Values[mode]) /
-                std::max(std::abs(reference.Values[mode]), 1.0);
+            const double relative = std::abs(result.Eigenvalues[mode] - assembled.Eigenvalues[mode]) /
+                std::max(std::abs(assembled.Eigenvalues[mode]), 1.0);
             if (relative > 1e-6)
-                std::println(stderr, "audio mismatch geometry={} mode={} reference={:.9f}/{:.6e} result={:.9f}/{:.6e} relative={:.3e}", name, mode, reference_frequency, reference.Values[mode], result_frequency, result.Eigenvalues[mode], relative);
+                std::println(stderr, "audio mismatch geometry={} mode={} assembled={:.9f}/{:.6e} result={:.9f}/{:.6e} relative={:.3e}", name, mode, assembled_frequency, assembled.Eigenvalues[mode], result_frequency, result.Eigenvalues[mode], relative);
         }
     return spectrum_error < 1e-9 && residual < tolerance &&
         result_certification.MassOrthogonalityError < 1e-9 && shapes.ClusterMacMinimum > 0.99999;

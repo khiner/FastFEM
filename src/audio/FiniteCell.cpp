@@ -1,5 +1,5 @@
 #include "FiniteCell.h"
-#include "FiniteCellOracle.h"
+#include "finite_cell/OctreeQuadrature.h"
 
 #include <dispatch/dispatch.h>
 
@@ -405,17 +405,17 @@ struct MomentFitResult {
 };
 
 std::optional<MomentFitResult> FitCutCellMoments(
-    std::span<const modal::FiniteCellOperator::QuadraturePoint> oracle,
+    std::span<const modal::FiniteCellOperator::QuadraturePoint> uncompressed,
     std::span<const modal::FiniteCellOperator::QuadraturePoint> candidates
 ) {
-    if (oracle.size() % NodeCount) throw std::logic_error("Finite-cell oracle quadrature has an incomplete tensor patch.");
+    if (uncompressed.size() % NodeCount) throw std::logic_error("Uncompressed finite-cell quadrature has an incomplete tensor patch.");
     if (candidates.size() % NodeCount) throw std::logic_error("Finite-cell candidate quadrature has an incomplete tensor patch.");
-    if (candidates.size() >= oracle.size()) return std::nullopt;
+    if (candidates.size() >= uncompressed.size()) return std::nullopt;
 
     std::array<double, 2> measures{};
     std::array<MomentVector, 2> moments{};
     for (auto &moment : moments) moment.setZero();
-    for (const auto &sample : oracle) {
+    for (const auto &sample : uncompressed) {
         const uint32_t region = sample.Fictitious;
         measures[region] += sample.Weight;
         moments[region] += sample.Weight * MomentBasis(sample.Reference);
@@ -426,7 +426,7 @@ std::optional<MomentFitResult> FitCutCellMoments(
         std::vector<double>(candidates.size()),
         std::vector<double>(candidates.size()),
     };
-    std::vector<double> oracle_weights(oracle.size());
+    std::vector<double> uncompressed_weights(uncompressed.size());
     double maximum_residual{};
     Eigen::MatrixXd basis;
     Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> decomposition;
@@ -449,8 +449,8 @@ std::optional<MomentFitResult> FitCutCellMoments(
             }
         }
         if (!fitted_region)
-            for (uint32_t index = 0; index < oracle.size(); ++index)
-                if (oracle[index].Fictitious == region) oracle_weights[index] = oracle[index].Weight;
+            for (uint32_t index = 0; index < uncompressed.size(); ++index)
+                if (uncompressed[index].Fictitious == region) uncompressed_weights[index] = uncompressed[index].Weight;
     }
     std::vector<modal::FiniteCellOperator::QuadraturePoint> points;
     const auto Append = [&](const auto &source, const std::vector<double> &weights, std::optional<uint8_t> region = std::nullopt) {
@@ -471,8 +471,8 @@ std::optional<MomentFitResult> FitCutCellMoments(
     };
     Append(candidates, candidate_weights[0], uint8_t{0});
     Append(candidates, candidate_weights[1], uint8_t{1});
-    Append(oracle, oracle_weights);
-    if (points.size() < oracle.size()) return MomentFitResult{std::move(points), maximum_residual};
+    Append(uncompressed, uncompressed_weights);
+    if (points.size() < uncompressed.size()) return MomentFitResult{std::move(points), maximum_residual};
     return std::nullopt;
 }
 
@@ -483,7 +483,7 @@ void BuildMomentFittedQuadrature(
     struct CellQuadrature {
         std::vector<modal::FiniteCellOperator::QuadraturePoint> Points;
         double PhysicalVolume{}, Residual{};
-        uint32_t OracleCount{};
+        uint32_t UncompressedCount{};
         bool Fitted{};
     };
     struct Context {
@@ -501,11 +501,11 @@ void BuildMomentFittedQuadrature(
             const auto &cell = context.Operation.Cells[cell_index];
             auto &result = context.Quadrature[cell_index];
             const dvec3 center = CellCenter(context.Operation, cell), half = 1.0 / cell.InverseHalf;
-            std::vector<modal::FiniteCellOperator::QuadraturePoint> oracle;
-            CellIntegrator oracle_integrator{context.Domain, context.Config, center, half, oracle};
-            oracle_integrator.Integrate(center, half, 0);
-            result.OracleCount = uint32_t(oracle.size());
-            result.PhysicalVolume = oracle_integrator.PhysicalVolume;
+            std::vector<modal::FiniteCellOperator::QuadraturePoint> uncompressed;
+            CellIntegrator uncompressed_integrator{context.Domain, context.Config, center, half, uncompressed};
+            uncompressed_integrator.Integrate(center, half, 0);
+            result.UncompressedCount = uint32_t(uncompressed.size());
+            result.PhysicalVolume = uncompressed_integrator.PhysicalVolume;
             if (cell.Cut) {
                 for (uint32_t depth = 0; depth < context.Config.CutDepth; ++depth) {
                     auto candidate_config = context.Config;
@@ -513,7 +513,7 @@ void BuildMomentFittedQuadrature(
                     std::vector<modal::FiniteCellOperator::QuadraturePoint> candidates;
                     CellIntegrator candidate_integrator{context.Domain, candidate_config, center, half, candidates};
                     candidate_integrator.Integrate(center, half, 0);
-                    if (auto fit = FitCutCellMoments(oracle, candidates)) {
+                    if (auto fit = FitCutCellMoments(uncompressed, candidates)) {
                         result.Points = std::move(fit->Points);
                         result.Residual = fit->Residual;
                         result.Fitted = true;
@@ -521,7 +521,7 @@ void BuildMomentFittedQuadrature(
                     }
                 }
             }
-            result.Points = std::move(oracle);
+            result.Points = std::move(uncompressed);
         }
     );
 
@@ -534,11 +534,11 @@ void BuildMomentFittedQuadrature(
         auto &quadrature = cells[cell_index];
         cell.QuadratureOffset = write;
         cell.QuadratureCount = uint32_t(quadrature.Points.size());
-        cell.OracleQuadratureCount = quadrature.OracleCount;
+        cell.UncompressedQuadratureCount = quadrature.UncompressedCount;
         std::move(quadrature.Points.begin(), quadrature.Points.end(), operation.Quadrature.begin() + write);
         write += cell.QuadratureCount;
         operation.Profile.PhysicalVolume += quadrature.PhysicalVolume;
-        operation.Profile.OracleQuadraturePoints += quadrature.OracleCount;
+        operation.Profile.UncompressedQuadraturePoints += quadrature.UncompressedCount;
         operation.Profile.QuadraturePoints += cell.QuadratureCount;
         if (cell.Cut) {
             if (quadrature.Fitted) {
@@ -656,10 +656,10 @@ modal::FiniteCellOperator Build(
                 if (!moment_fitting) {
                     CellIntegrator integrator{domain, config, center, half, result.Quadrature};
                     integrator.Integrate(center, half, 0);
-                    cell.OracleQuadratureCount = uint32_t(result.Quadrature.size()) - cell.QuadratureOffset;
-                    cell.QuadratureCount = cell.OracleQuadratureCount;
+                    cell.UncompressedQuadratureCount = uint32_t(result.Quadrature.size()) - cell.QuadratureOffset;
+                    cell.QuadratureCount = cell.UncompressedQuadratureCount;
                     result.Profile.PhysicalVolume += integrator.PhysicalVolume;
-                    result.Profile.OracleQuadraturePoints += cell.OracleQuadratureCount;
+                    result.Profile.UncompressedQuadraturePoints += cell.UncompressedQuadratureCount;
                     result.Profile.QuadraturePoints += cell.QuadratureCount;
                 }
 
@@ -1504,7 +1504,7 @@ std::optional<modal::FiniteCellOperator::InterpolationStencil> modal::FiniteCell
     return std::nullopt;
 }
 
-modal::FiniteCellOperator modal::oracle::BuildOctree(const ImplicitDomain &domain, const AcousticMaterialProperties &material, FiniteCellConfig config) {
+modal::FiniteCellOperator modal::finite_cell::BuildOctreeOperator(const ImplicitDomain &domain, const AcousticMaterialProperties &material, FiniteCellConfig config) {
     return BuildOperator(domain, material, config, false);
 }
 
