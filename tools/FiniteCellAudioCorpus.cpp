@@ -2,7 +2,7 @@
 #include "ModeShapeComparison.h"
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellEigensolver.h"
-#include "audio/finite_cell/AssembledCholesky.h"
+#include "audio/finite_cell/AssembledEigensolver.h"
 #include "audio/finite_cell/EigenpairCertification.h"
 
 #include <charconv>
@@ -35,7 +35,7 @@ bool Run(std::string_view name, uint32_t longitudinal, uint32_t count) {
     );
     if (count + 4 >= operation.Dofs())
         throw std::invalid_argument("Audio-corpus mode count leaves no guard-vector space for " + std::string{name} + ".");
-    const auto assembled = modal::finite_cell::SolveAssembledCholesky(operation, count, shift, 1e-9, 1000);
+    const auto assembled = modal::finite_cell::SolveAssembledEigenpairs(operation, count, shift, 1e-9, 1000);
     const uint32_t max_iterations = std::max(200u, 2 * count);
     const auto result = modal::SolveFiniteCellEigenpairs(operation, count, shift, tolerance, max_iterations);
     if (assembled.Eigenvalues.size() != count || result.Eigenvalues.size() != count) {

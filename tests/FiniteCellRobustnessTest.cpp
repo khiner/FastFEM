@@ -4,7 +4,7 @@
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellEigensolver.h"
 #include "audio/finite_cell/AccelerateShiftInvert.h"
-#include "audio/finite_cell/AssembledCholesky.h"
+#include "audio/finite_cell/AssembledEigensolver.h"
 #include "audio/finite_cell/EigenpairCertification.h"
 
 #include <boost/ut.hpp>
@@ -30,7 +30,7 @@ struct Case {
 };
 
 suite RobustnessTests = [] {
-    "wide tapered-key eigenpairs certify with assembled Cholesky fallback"_test = [] {
+    "wide tapered-key eigenpairs certify with the assembled fallback"_test = [] {
         constexpr uint32_t count{256};
         const auto geometry = finite_cell_benchmark::MakeGeometry("tapered-key");
         const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
@@ -154,7 +154,7 @@ suite RobustnessTests = [] {
                 .PaddingCells = 0.25,
             }
         );
-        const auto result = modal::finite_cell::SolveAssembledCholesky(operation, ModeCount, Shift, 1e-8, 100);
+        const auto result = modal::finite_cell::SolveAssembledEigenpairs(operation, ModeCount, Shift, 1e-8, 100);
         expect(result.Eigenvalues.size() == Eigen::Index(ModeCount));
         if (result.Eigenvalues.size() != ModeCount) return;
         const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
@@ -189,7 +189,7 @@ suite RobustnessTests = [] {
                     .GridOffsetCells = entry.GridOffset,
                 }
             );
-            const auto assembled = modal::finite_cell::SolveAssembledCholesky(operation, ModeCount, Shift, 1e-9, 1000);
+            const auto assembled = modal::finite_cell::SolveAssembledEigenpairs(operation, ModeCount, Shift, 1e-9, 1000);
             const auto production = modal::SolveFiniteCellEigenpairs(operation, ModeCount, Shift, 1e-8, 300);
             expect(assembled.Eigenvalues.size() == Eigen::Index(ModeCount)) << entry.Geometry;
             expect(production.Eigenvalues.size() == Eigen::Index(ModeCount)) << entry.Geometry;

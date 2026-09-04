@@ -748,7 +748,7 @@ std::pair<RowSparse, std::vector<GridPoint>> Coarsen(const std::vector<GridPoint
 
 std::vector<CpuMultigridLevel> BuildP1Hierarchy(
     const modal::FiniteCellOperator &operation, double alpha,
-    const modal::FiniteCellOperator::AssembledLower &prepared
+    const modal::AssembledPencil &prepared
 ) {
     const RowSparse stiffness = prepared.Stiffness.selfadjointView<Eigen::Lower>();
     const RowSparse mass = prepared.Mass.selfadjointView<Eigen::Lower>();
@@ -784,7 +784,7 @@ modal::finite_cell::MetalOperations::P1Multigrid &modal::finite_cell::MetalOpera
 modal::finite_cell::MetalOperations::P1Multigrid::~P1Multigrid() = default;
 
 modal::finite_cell::MetalOperations::P1Multigrid modal::finite_cell::MetalOperations::PrepareP1Multigrid(
-    const FiniteCellOperator &operation, double alpha, const FiniteCellOperator::AssembledLower &assembly
+    const FiniteCellOperator &operation, double alpha, const AssembledPencil &assembly
 ) {
     P1Multigrid result;
     result.Impl->Levels = BuildP1Hierarchy(operation, alpha, assembly);

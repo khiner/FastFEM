@@ -50,7 +50,7 @@ struct MetalOperations {
     Block CreateP1Block(uint32_t width) const;
     void Upload(Block &, const double *) const;
     void Download(const Block &, double *) const;
-    static P1Multigrid PrepareP1Multigrid(const FiniteCellOperator &, double alpha, const FiniteCellOperator::AssembledLower &);
+    static P1Multigrid PrepareP1Multigrid(const FiniteCellOperator &, double alpha, const AssembledPencil &);
     void ConfigureP1Multigrid(P1Multigrid &&) const;
     void ApplyP1Multigrid(const Block &input, Block &output) const;
     void LinearCombination(const Block &left, float left_scale, const Block &right, float right_scale, Block &output) const;

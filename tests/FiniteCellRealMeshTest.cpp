@@ -3,7 +3,7 @@
 #include "ModeShapeComparison.h"
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellEigensolver.h"
-#include "audio/finite_cell/AssembledCholesky.h"
+#include "audio/finite_cell/AssembledEigensolver.h"
 #include "audio/finite_cell/EigenpairCertification.h"
 
 #include <algorithm>
@@ -128,7 +128,7 @@ RunResult Run(const fs::path &path, uint32_t resolution, uint32_t max_iterations
         {.Cells = cells, .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
     );
     if (operation.Dofs() <= SolvedModeCount + 4) throw std::runtime_error("grid has insufficient degrees of freedom");
-    const auto assembled = modal::finite_cell::SolveAssembledCholesky(operation, SolvedModeCount, Shift, 1e-9, 1000);
+    const auto assembled = modal::finite_cell::SolveAssembledEigenpairs(operation, SolvedModeCount, Shift, 1e-9, 1000);
     const auto production = modal::SolveFiniteCellEigenpairs(operation, SolvedModeCount, Shift, 1e-8, max_iterations);
     if (assembled.Eigenvalues.size() != SolvedModeCount || production.Eigenvalues.size() != SolvedModeCount)
         throw std::runtime_error("assembled or production solve did not converge");

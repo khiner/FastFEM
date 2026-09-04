@@ -1,4 +1,4 @@
-#include "surface2modes.h"
+#include "Surface2Modes.h"
 
 #include "FiniteCellEigensolver.h"
 #include "MassPropertiesAccumulator.h"
@@ -93,7 +93,7 @@ std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const v
 }
 } // namespace
 
-std::expected<modal::ModalResult, std::string> modal::surface2modes(std::span<const vec3> positions, std::span<const uint32_t> triangle_indices, const AcousticMaterialProperties &material, std::span<const vec3> excitation_positions, vec3 baked_scale, Discretization discretization, SurfaceSolveConfig config, SolveReuse reuse, SolveMonitor *monitor) {
+std::expected<modal::ModalResult, std::string> modal::Surface2Modes(std::span<const vec3> positions, std::span<const uint32_t> triangle_indices, const AcousticMaterialProperties &material, std::span<const vec3> excitation_positions, vec3 baked_scale, Discretization discretization, SurfaceSolveConfig config, SolveReuse reuse, SolveMonitor *monitor) {
     if (positions.empty() || triangle_indices.empty() || triangle_indices.size() % 3) return std::unexpected("A surface solve requires indexed triangles.");
     if (baked_scale.x <= 0 || baked_scale.y <= 0 || baked_scale.z <= 0) return std::unexpected("Baked scale components must be positive.");
     try {
@@ -101,7 +101,7 @@ std::expected<modal::ModalResult, std::string> modal::surface2modes(std::span<co
             case Discretization::Tet10: {
                 auto tetrahedra = GenerateTets({positions.begin(), positions.end()}, {triangle_indices.begin(), triangle_indices.end()}, config.Tetrahedralization);
                 if (!tetrahedra) return std::unexpected(std::move(tetrahedra.error()));
-                return mesh2modes(tetrahedra->Mesh, material, {excitation_positions.begin(), excitation_positions.end()}, baked_scale, config.Modal, reuse, monitor);
+                return SolveTet10Modes(tetrahedra->Mesh, material, {excitation_positions.begin(), excitation_positions.end()}, baked_scale, config.Modal, reuse, monitor);
             }
             case Discretization::FiniteCell:
                 return SolveFiniteCell(positions, triangle_indices, material, excitation_positions, baked_scale, config, reuse, monitor);

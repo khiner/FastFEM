@@ -44,10 +44,11 @@ add_library(FastFEM
     src/audio/FiniteCellEigensolver.cpp
     src/audio/finite_cell/MetalOperations.mm
     src/audio/MassProperties.cpp
+    src/audio/ModalResultBuilder.cpp
     src/audio/AccelerateSparseCholesky.cpp
-    src/audio/surface2modes.cpp
+    src/audio/Surface2Modes.cpp
     src/audio/Tet10Assembler.cpp
-    src/audio/mesh2modes.cpp
+    src/audio/Tet10Modes.cpp
     src/mesh/Tetrahedralize.cpp
     src/mesh/Tets.cpp
     src/numeric/Accelerate.cpp
@@ -193,10 +194,10 @@ if(FASTFEM_BUILD_TESTS)
     )
     add_test(NAME FastFEMModalSolver COMMAND FastFEMModalSolverTest)
 
-    add_executable(FastFEMSurfaceModesTest tests/SurfaceModesTest.cpp)
-    target_include_directories(FastFEMSurfaceModesTest PRIVATE tests tools)
-    target_link_libraries(FastFEMSurfaceModesTest PRIVATE FastFEM::FastFEM Boost::ut)
-    add_test(NAME FastFEMSurfaceModes COMMAND FastFEMSurfaceModesTest)
+    add_executable(FastFEMSurface2ModesTest tests/Surface2ModesTest.cpp)
+    target_include_directories(FastFEMSurface2ModesTest PRIVATE tests tools)
+    target_link_libraries(FastFEMSurface2ModesTest PRIVATE FastFEM::FastFEM Boost::ut)
+    add_test(NAME FastFEMSurface2Modes COMMAND FastFEMSurface2ModesTest)
 
     add_executable(FastFEMFiniteCellTest tests/FiniteCellTest.cpp)
     target_include_directories(FastFEMFiniteCellTest PRIVATE tests tools)

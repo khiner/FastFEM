@@ -4,7 +4,7 @@
 
 #include "GeneralizedEigenSolver.h"
 #include "finite_cell/AccelerateShiftInvert.h"
-#include "finite_cell/AssembledCholesky.h"
+#include "finite_cell/AssembledEigensolver.h"
 #include "finite_cell/MetalOperations.h"
 #include "numeric/Accelerate.h"
 
@@ -227,7 +227,7 @@ bool RitzFromActions(
 // Returns a Gaussian basis whose leading columns contain the prolonged P1 eigenbasis and four guard vectors.
 Eigen::MatrixXd InitialSpace(
     const modal::FiniteCellOperator &fem, uint32_t width, double alpha,
-    const modal::FiniteCellOperator::AssembledLower &p1
+    const modal::AssembledPencil &p1
 ) {
     Eigen::MatrixXd result(fem.Dofs(), width);
     std::mt19937_64 random{20260828};
@@ -380,7 +380,7 @@ struct MetalMultiplicativePreconditioner {
 
     MetalMultiplicativePreconditioner(
         const modal::FiniteCellOperator &fem, double alpha,
-        const modal::FiniteCellOperator::AssembledLower &p1_assembly
+        const modal::AssembledPencil &p1_assembly
     ) {
         auto multigrid_future = std::async(std::launch::async, [&] {
             return modal::finite_cell::MetalOperations::PrepareP1Multigrid(fem, alpha, p1_assembly);
@@ -720,17 +720,17 @@ modal::FiniteCellEigenpairs modal::SolveFiniteCellEigenpairs(
         physical_count ? std::numeric_limits<double>::infinity() :
                          0;
     factor_free = {};
-    auto cholesky = finite_cell::SolveAssembledCholesky(fem, count, alpha, tolerance, max_iterations);
-    if (!converged(cholesky)) throw std::runtime_error("Finite-cell default and fallback solvers did not converge within the iteration budget.");
-    cholesky.Profile.FailedFactorFreeSeconds = attempt_seconds;
-    cholesky.Profile.FailedFactorFreeIterations = attempt_iterations;
-    cholesky.Profile.FailedFactorFreeStagnated = attempt_stagnated;
-    cholesky.Profile.FailedFactorFreeResidual = attempt_residual;
-    cholesky.Profile.Total += attempt_seconds;
-    return cholesky;
+    auto assembled = finite_cell::SolveAssembledEigenpairs(fem, count, alpha, tolerance, max_iterations);
+    if (!converged(assembled)) throw std::runtime_error("Finite-cell default and fallback solvers did not converge within the iteration budget.");
+    assembled.Profile.FailedFactorFreeSeconds = attempt_seconds;
+    assembled.Profile.FailedFactorFreeIterations = attempt_iterations;
+    assembled.Profile.FailedFactorFreeStagnated = attempt_stagnated;
+    assembled.Profile.FailedFactorFreeResidual = attempt_residual;
+    assembled.Profile.Total += attempt_seconds;
+    return assembled;
 }
 
-modal::FiniteCellEigenpairs modal::finite_cell::SolveAssembledCholesky(
+modal::FiniteCellEigenpairs modal::finite_cell::SolveAssembledEigenpairs(
     const FiniteCellOperator &fem, uint32_t count, double alpha, double tolerance,
     uint32_t max_iterations
 ) {

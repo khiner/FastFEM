@@ -23,12 +23,12 @@ xcodebuild -downloadComponent MetalToolchain
 
 ## Usage
 
-`surface2modes` runs the complete watertight-surface-to-modal-model pipeline with an explicit discretization:
+`Surface2Modes` runs the complete watertight-surface-to-modal-model pipeline with an explicit discretization:
 
 ```cpp
-#include "audio/surface2modes.h"
+#include "audio/Surface2Modes.h"
 
-auto result = modal::surface2modes(
+auto result = modal::Surface2Modes(
     positions, triangleIndices, material, excitationPositions, vec3{1},
     modal::Discretization::FiniteCell
 );
@@ -51,12 +51,12 @@ FastFEM provides two discretizations with independent accuracy and certification
 
 ### Tet10
 
-`mesh2modes` accepts a quadratic tetrahedral volume mesh and assembles stiffness and mass directly into a 3-by-3 block pencil.
+`SolveTet10Modes` accepts a quadratic tetrahedral volume mesh and assembles stiffness and mass directly into a 3-by-3 block pencil.
 It factors the pencil with relaxed-supernodal Cholesky and solves the FP64 generalized elastic eigenproblem.
 A deterministic block shift-invert iteration extracts the modes, while Accelerate supplies fill-reducing ordering and dense BLAS/LAPACK kernels.
 
 Pass a `SolveCache` to preserve the block pencil and symbolic factorization between compatible solve calls.
-`mesh2modes` can seed a guarded block-subspace re-solve with modes from a geometry-compatible prior solution.
+`SolveTet10Modes` can seed a guarded block-subspace re-solve with modes from a geometry-compatible prior solution.
 Scalar Eigen matrices provide mass actions and independent certification.
 
 ### Finite cell
@@ -75,10 +75,10 @@ Its matrix-free path combines:
 
 `SolveFiniteCellEigenpairs` evaluates exact physical FP64 residuals from the action panels computed during iteration.
 It applies the same factor-free solver to every geometry and problem size.
-An unconverged factor-free result selects assembled FP64 Cholesky shift-invert.
+An unconverged factor-free result selects the assembled FP64 eigensolver.
 If neither solver converges within the supplied iteration budget, `SolveFiniteCellEigenpairs` returns an error.
 Validation code calls `modal::finite_cell::CertifyEigenpairs` to recompute residuals and mass orthogonality independently.
-Validation compares the factor-free solve against assembled Cholesky and moment-fitted integration against uncompressed octree quadrature.
+Validation compares the factor-free solve against the assembled eigensolver and moment-fitted integration against uncompressed octree quadrature.
 
 ## Correctness corpus
 

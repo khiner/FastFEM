@@ -7,7 +7,7 @@
 #include "audio/GeneralizedEigenSolver.h"
 #include "audio/Tet10Assembler.h"
 #include "audio/Tet10Cholesky.h"
-#include "audio/mesh2modes.h"
+#include "audio/Tet10Modes.h"
 #include "mesh/Tets.h"
 
 #include <Eigen/Eigenvalues>
@@ -86,7 +86,7 @@ Family Classify(const ModalModes &modes, uint32_t mode, const Bar &bar, int nx) 
 std::map<Family, std::vector<double>> SolveBar(const Bar &bar, int nx, int ny, int nz) {
     const auto tets = MakeStructuredBar(nx, ny, nz, {bar.Length, bar.Width, bar.Thickness});
     const std::vector<vec3> all_positions(tets.Points.begin(), tets.Points.end());
-    const auto result = modal::mesh2modes(tets, bar.Material, all_positions, vec3{1}, {});
+    const auto result = modal::SolveTet10Modes(tets, bar.Material, all_positions, vec3{1}, {});
     std::map<Family, std::vector<double>> fem;
     for (uint32_t mode = 0; mode < result.Modes.Freqs.size(); ++mode) {
         fem[Classify(result.Modes, mode, bar, nx)].push_back(result.Modes.Freqs[mode]);
@@ -315,15 +315,15 @@ int main() {
         const TetMesh mesh = MakeStructuredBar(2, 1, 1);
         modal::SolveCache cache;
         constexpr modal::SolverConfig config{.NumModes = 12, .NumFemModes = 12, .Tolerance = 1e-8};
-        const auto first = modal::mesh2modes(mesh, material, {vec3(mesh.Points.front())}, vec3{1}, config, {.Cache = &cache, .KeepBasis = true});
-        const auto second = modal::mesh2modes(mesh, material, {vec3(mesh.Points.front())}, vec3{1}, config, {.Cache = &cache, .KeepBasis = true});
+        const auto first = modal::SolveTet10Modes(mesh, material, {vec3(mesh.Points.front())}, vec3{1}, config, {.Cache = &cache, .KeepBasis = true});
+        const auto second = modal::SolveTet10Modes(mesh, material, {vec3(mesh.Points.front())}, vec3{1}, config, {.Cache = &cache, .KeepBasis = true});
         auto changed_material = material;
         changed_material.YoungModulus *= 1.5;
-        const auto changed = modal::mesh2modes(mesh, changed_material, {vec3(mesh.Points.front())}, vec3{1}, config, {.SeedBasis = &first.Basis, .Cache = &cache, .KeepBasis = true});
+        const auto changed = modal::SolveTet10Modes(mesh, changed_material, {vec3(mesh.Points.front())}, vec3{1}, config, {.SeedBasis = &first.Basis, .Cache = &cache, .KeepBasis = true});
         TetMesh deformed_mesh = mesh;
         for (auto &point : deformed_mesh.Points) point.x *= 1.03 + point.y;
-        const auto deformed = modal::mesh2modes(deformed_mesh, changed_material, {vec3(deformed_mesh.Points.front())}, vec3{1}, config, {.SeedBasis = &changed.Basis, .Cache = &cache, .KeepBasis = true});
-        const auto deformed_cold = modal::mesh2modes(deformed_mesh, changed_material, {vec3(deformed_mesh.Points.front())}, vec3{1}, config, {.KeepBasis = true});
+        const auto deformed = modal::SolveTet10Modes(deformed_mesh, changed_material, {vec3(deformed_mesh.Points.front())}, vec3{1}, config, {.SeedBasis = &changed.Basis, .Cache = &cache, .KeepBasis = true});
+        const auto deformed_cold = modal::SolveTet10Modes(deformed_mesh, changed_material, {vec3(deformed_mesh.Points.front())}, vec3{1}, config, {.KeepBasis = true});
         expect(!first.Profile.TopologyReuse);
         expect(!first.Profile.AssemblyReuse);
         expect(second.Profile.TopologyReuse);
@@ -449,7 +449,7 @@ int main() {
 
         constexpr AcousticMaterialProperties Ceramic{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19, .Alpha = 5, .Beta = 1e-8};
         const auto start = std::chrono::steady_clock::now();
-        const auto result = modal::mesh2modes(tets->Mesh, Ceramic, excite, vec3{1}, {});
+        const auto result = modal::SolveTet10Modes(tets->Mesh, Ceramic, excite, vec3{1}, {});
         const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         expect(!result.Modes.Freqs.empty());
         std::println("{:6.2f} s, {} modes, f1 {:8.1f} Hz", seconds, result.Modes.Freqs.size(), result.Modes.Freqs.empty() ? 0.0 : double(result.Modes.Freqs.front()));

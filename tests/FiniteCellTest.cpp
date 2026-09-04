@@ -4,7 +4,7 @@
 #include "RunSuites.h"
 #include "Tet10Eigenpairs.h"
 #include "audio/FiniteCellEigensolver.h"
-#include "audio/finite_cell/AssembledCholesky.h"
+#include "audio/finite_cell/AssembledEigensolver.h"
 #include "audio/finite_cell/EigenpairCertification.h"
 #include "audio/finite_cell/OctreeQuadrature.h"
 #include "audio/finite_cell/OperatorValidation.h"
@@ -318,7 +318,7 @@ suite FiniteCellTests = [] {
                 domain, Material,
                 {.Cells = finite_cell_benchmark::GridResolution(geometry, 6), .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
             );
-            const auto assembled = modal::finite_cell::SolveAssembledCholesky(operation, Count, shift, 5e-9, 150);
+            const auto assembled = modal::finite_cell::SolveAssembledEigenpairs(operation, Count, shift, 5e-9, 150);
             const auto production = modal::SolveFiniteCellEigenpairs(operation, Count, shift, 5e-9, 150);
             expect(assembled.Eigenvalues.size() == Count) << name;
             expect(production.Eigenvalues.size() == Count) << name;
@@ -431,8 +431,8 @@ suite FiniteCellTests = [] {
 
         constexpr uint32_t ModeCount{18}, ComparedCount{12};
         const double shift = std::pow(2 * std::numbers::pi * 20, 2);
-        const auto octree_modes = modal::finite_cell::SolveAssembledCholesky(octree, ModeCount, shift, 1e-8, 100);
-        const auto fitted_modes = modal::finite_cell::SolveAssembledCholesky(fitted, ModeCount, shift, 1e-8, 100);
+        const auto octree_modes = modal::finite_cell::SolveAssembledEigenpairs(octree, ModeCount, shift, 1e-8, 100);
+        const auto fitted_modes = modal::finite_cell::SolveAssembledEigenpairs(fitted, ModeCount, shift, 1e-8, 100);
         expect(octree_modes.Eigenvalues.size() == ModeCount);
         expect(fitted_modes.Eigenvalues.size() == ModeCount);
         double spectrum_error{std::numeric_limits<double>::infinity()};
@@ -562,7 +562,7 @@ suite FiniteCellTests = [] {
         }
         const double exact = std::sqrt(Material.YoungModulus / Material.Density) / (2 * extent.x);
         const double frequency_error = std::abs(longitudinal / exact - 1);
-        std::println("finite-cell bar: {} dofs, {} cut cells, volume error {:.3e}, longitudinal error {:.3e}", operation.Profile.Dofs, operation.Profile.CutCells, volume_error, frequency_error);
+        std::println("finite-cell bar: {} dofs, {} cut cells, volume error {:.3e}, longitudinal error {:.3e}", operation.Dofs(), operation.Profile.CutCells, volume_error, frequency_error);
         expect(std::isfinite(longitudinal));
         expect(frequency_error < 0.06);
     };
@@ -593,7 +593,7 @@ suite FiniteCellTests = [] {
         );
         expect(operation.Profile.ActiveCells < operation.Profile.BackgroundCells);
         expect(operation.Profile.CutCells > 0_u);
-        expect(operation.Profile.Dofs > 0_u);
+        expect(operation.Dofs() > 0_u);
         expect(operation.Profile.ActiveCells <= conservative.Profile.ActiveCells);
         expect(operation.Profile.QuadraturePoints < conservative.Profile.QuadraturePoints);
         expect(std::abs(operation.Profile.PhysicalVolume - conservative.Profile.PhysicalVolume) < 1e-14);

@@ -5,11 +5,11 @@
 #include "ModalModes.h"
 #include <Eigen/Core>
 
-#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <optional>
-#include <span>
+#include <vector>
 
 struct TetMesh;
 
@@ -42,27 +42,6 @@ struct SolveProfile {
     double PhysicalResidual{}, MassOrthogonality{};
     uint32_t Dofs{}, StiffnessNonZeros{}, OpApplications{}, Restarts{};
     bool TopologyReuse{}, AssemblyReuse{}, SymbolicReuse{};
-
-    SolveProfile &operator+=(const SolveProfile &o) {
-        MassProps += o.MassProps;
-        QuadMesh += o.QuadMesh;
-        Assemble += o.Assemble;
-        SampleExcite += o.SampleExcite;
-        Factorize += o.Factorize;
-        Iterate += o.Iterate;
-        OpSolve += o.OpSolve;
-        Extract += o.Extract;
-        PhysicalResidual = std::max(PhysicalResidual, o.PhysicalResidual);
-        MassOrthogonality = std::max(MassOrthogonality, o.MassOrthogonality);
-        Dofs += o.Dofs;
-        StiffnessNonZeros += o.StiffnessNonZeros;
-        OpApplications += o.OpApplications;
-        Restarts += o.Restarts;
-        TopologyReuse = TopologyReuse || o.TopologyReuse;
-        AssemblyReuse = AssemblyReuse || o.AssemblyReuse;
-        SymbolicReuse = SymbolicReuse || o.SymbolicReuse;
-        return *this;
-    }
 };
 
 struct ModalResult {
@@ -76,7 +55,7 @@ struct ModalResult {
     std::vector<uint32_t> SamplePointOfExcitation;
 };
 
-// mesh2modes uses a process-wide one-entry cache for topology and assembly.
+// SolveTet10Modes uses a process-wide one-entry cache for topology and assembly.
 // SolveCache preserves block-sparse numeric storage and symbolic factorization across sequential compatible solves.
 // Pass an explicit cache to exchange persistent memory for lower repeated-solve latency.
 struct SolveCache {
@@ -99,11 +78,7 @@ struct SolveReuse {
 // `baked_scale` converts the sampled positions to node-local coordinates.
 // `monitor` receives progress and supports cancellation between stages and eigensolver iterations.
 // Cancellation returns an empty result.
-ModalResult mesh2modes(const TetMesh &, const AcousticMaterialProperties &, const std::vector<vec3> &excite_positions, vec3 baked_scale, SolverConfig config = {}, SolveReuse reuse = {}, SolveMonitor *monitor = nullptr);
-
-// Returns audible mode frequencies, T60s, and shapes after damping and optional fundamental-frequency scaling.
-// `shapes` provides one vector per excitation position and eigenpair, and `shape_scale` scales each output vector.
-ModalModes PostprocessModes(std::span<const double> eigenvalues, const std::vector<std::vector<vec3>> &shapes, float shape_scale, const AcousticMaterialProperties &, const SolverConfig &, std::vector<vec3> positions);
+ModalResult SolveTet10Modes(const TetMesh &, const AcousticMaterialProperties &, const std::vector<vec3> &excite_positions, vec3 baked_scale, SolverConfig config = {}, SolveReuse reuse = {}, SolveMonitor *monitor = nullptr);
 
 // Returns exact rescaled modes for unchanged tetrahedral inputs and unchanged Poisson ratio.
 // Young's modulus and density scale eigenvalues by (E'/E)/(rho'/rho) and mass-normalized shapes by 1/sqrt(rho'/rho).

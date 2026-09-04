@@ -695,7 +695,6 @@ modal::FiniteCellOperator Build(
             const uint32_t node = result.Cells[cell].Nodes[local];
             result.NodeOccurrences[occurrence_cursor[node]++] = cell << 5 | local;
         }
-    result.Profile.Dofs = 3 * uint32_t(result.Nodes.size());
     result.Profile.Assemble = SecondsSince(start);
     return result;
 }
@@ -1008,7 +1007,7 @@ void CellOperators(
 // Returns assembled lower-triangle mass and stiffness matrices over the cell basis or nested P1 corners.
 // Fixed per-cell triplet slots make parallel and serial emission orders identical.
 template<bool P1>
-modal::FiniteCellOperator::AssembledLower Assemble(const modal::FiniteCellOperator &operation) {
+modal::AssembledPencil Assemble(const modal::FiniteCellOperator &operation) {
     constexpr uint32_t Basis{P1 ? 1 : BasisOrder}, Nodes{(Basis + 1) * (Basis + 1) * (Basis + 1)}, Dofs{3 * Nodes};
     constexpr uint32_t MassEntries{3 * Nodes * (Nodes + 1) / 2}, StiffnessEntries{Dofs * (Dofs + 1) / 2};
     std::vector<Eigen::Triplet<double>> mass_triplets(operation.Cells.size() * MassEntries);
@@ -1054,7 +1053,7 @@ modal::FiniteCellOperator::AssembledLower Assemble(const modal::FiniteCellOperat
         }
     );
     const uint32_t dofs = P1 ? 3 * operation.NumP1Nodes : operation.Dofs();
-    modal::FiniteCellOperator::AssembledLower result{
+    modal::AssembledPencil result{
         Eigen::SparseMatrix<double>{dofs, dofs}, Eigen::SparseMatrix<double>{dofs, dofs}
     };
     result.Mass.setFromTriplets(mass_triplets.begin(), mass_triplets.end());
@@ -1324,11 +1323,11 @@ modal::FiniteCellOperator modal::finite_cell::WithFictitiousScale(const FiniteCe
     return result;
 }
 
-modal::FiniteCellOperator::AssembledLower modal::FiniteCellOperator::AssembleLower() const {
+modal::AssembledPencil modal::FiniteCellOperator::AssembleLower() const {
     return Assemble<false>(*this);
 }
 
-modal::FiniteCellOperator::AssembledLower modal::FiniteCellOperator::AssembleP1Lower() const {
+modal::AssembledPencil modal::FiniteCellOperator::AssembleP1Lower() const {
     return Assemble<true>(*this);
 }
 

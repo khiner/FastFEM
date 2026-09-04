@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AcousticMaterialProperties.h"
+#include "AssembledPencil.h"
 #include "numeric/vec3.h"
 
 #include <Eigen/Core>
@@ -43,7 +44,7 @@ struct FiniteCellConfig {
 
 struct FiniteCellProfile {
     double Assemble{}, PhysicalVolume{}, MomentFitMaximumResidual{};
-    uint32_t BackgroundCells{}, ActiveCells{}, CutCells{}, MomentFittedCells{}, MomentFitFallbackCells{}, Dofs{};
+    uint32_t BackgroundCells{}, ActiveCells{}, CutCells{}, MomentFittedCells{}, MomentFitFallbackCells{};
     uint64_t QuadraturePoints{}, UncompressedQuadraturePoints{};
 };
 
@@ -73,11 +74,6 @@ struct FiniteCellOperator {
         dvec3 InverseHalf{};
         uint32_t QuadratureOffset{}, QuadratureCount{}, UncompressedQuadratureCount{};
         uint8_t Color{}, Cut{}, MomentFitted{}, MomentFitFallback{};
-    };
-
-    struct AssembledLower {
-        Eigen::SparseMatrix<double> Mass;
-        Eigen::SparseMatrix<double> Stiffness;
     };
 
     struct PackedCutOperators {
@@ -116,8 +112,8 @@ struct FiniteCellOperator {
     // Writes the lower triangle of cell `K + alpha*M` in row-packed order over `3 * NodesPerCell` rows.
     void PackCellShiftedLower(uint32_t cell, double alpha, std::span<double> packed) const;
     PackedCutOperators BuildPackedCutOperators(double alpha, std::span<const double> packed_shifted_elements) const;
-    AssembledLower AssembleLower() const;
-    AssembledLower AssembleP1Lower() const;
+    AssembledPencil AssembleLower() const;
+    AssembledPencil AssembleP1Lower() const;
 };
 
 FiniteCellOperator BuildFiniteCellOperator(const ImplicitDomain &, const AcousticMaterialProperties &, FiniteCellConfig = {});

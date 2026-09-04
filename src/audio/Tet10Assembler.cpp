@@ -163,7 +163,7 @@ void modal::Tet10Assembler::EvaluateBlock(
     mass = Density * element.Volume * basis.Mass[row][column];
 }
 
-modal::Tet10Assembler::AssembledLower modal::Tet10Assembler::AssembleLower() const {
+modal::AssembledPencil modal::Tet10Assembler::AssembleLower() const {
     std::vector<Eigen::Triplet<double>> mass_triplets, stiffness_triplets;
     mass_triplets.reserve(Elements().size() * LowerBlocksPerElement * 3);
     stiffness_triplets.reserve(Elements().size() * LowerBlocksPerElement * 9);
@@ -185,7 +185,7 @@ modal::Tet10Assembler::AssembledLower modal::Tet10Assembler::AssembleLower() con
         }
     }
 
-    AssembledLower assembled{Eigen::SparseMatrix<double>{Dofs(), Dofs()}, Eigen::SparseMatrix<double>{Dofs(), Dofs()}};
+    AssembledPencil assembled{Eigen::SparseMatrix<double>{Dofs(), Dofs()}, Eigen::SparseMatrix<double>{Dofs(), Dofs()}};
     assembled.Mass.setFromTriplets(mass_triplets.begin(), mass_triplets.end());
     assembled.Stiffness.setFromTriplets(stiffness_triplets.begin(), stiffness_triplets.end());
     return assembled;

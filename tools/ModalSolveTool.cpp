@@ -1,6 +1,6 @@
 #include "LoadObj.h"
 #include "audio/AcousticMaterialProperties.h"
-#include "audio/surface2modes.h"
+#include "audio/Surface2Modes.h"
 
 #include <charconv>
 #include <cstdio>
@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
         .Tetrahedralization = {.Quality = HasFlag(argc, argv, "--quality")},
     };
 
-    const auto result = modal::surface2modes(mesh->Positions, mesh->TriangleIndices, material, mesh->Positions, vec3{1}, discretization, config);
+    const auto result = modal::Surface2Modes(mesh->Positions, mesh->TriangleIndices, material, mesh->Positions, vec3{1}, discretization, config);
     if (!result) {
         std::println(stderr, "Modal solve failed: {}", result.error());
         return 1;

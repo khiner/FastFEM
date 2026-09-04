@@ -1,6 +1,6 @@
 #pragma once
 
-#include "audio/mesh2modes.h"
+#include "audio/Tet10Modes.h"
 #include "mesh/TetMesh.h"
 
 #include <Eigen/Core>
@@ -20,7 +20,7 @@ inline Tet10Eigenpairs SolveTet10Eigenpairs(
     double alpha, double tolerance, uint32_t max_restarts
 ) {
     modal::SolveCache cache;
-    const auto result = modal::mesh2modes(
+    const auto result = modal::SolveTet10Modes(
         mesh, material, {vec3(mesh.Points.front())}, vec3{1},
         {
             .MinModeFreq = float(std::sqrt(alpha) / (2 * std::numbers::pi)),

@@ -1,5 +1,5 @@
+#include "audio/Surface2Modes.h"
 #include "FiniteCellBenchmarkGeometry.h"
-#include "audio/surface2modes.h"
 
 #include <boost/ut.hpp>
 
@@ -36,7 +36,7 @@ int main() {
             },
         };
         for (const auto discretization : {modal::Discretization::Tet10, modal::Discretization::FiniteCell}) {
-            const auto result = modal::surface2modes(positions, box.Triangles, material, positions, vec3{1}, discretization, config, {.KeepBasis = true});
+            const auto result = modal::Surface2Modes(positions, box.Triangles, material, positions, vec3{1}, discretization, config, {.KeepBasis = true});
             expect(bool(result)) << (result ? "" : result.error());
             if (!result) continue;
             expect(!result->Modes.Freqs.empty());
