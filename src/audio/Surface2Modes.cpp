@@ -36,8 +36,7 @@ MassProperties ComputeFiniteCellMassProperties(const modal::FiniteCellOperator &
     return accumulator.Finish(density, length_to_si);
 }
 
-std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const vec3> surface_positions, std::span<const uint32_t> triangle_indices, const AcousticMaterialProperties &material, std::span<const vec3> excitation_positions, vec3 baked_scale, const modal::SurfaceSolveConfig &config, modal::SolveReuse reuse, modal::SolveMonitor *monitor) {
-    if (reuse.SeedBasis || reuse.Cache) return std::unexpected("Finite-cell surface solves do not accept a Tet10 seed basis or solve cache.");
+std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const vec3> surface_positions, std::span<const uint32_t> triangle_indices, const AcousticMaterialProperties &material, std::span<const vec3> excitation_positions, vec3 baked_scale, const modal::SurfaceSolveConfig &config, modal::SolveMonitor *monitor) {
     if (config.Modal.NumFemModes == 0) return std::unexpected("A surface solve requires at least one FEM mode.");
     std::vector<dvec3> positions;
     positions.reserve(surface_positions.size());
@@ -84,12 +83,10 @@ std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const v
 
     const double length_to_si = (double(baked_scale.x) + baked_scale.y + baked_scale.z) / 3;
     auto mass_properties = Timed(profile.MassProps, [&] { return ComputeFiniteCellMassProperties(operation, material.Density, baked_scale, length_to_si); });
-    numeric::Matrix<float> basis;
-    if (reuse.KeepBasis) basis = numeric::Cast<float>(eigenpairs.Eigenvectors.View());
     std::vector<uint32_t> sample_point_of(excitation_positions.size());
     for (uint32_t point = 0; point < sample_point_of.size(); ++point) sample_point_of[point] = point;
     if (monitor) monitor->Progress.store(1, std::memory_order_relaxed);
-    return modal::BuildModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config.Modal, std::move(sample_positions), baked_scale, std::move(mass_properties), profile, std::move(basis), std::move(sample_point_of));
+    return modal::BuildModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config.Modal, std::move(sample_positions), baked_scale, std::move(mass_properties), profile, {}, std::move(sample_point_of));
 }
 } // namespace
 
@@ -99,12 +96,18 @@ std::expected<modal::ModalResult, std::string> modal::Surface2Modes(std::span<co
     try {
         switch (discretization) {
             case Discretization::Tet10: {
-                auto tetrahedra = GenerateTets({positions.begin(), positions.end()}, {triangle_indices.begin(), triangle_indices.end()}, config.Tetrahedralization);
+                std::vector<vec3> surface_positions{positions.begin(), positions.end()};
+                std::vector<uint32_t> surface_indices{triangle_indices.begin(), triangle_indices.end()};
+                SimplifySurface(surface_positions, surface_indices, config.SurfaceSimplificationRatio);
+                auto tetrahedra = GenerateTets(std::move(surface_positions), std::move(surface_indices), config.Tetrahedralization);
                 if (!tetrahedra) return std::unexpected(std::move(tetrahedra.error()));
-                return SolveTet10Modes(tetrahedra->Mesh, material, {excitation_positions.begin(), excitation_positions.end()}, baked_scale, config.Modal, reuse, monitor);
+                auto result = SolveTet10Modes(tetrahedra->Mesh, material, {excitation_positions.begin(), excitation_positions.end()}, baked_scale, config.Modal, reuse, monitor);
+                result.Tetrahedra = std::move(tetrahedra->Mesh);
+                return result;
             }
             case Discretization::FiniteCell:
-                return SolveFiniteCell(positions, triangle_indices, material, excitation_positions, baked_scale, config, reuse, monitor);
+                if (reuse.SeedBasis || reuse.Cache) return std::unexpected("Finite-cell surface solves do not accept Tet10 reuse state.");
+                return SolveFiniteCell(positions, triangle_indices, material, excitation_positions, baked_scale, config, monitor);
         }
     } catch (const std::exception &error) {
         return std::unexpected(error.what());

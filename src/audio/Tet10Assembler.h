@@ -2,13 +2,12 @@
 
 #include "AcousticMaterialProperties.h"
 #include "AssembledPencil.h"
+#include "mesh/TetMesh.h"
 
 #include <array>
 #include <cstdint>
 #include <memory>
 #include <vector>
-
-struct TetMesh;
 
 namespace modal {
 struct Tet10Assembler {

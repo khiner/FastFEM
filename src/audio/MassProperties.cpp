@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace {
-quat QuaternionFromRotation(const std::array<float, 9> &rotation) {
+fastfem::Quat QuaternionFromRotation(const std::array<float, 9> &rotation) {
     const auto m = [&](int column, int row) { return rotation[row + 3 * column]; };
     const std::array candidates{
         m(0, 0) + m(1, 1) + m(2, 2),
@@ -17,15 +17,16 @@ quat QuaternionFromRotation(const std::array<float, 9> &rotation) {
     const auto biggest = std::ranges::max_element(candidates) - candidates.begin();
     const float value = std::sqrt(candidates[biggest] + 1.f) * .5f;
     const float scale = .25f / value;
-    quat result;
+    std::array<float, 4> result{};
     switch (biggest) {
-        case 0: result = {value, (m(1, 2) - m(2, 1)) * scale, (m(2, 0) - m(0, 2)) * scale, (m(0, 1) - m(1, 0)) * scale}; break;
-        case 1: result = {(m(1, 2) - m(2, 1)) * scale, value, (m(0, 1) + m(1, 0)) * scale, (m(2, 0) + m(0, 2)) * scale}; break;
-        case 2: result = {(m(2, 0) - m(0, 2)) * scale, (m(0, 1) + m(1, 0)) * scale, value, (m(1, 2) + m(2, 1)) * scale}; break;
-        case 3: result = {(m(0, 1) - m(1, 0)) * scale, (m(2, 0) + m(0, 2)) * scale, (m(1, 2) + m(2, 1)) * scale, value}; break;
+        case 0: result = {(m(1, 2) - m(2, 1)) * scale, (m(2, 0) - m(0, 2)) * scale, (m(0, 1) - m(1, 0)) * scale, value}; break;
+        case 1: result = {value, (m(0, 1) + m(1, 0)) * scale, (m(2, 0) + m(0, 2)) * scale, (m(1, 2) - m(2, 1)) * scale}; break;
+        case 2: result = {(m(0, 1) + m(1, 0)) * scale, value, (m(1, 2) + m(2, 1)) * scale, (m(2, 0) - m(0, 2)) * scale}; break;
+        case 3: result = {(m(2, 0) + m(0, 2)) * scale, (m(1, 2) + m(2, 1)) * scale, value, (m(0, 1) - m(1, 0)) * scale}; break;
     }
-    const float norm = std::sqrt(result.w * result.w + result.x * result.x + result.y * result.y + result.z * result.z);
-    return {result.w / norm, result.x / norm, result.y / norm, result.z / norm};
+    const float norm = std::sqrt(result[0] * result[0] + result[1] * result[1] + result[2] * result[2] + result[3] * result[3]);
+    for (float &component : result) component /= norm;
+    return fastfem::Quat{result[3], result[0], result[1], result[2]};
 }
 } // namespace
 
@@ -78,8 +79,8 @@ MassProperties modal::MassPropertiesAccumulator::Finish(double density, double l
         for (size_t row = 0; row < 3; ++row) axes[row] = -axes[row];
     return {
         density * Volume * std::pow(length_to_si, 3),
-        vec3{center},
-        vec3{float(values[0]), float(values[1]), float(values[2])},
+        fastfem::Vec3{center},
+        fastfem::Vec3{float(values[0]), float(values[1]), float(values[2])},
         QuaternionFromRotation(axes),
     };
 }

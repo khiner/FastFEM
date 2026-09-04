@@ -341,5 +341,6 @@ modal::ModalResult modal::SolveTet10Modes(const TetMesh &input_tets, const Acous
                 shapes[point][size_t(mode)][component] = eigenpairs.Eigenvectors(3 * excite_points[point] + component, mode);
     numeric::Matrix<float> basis;
     if (reuse.KeepBasis) basis = numeric::Cast<float>(eigenpairs.Eigenvectors.View());
+    if (monitor) monitor->Progress.store(1, std::memory_order_relaxed);
     return BuildModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config, std::move(positions), baked_scale, std::move(mass_props), profile, std::move(basis), std::move(sample_point_of));
 }

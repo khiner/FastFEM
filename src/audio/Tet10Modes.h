@@ -1,27 +1,19 @@
 #pragma once
 
+#include "FastFEM/SolveMonitor.h"
 #include "MassProperties.h"
 #include "ModalEigenSummary.h"
 #include "ModalModes.h"
+#include "mesh/TetMesh.h"
 #include "numeric/Matrix.h"
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
 
-struct TetMesh;
-
 namespace modal {
-// Shares progress and cancellation state with a running solve.
-struct SolveMonitor {
-    std::atomic<float> Progress{}; // Fraction complete, or zero while indeterminate
-    std::atomic<bool> CancelRequested{};
-
-    void RequestCancel() { CancelRequested.store(true, std::memory_order_relaxed); }
-    bool Cancelled() const { return CancelRequested.load(std::memory_order_relaxed); }
-};
+using SolveMonitor = fastfem::SolveMonitor;
 
 // MinModeFreq also sets the eigensolver shift to -(2*pi*MinModeFreq)^2.
 struct SolverConfig {
@@ -53,6 +45,7 @@ struct ModalResult {
     // Maps each requested excitation position to Modes.Positions in request order.
     // Excitation positions mapped to one tetrahedral point share one entry.
     std::vector<uint32_t> SamplePointOfExcitation;
+    TetMesh Tetrahedra;
 };
 
 // SolveTet10Modes uses a process-wide one-entry cache for topology and assembly.

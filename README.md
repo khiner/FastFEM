@@ -23,20 +23,50 @@ xcodebuild -downloadComponent MetalToolchain
 
 ## Usage
 
-`Surface2Modes` runs the complete watertight-surface-to-modal-model pipeline with an explicit discretization:
+`fastfem::Surface2Modes` converts a watertight surface mesh into a modal model:
 
 ```cpp
-#include "audio/Surface2Modes.h"
+#include <FastFEM/Surface2Modes.h>
 
-auto result = modal::Surface2Modes(
-    positions, triangleIndices, material, excitationPositions, vec3{1},
-    modal::Discretization::FiniteCell
+auto result = fastfem::Surface2Modes(
+    positions, triangleIndices, material, excitationPositions, {1, 1, 1},
+    fastfem::Discretization::FiniteCell
 );
 ```
 
-Select `modal::Discretization::Tet10` to tetrahedralize the same surface before solving.
-The result contains audible frequencies, damping times, mass-normalized shapes at the requested positions, rigid-body mass properties, and raw eigenpairs for material rescaling.
-The finite-cell path accepts `SolveReuse::KeepBasis`; Tet10 also accepts a seed basis and `SolveCache`.
+### Discretization
+
+`fastfem::Discretization::FiniteCell` embeds the surface in a Cartesian Q2 background grid.
+It integrates the enclosed volume without generating a tetrahedral mesh.
+`fastfem::Discretization::Tet10` tetrahedralizes the enclosed volume and solves it with quadratic tetrahedral elements.
+
+### Result
+
+`Surface2Modes` returns `std::expected<fastfem::ModalResult, std::string>`.
+An error contains a diagnostic string.
+
+| Member | Contents |
+| --- | --- |
+| `Modes` | Audible frequencies, damping times, and mass-normalized shapes at the requested positions |
+| `Mass` | Mass, center of mass, and principal inertia |
+| `Summary` | Unfiltered eigenvalues and sampled shapes for `RescaleModes` |
+| `Basis` | Optional opaque Tet10 warm-start basis requested through `SolveReuse::KeepBasis` |
+| `SamplePointOfExcitation` | Index in `Modes.Positions` for each supplied excitation position |
+| `Tetrahedra` | Tet10 volume points and tetrahedra; empty for finite cell |
+
+Access the generated Tet10 mesh through `result->Tetrahedra.Points` and `result->Tetrahedra.Tets`.
+Pass `&result->Basis` as `SolveReuse::SeedBasis` for a compatible later Tet10 solve.
+
+### Material rescaling
+
+`fastfem::RescaleModes` updates frequencies, damping times, and mass normalization after density or Young's modulus changes without solving again.
+The geometry and Poisson ratio must remain unchanged.
+
+```cpp
+auto rescaled = fastfem::RescaleModes(result->Summary, result->Modes, updatedMaterial);
+```
+
+The function returns `std::nullopt` when the saved summary cannot support the requested material change.
 
 `FastFEMModalSolve` exposes the same choice from the command line:
 

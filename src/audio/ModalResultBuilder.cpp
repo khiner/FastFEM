@@ -114,7 +114,6 @@ modal::ModalResult modal::BuildModalResult(
     auto modes = PostprocessModes(summary.Eigenvalues, summary.Shapes, 1, material, config, std::move(positions));
     modes.BakedScale = baked_scale;
     return {
-        std::move(modes), std::move(mass_properties), profile, std::move(summary),
-        std::move(basis), std::move(sample_point_of)
+        std::move(modes), std::move(mass_properties), profile, std::move(summary), std::move(basis), std::move(sample_point_of), {}
     };
 }

@@ -18,6 +18,11 @@ function(fastfem_require_submodule path)
     endif()
 endfunction()
 
+function(fastfem_add_internal_executable target source)
+    add_executable(${target} ${source})
+    target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+endfunction()
+
 if(NOT TARGET meshoptimizer AND NOT TARGET meshoptimizer::meshoptimizer)
     set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "" FORCE)
     set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
@@ -35,6 +40,7 @@ find_library(FASTFEM_FOUNDATION_FRAMEWORK Foundation REQUIRED)
 find_library(FASTFEM_METAL_FRAMEWORK Metal REQUIRED)
 
 add_library(FastFEM
+    src/FastFEM.cpp
     src/audio/Tet10Cholesky.cpp
     src/audio/finite_cell/AccelerateShiftInvert.cpp
     src/audio/finite_cell/EigenpairCertification.cpp
@@ -118,8 +124,9 @@ endif()
 
 target_compile_features(FastFEM PUBLIC cxx_std_23)
 target_compile_definitions(FastFEM PRIVATE FASTFEM_PARALLEL_SPARSE=$<BOOL:${FASTFEM_PARALLEL_SPARSE}>)
-target_include_directories(FastFEM PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+target_include_directories(FastFEM
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_link_libraries(FastFEM
     PRIVATE
@@ -155,14 +162,14 @@ if(FASTFEM_BUILD_TESTS OR FASTFEM_BUILD_TOOLS)
 endif()
 
 if(FASTFEM_BUILD_TOOLS)
-    add_executable(FastFEMModalSolve tools/ModalSolveTool.cpp)
+    fastfem_add_internal_executable(FastFEMModalSolve tools/ModalSolveTool.cpp)
     target_link_libraries(FastFEMModalSolve PRIVATE FastFEM::FastFEM ${FASTFEM_TINYOBJLOADER_TARGET})
     target_include_directories(FastFEMModalSolve PRIVATE tests)
 
-    add_executable(FastFEMFiniteCellAudioCorpus tools/FiniteCellAudioCorpus.cpp)
+    fastfem_add_internal_executable(FastFEMFiniteCellAudioCorpus tools/FiniteCellAudioCorpus.cpp)
     target_link_libraries(FastFEMFiniteCellAudioCorpus PRIVATE FastFEM::FastFEM)
 
-    add_executable(FastFEMTet10CholeskyBenchmark tools/Tet10CholeskyBenchmark.cpp)
+    fastfem_add_internal_executable(FastFEMTet10CholeskyBenchmark tools/Tet10CholeskyBenchmark.cpp)
     target_link_libraries(FastFEMTet10CholeskyBenchmark PRIVATE FastFEM::FastFEM ${FASTFEM_TINYOBJLOADER_TARGET})
     target_include_directories(FastFEMTet10CholeskyBenchmark PRIVATE tests)
 
@@ -180,7 +187,7 @@ if(FASTFEM_BUILD_TESTS)
         add_subdirectory(lib/ut EXCLUDE_FROM_ALL)
     endif()
 
-    add_executable(FastFEMModalSolverTest tests/ModalSolverTest.cpp)
+    fastfem_add_internal_executable(FastFEMModalSolverTest tests/ModalSolverTest.cpp)
     target_compile_definitions(FastFEMModalSolverTest PRIVATE
         REALIMPACT_DATASET_DIR="${FASTFEM_REALIMPACT_DATASET_DIR}"
     )
@@ -192,27 +199,27 @@ if(FASTFEM_BUILD_TESTS)
     )
     add_test(NAME FastFEMModalSolver COMMAND FastFEMModalSolverTest)
 
-    add_executable(FastFEMSurface2ModesTest tests/Surface2ModesTest.cpp)
+    fastfem_add_internal_executable(FastFEMSurface2ModesTest tests/Surface2ModesTest.cpp)
     target_include_directories(FastFEMSurface2ModesTest PRIVATE tests tools)
     target_link_libraries(FastFEMSurface2ModesTest PRIVATE FastFEM::FastFEM Boost::ut)
     add_test(NAME FastFEMSurface2Modes COMMAND FastFEMSurface2ModesTest)
 
-    add_executable(FastFEMFiniteCellTest tests/FiniteCellTest.cpp)
+    fastfem_add_internal_executable(FastFEMFiniteCellTest tests/FiniteCellTest.cpp)
     target_include_directories(FastFEMFiniteCellTest PRIVATE tests tools)
     target_link_libraries(FastFEMFiniteCellTest PRIVATE FastFEM::FastFEM Boost::ut)
     add_test(NAME FastFEMFiniteCell COMMAND FastFEMFiniteCellTest)
 
-    add_executable(FastFEMAnalyticalModalTest tests/AnalyticalModalTest.cpp)
+    fastfem_add_internal_executable(FastFEMAnalyticalModalTest tests/AnalyticalModalTest.cpp)
     target_include_directories(FastFEMAnalyticalModalTest PRIVATE tests tools)
     target_link_libraries(FastFEMAnalyticalModalTest PRIVATE FastFEM::FastFEM Boost::ut)
     add_test(NAME FastFEMAnalyticalModal COMMAND FastFEMAnalyticalModalTest)
 
-    add_executable(FastFEMFiniteCellRobustnessTest tests/FiniteCellRobustnessTest.cpp)
+    fastfem_add_internal_executable(FastFEMFiniteCellRobustnessTest tests/FiniteCellRobustnessTest.cpp)
     target_include_directories(FastFEMFiniteCellRobustnessTest PRIVATE tests tools)
     target_link_libraries(FastFEMFiniteCellRobustnessTest PRIVATE FastFEM::FastFEM Boost::ut)
     add_test(NAME FastFEMFiniteCellRobustness COMMAND FastFEMFiniteCellRobustnessTest)
 
-    add_executable(FastFEMFiniteCellRealMeshTest tests/FiniteCellRealMeshTest.cpp)
+    fastfem_add_internal_executable(FastFEMFiniteCellRealMeshTest tests/FiniteCellRealMeshTest.cpp)
     target_compile_definitions(FastFEMFiniteCellRealMeshTest PRIVATE
         FASTFEM_TET_CORPUS_DIR="${FASTFEM_TET_CORPUS_DIR}"
     )
@@ -224,7 +231,7 @@ if(FASTFEM_BUILD_TESTS)
     )
     set_tests_properties(FastFEMFiniteCellRealMesh PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
 
-    add_executable(FastFEMTetCorpusTest tests/TetCorpusTest.cpp)
+    fastfem_add_internal_executable(FastFEMTetCorpusTest tests/TetCorpusTest.cpp)
     target_compile_definitions(FastFEMTetCorpusTest PRIVATE
         FASTFEM_TET_CORPUS_DIR="${FASTFEM_TET_CORPUS_DIR}"
         FASTFEM_TET_SNAPSHOT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/TetCorpusSnapshot.txt"
