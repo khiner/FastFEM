@@ -61,7 +61,7 @@ Scalar Eigen matrices provide mass actions and independent certification.
 
 ### Finite cell
 
-`SolveFiniteCellBlock` operates on an implicit domain or a watertight triangle surface embedded in a Cartesian Q2 background grid.
+`SolveFiniteCellEigenpairs` operates on an implicit domain or a watertight triangle surface embedded in a Cartesian Q2 background grid.
 Its matrix-free path combines:
 
 - signed moment-fitted cut integration;
@@ -73,10 +73,10 @@ Its matrix-free path combines:
 - FP64 Ritz algebra and convergence checks;
 - precompiled Metal kernels and a binary pipeline archive when the installed toolchain supports them.
 
-`SolveFiniteCellBlock` evaluates exact physical FP64 residuals from the action panels computed during iteration.
+`SolveFiniteCellEigenpairs` evaluates exact physical FP64 residuals from the action panels computed during iteration.
 It applies the same factor-free solver to every geometry and problem size.
 An unconverged factor-free result selects assembled FP64 Cholesky shift-invert.
-If neither solver converges within the supplied iteration budget, `SolveFiniteCellBlock` returns an error.
+If neither solver converges within the supplied iteration budget, `SolveFiniteCellEigenpairs` returns an error.
 Validation code calls `CertifyFiniteCellEigenpairs` to recompute residuals and mass orthogonality independently.
 Validation compares the factor-free solve against assembled Cholesky and moment-fitted integration against uncompressed octree quadrature.
 
@@ -111,8 +111,8 @@ The benchmark measures native factorization over structured or tetrahedralized T
 `/usr/bin/time -l` reports peak memory:
 
 ```sh
-./build/FastFEMBlockSparseBenchmark --tet 34 17 11 5 16
-./build/FastFEMBlockSparseBenchmark --obj model.obj 5 16
+./build/FastFEMTet10CholeskyBenchmark --tet 34 17 11 5 16
+./build/FastFEMTet10CholeskyBenchmark --obj model.obj 5 16
 ```
 
 The dedicated resolution-eight 256-mode tapered-key stress is part of `FastFEMFiniteCellConsolidationTest`.

@@ -1,4 +1,4 @@
-#include "MassProperties.h"
+#include "MassPropertiesAccumulator.h"
 
 #include <Eigen/Eigenvalues>
 
@@ -30,7 +30,7 @@ quat QuaternionFromRotation(const Eigen::Matrix3f &rotation) {
 }
 } // namespace
 
-void modal::detail::MassPropertiesAccumulator::Add(dvec3 position, double volume) {
+void modal::MassPropertiesAccumulator::Add(dvec3 position, double volume) {
     if (Empty) {
         Origin = position;
         Empty = false;
@@ -46,7 +46,7 @@ void modal::detail::MassPropertiesAccumulator::Add(dvec3 position, double volume
     Inertia[5] -= volume * position.y * position.z;
 }
 
-MassProperties modal::detail::MassPropertiesAccumulator::Finish(double density, double length_to_si) const {
+MassProperties modal::MassPropertiesAccumulator::Finish(double density, double length_to_si) const {
     if (Volume <= 0) return {};
     const dvec3 local_center = FirstMoment / Volume, center = Origin + local_center;
     Eigen::Matrix3d inertia;
@@ -67,7 +67,7 @@ MassProperties modal::detail::MassPropertiesAccumulator::Finish(double density, 
     };
 }
 
-MassProperties modal::detail::ComputeMassProperties(std::span<const dvec3> positions, std::span<const double> volume_weights, double density, double length_to_si) {
+MassProperties modal::ComputeMassProperties(std::span<const dvec3> positions, std::span<const double> volume_weights, double density, double length_to_si) {
     if (positions.size() != volume_weights.size()) return {};
     MassPropertiesAccumulator accumulator;
     for (size_t i = 0; i < positions.size(); ++i) accumulator.Add(positions[i], volume_weights[i]);

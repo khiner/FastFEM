@@ -3,7 +3,7 @@
 #include "ModeShapeComparison.h"
 #include "RunSuites.h"
 #include "TetReference.h"
-#include "audio/FiniteCellBlockEigensolver.h"
+#include "audio/FiniteCellEigensolver.h"
 #include "audio/finite_cell/AssembledCholesky.h"
 #include "audio/finite_cell/OctreeQuadrature.h"
 #include "numeric/Accelerate.h"
@@ -107,7 +107,7 @@ BarFrequencies ClassifyBarFrequencies(
 }
 
 std::pair<BarFrequencies, BarFrequencies> SampleBarFrequencies(
-    const modal::FiniteCellOperator &finite, const modal::FiniteCellBlockResult &finite_modes,
+    const modal::FiniteCellOperator &finite, const modal::FiniteCellEigenpairs &finite_modes,
     const TetMesh &mesh, const modal::Tet10Assembler &tet, const TetReferenceEigenpairs &tet_modes, dvec3 extent
 ) {
     constexpr uvec3 samples{9, 3, 3};
@@ -262,7 +262,7 @@ suite FiniteCellTests = [] {
                 {.Cells = cells, .CutDepth = 3, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
             );
             const auto tet_modes = SolveTetReference(mesh, Material, Count, shift, 1e-8, 150);
-            const auto finite_modes = modal::SolveFiniteCellBlock(finite, Count, shift, 1e-8, 150);
+            const auto finite_modes = modal::SolveFiniteCellEigenpairs(finite, Count, shift, 1e-8, 150);
             expect(tet_modes.Eigenvalues.size() == Count) << level;
             expect(finite_modes.Eigenvalues.size() == Count) << level;
             if (tet_modes.Eigenvalues.size() != Count || finite_modes.Eigenvalues.size() != Count) continue;
@@ -306,7 +306,7 @@ suite FiniteCellTests = [] {
         }
     };
 
-    "finite-cell block solve matches assembled FP64 across audio geometries"_test = [] {
+    "finite-cell production solve matches assembled FP64 across audio geometries"_test = [] {
         constexpr uint32_t Count{18};
         const double shift = std::pow(2 * std::numbers::pi * 20, 2);
         for (const std::string_view name : finite_cell_benchmark::AudioGeometryNames) {
@@ -317,25 +317,25 @@ suite FiniteCellTests = [] {
                 {.Cells = finite_cell_benchmark::GridResolution(geometry, 6), .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
             );
             const auto assembled = modal::finite_cell::SolveAssembledCholesky(operation, Count, shift, 5e-9, 150);
-            const auto preferred = modal::SolveFiniteCellBlock(operation, Count, shift, 5e-9, 150);
+            const auto production = modal::SolveFiniteCellEigenpairs(operation, Count, shift, 5e-9, 150);
             expect(assembled.Eigenvalues.size() == Count) << name;
-            expect(preferred.Eigenvalues.size() == Count) << name;
-            if (assembled.Eigenvalues.size() != Count || preferred.Eigenvalues.size() != Count) continue;
-            const auto preferred_certification = modal::CertifyFiniteCellEigenpairs(operation, preferred.Eigenvalues, preferred.Eigenvectors);
-            const double spectrum_error = (preferred.Eigenvalues.tail(Count - 6) - assembled.Eigenvalues.tail(Count - 6)).norm() /
+            expect(production.Eigenvalues.size() == Count) << name;
+            if (assembled.Eigenvalues.size() != Count || production.Eigenvalues.size() != Count) continue;
+            const auto production_certification = modal::CertifyFiniteCellEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
+            const double spectrum_error = (production.Eigenvalues.tail(Count - 6) - assembled.Eigenvalues.tail(Count - 6)).norm() /
                 assembled.Eigenvalues.tail(Count - 6).norm();
-            const double residual = preferred_certification.RelativeResiduals.tail(Count - 6).maxCoeff();
+            const double residual = production_certification.RelativeResiduals.tail(Count - 6).maxCoeff();
             const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
-                operation, assembled.Eigenvalues, assembled.Eigenvectors, preferred.Eigenvectors
+                operation, assembled.Eigenvalues, assembled.Eigenvectors, production.Eigenvectors
             );
             std::println(
                 "audio geometry {}: dofs={} cut={} iterations={} spectrum={:.3e} residual={:.3e} orthogonality={:.3e} paired_mac={:.6f} cluster_mac={:.6f}",
-                name, operation.Dofs(), operation.Profile.CutCells, preferred.Iterations, spectrum_error, residual,
-                preferred_certification.MassOrthogonalityError, shapes.PairedMacMinimum, shapes.ClusterMacMinimum
+                name, operation.Dofs(), operation.Profile.CutCells, production.Iterations, spectrum_error, residual,
+                production_certification.MassOrthogonalityError, shapes.PairedMacMinimum, shapes.ClusterMacMinimum
             );
             expect(spectrum_error < 1e-10) << name;
             expect(residual < 1e-8) << name;
-            expect(preferred_certification.MassOrthogonalityError < 1e-10) << name;
+            expect(production_certification.MassOrthogonalityError < 1e-10) << name;
             expect(shapes.ClusterMacMinimum > 0.999999) << name;
         }
     };
@@ -517,7 +517,7 @@ suite FiniteCellTests = [] {
             full_grid, Material,
             {.Cells = {4, 2, 2}, .CutDepth = 1, .FictitiousScale = 1e-8, .PaddingCells = 0}
         );
-        const auto result = modal::SolveFiniteCellBlock(operation, 12, std::pow(2 * std::numbers::pi * 20, 2), 1e-8, 150);
+        const auto result = modal::SolveFiniteCellEigenpairs(operation, 12, std::pow(2 * std::numbers::pi * 20, 2), 1e-8, 150);
         expect(result.Eigenvalues.size() == 12_i);
         if (result.Eigenvalues.size() != 12) return;
         expect(operation.Profile.CutCells == 0_u);
@@ -536,7 +536,7 @@ suite FiniteCellTests = [] {
             modal::MakeBoxDomain({}, extent), Material,
             {.Cells = {16, 4, 4}, .CutDepth = 4, .FictitiousScale = 1e-8, .PaddingCells = 0.31}
         );
-        const auto result = modal::SolveFiniteCellBlock(operation, 20, std::pow(2 * std::numbers::pi * 20, 2), 1e-8, 150);
+        const auto result = modal::SolveFiniteCellEigenpairs(operation, 20, std::pow(2 * std::numbers::pi * 20, 2), 1e-8, 150);
         expect(result.Eigenvalues.size() == 20_i);
         if (result.Eigenvalues.size() != 20) return;
         const double exact_volume = extent.x * extent.y * extent.z;

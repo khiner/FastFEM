@@ -1,4 +1,4 @@
-#include "CholeskyShiftInvert.h"
+#include "AccelerateShiftInvert.h"
 
 #include <chrono>
 
@@ -8,28 +8,22 @@ double SecondsSince(std::chrono::steady_clock::time_point start) {
 }
 } // namespace
 
-CholeskyShiftInvert::CholeskyShiftInvert(
+modal::AccelerateShiftInvert::AccelerateShiftInvert(
     const Eigen::SparseMatrix<double> &k, const Eigen::SparseMatrix<double> &m,
     double &factorize_seconds, double &solve_seconds
 ) : K(k), M(m), FactorizeSeconds(factorize_seconds), SolveSeconds(solve_seconds) {}
 
-CholeskyShiftInvert::~CholeskyShiftInvert() = default;
+modal::AccelerateShiftInvert::~AccelerateShiftInvert() = default;
 
-void CholeskyShiftInvert::set_shift(const Scalar &sigma) {
+void modal::AccelerateShiftInvert::set_shift(double sigma) {
     const auto start = std::chrono::steady_clock::now();
     Eigen::SparseMatrix<double> shifted = K - sigma * M;
-    Factor = std::make_unique<SparseCholesky>(shifted);
+    Factor = std::make_unique<AccelerateSparseCholesky>(shifted);
     FactorizeSeconds += SecondsSince(start);
 }
 
-void CholeskyShiftInvert::perform_op(const Scalar *x_in, Scalar *y_out) const {
+void modal::AccelerateShiftInvert::solve_panel(const double *input, double *output, int width) const {
     const auto start = std::chrono::steady_clock::now();
-    Factor->Solve(x_in, y_out);
-    SolveSeconds += SecondsSince(start);
-}
-
-void CholeskyShiftInvert::solve_panel(const Scalar *b_in, Scalar *x_out, int width) const {
-    const auto start = std::chrono::steady_clock::now();
-    Factor->Solve(b_in, x_out, width);
+    Factor->Solve(input, output, width);
     SolveSeconds += SecondsSince(start);
 }

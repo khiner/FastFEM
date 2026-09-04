@@ -11,7 +11,7 @@
 #include <random>
 #include <vector>
 
-namespace modal::detail {
+namespace modal::eigensolver {
 struct GeneralizedEigenOptions {
     uint32_t Count{};
     uint32_t CertifiedCount{};
@@ -506,4 +506,4 @@ GeneralizedEigenResult SolveGeneralizedEigenproblem(
     if (result.Converged) return result;
     return SolveGeneralizedInverseIteration(operation, mass, stiffness, options, seed, control);
 }
-} // namespace modal::detail
+} // namespace modal::eigensolver

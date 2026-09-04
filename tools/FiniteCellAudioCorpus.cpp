@@ -1,7 +1,7 @@
 #include "FiniteCellBenchmarkGeometry.h"
 #include "ModeShapeComparison.h"
 #include "audio/FiniteCell.h"
-#include "audio/FiniteCellBlockEigensolver.h"
+#include "audio/FiniteCellEigensolver.h"
 #include "audio/finite_cell/AssembledCholesky.h"
 
 #include <charconv>
@@ -36,7 +36,7 @@ bool Run(std::string_view name, uint32_t longitudinal, uint32_t count) {
         throw std::invalid_argument("Audio-corpus mode count leaves no guard-vector space for " + std::string{name} + ".");
     const auto assembled = modal::finite_cell::SolveAssembledCholesky(operation, count, shift, 1e-9, 1000);
     const uint32_t max_iterations = std::max(200u, 2 * count);
-    const auto result = modal::SolveFiniteCellBlock(operation, count, shift, tolerance, max_iterations);
+    const auto result = modal::SolveFiniteCellEigenpairs(operation, count, shift, tolerance, max_iterations);
     if (assembled.Eigenvalues.size() != count || result.Eigenvalues.size() != count) {
         std::println(stderr, "audio geometry={} modes={}/{} did not converge", name, assembled.Eigenvalues.size(), result.Eigenvalues.size());
         return false;
@@ -55,11 +55,11 @@ bool Run(std::string_view name, uint32_t longitudinal, uint32_t count) {
     const double first_frequency = std::sqrt(std::max(0.0, result.Eigenvalues[6])) / (2 * std::numbers::pi);
     const double last_frequency = std::sqrt(std::max(0.0, result.Eigenvalues[count - 1])) / (2 * std::numbers::pi);
     std::println(
-        "audio geometry={} description={} grid={}x{}x{} dofs={} cut={} modes={} iterations={}/{} fallback={}/{}/{:.3e} assembled_iterations={} frequency={:.3f}/{:.3f} spectrum={:.3e} residual={:.3e}/{:.3e}@{} uncertified={} orthogonality={:.3e} paired_mac={:.6f} best_mac={:.6f} cluster_mac={:.6f} clusters={}/{}",
+        "audio geometry={} description={} grid={}x{}x{} dofs={} cut={} modes={} iterations={}/{} failed_factor_free={}/{}/{:.3e} assembled_iterations={} frequency={:.3f}/{:.3f} spectrum={:.3e} residual={:.3e}/{:.3e}@{} uncertified={} orthogonality={:.3e} paired_mac={:.6f} best_mac={:.6f} cluster_mac={:.6f} clusters={}/{}",
         name, geometry.Description, cells.x, cells.y, cells.z,
         operation.Dofs(), operation.Profile.CutCells, count, result.Iterations, max_iterations,
-        result.Profile.FallbackAttemptIterations, result.Profile.FallbackAttemptStagnated,
-        result.Profile.FallbackAttemptResidual,
+        result.Profile.FailedFactorFreeIterations, result.Profile.FailedFactorFreeStagnated,
+        result.Profile.FailedFactorFreeResidual,
         assembled.Iterations, first_frequency, last_frequency,
         spectrum_error, recurrence_residual, residual, worst_mode, uncertified, result_certification.MassOrthogonalityError, shapes.PairedMacMinimum,
         shapes.BestMacMinimum, shapes.ClusterMacMinimum, shapes.Clusters, shapes.LargestCluster

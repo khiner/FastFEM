@@ -1,4 +1,4 @@
-#include "BlockSparseCholesky.h"
+#include "Tet10Cholesky.h"
 
 #include "SparseExecution.h"
 #include "Tet10Assembler.h"
@@ -33,12 +33,12 @@ uint32_t FindEntry(const BlockPencil &pencil, uint32_t row, uint32_t column) {
     const auto begin = pencil.Rows.begin() + pencil.ColumnStarts[column];
     const auto end = pencil.Rows.begin() + pencil.ColumnStarts[column + 1];
     const auto found = std::lower_bound(begin, end, int(row));
-    if (found == end || *found != int(row)) throw std::logic_error("Block sparse pencil pattern is incomplete.");
+    if (found == end || *found != int(row)) throw std::logic_error("Tet10 Cholesky pencil pattern is incomplete.");
     return uint32_t(found - pencil.Rows.begin());
 }
 
 BlockPencil MakePattern(const modal::Tet10Assembler &fem) {
-    if (fem.NumNodes == 0 || fem.Elements().empty()) throw std::invalid_argument("Block sparse Cholesky requires a nonempty Tet10 mesh.");
+    if (fem.NumNodes == 0 || fem.Elements().empty()) throw std::invalid_argument("Tet10 Cholesky requires a nonempty Tet10 mesh.");
     BlockPencil pencil;
     pencil.Nodes = int(fem.NumNodes);
     std::vector<std::vector<int>> column_rows(fem.NumNodes);
@@ -127,7 +127,7 @@ std::vector<int> Order(BlockPencil &pencil) {
     auto symbolic = SparseFactor(SparseFactorizationCholesky, matrix.structure, SymbolicOptions(3 * pencil.Nodes >= 8'000, permutation.data()));
     if (symbolic.status != SparseStatusOK) {
         SparseCleanup(symbolic);
-        throw std::runtime_error("Block sparse Cholesky symbolic factorization failed.");
+        throw std::runtime_error("Tet10 Cholesky symbolic factorization failed.");
     }
     SparseCleanup(symbolic);
     return permutation;
@@ -528,7 +528,7 @@ struct SupernodalFactor {
 };
 } // namespace
 
-struct BlockSparseCholesky::Factorization {
+struct modal::Tet10Cholesky::Factorization {
     BlockPencil Pencil;
     std::vector<std::array<uint32_t, modal::Tet10Assembler::NodesPerElement>> ElementNodes;
     SupernodalFactor Native;
@@ -550,25 +550,25 @@ struct BlockSparseCholesky::Factorization {
     }
 };
 
-BlockSparseCholesky::BlockSparseCholesky(const modal::Tet10Assembler &fem) : Factor(std::make_unique<Factorization>(fem)) {}
+modal::Tet10Cholesky::Tet10Cholesky(const Tet10Assembler &fem) : Factor(std::make_unique<Factorization>(fem)) {}
 
-BlockSparseCholesky::~BlockSparseCholesky() = default;
+modal::Tet10Cholesky::~Tet10Cholesky() = default;
 
-void BlockSparseCholesky::SetShift(double sigma) { Factor->SetShift(sigma); }
+void modal::Tet10Cholesky::SetShift(double sigma) { Factor->SetShift(sigma); }
 
-void BlockSparseCholesky::Reassemble(const modal::Tet10Assembler &fem) {
+void modal::Tet10Cholesky::Reassemble(const Tet10Assembler &fem) {
     if (int(fem.NumNodes) != Factor->Pencil.Nodes || fem.Elements().size() != Factor->ElementNodes.size())
-        throw std::invalid_argument("Block sparse reassembly requires unchanged Tet10 connectivity.");
+        throw std::invalid_argument("Tet10 Cholesky reassembly requires unchanged Tet10 connectivity.");
     for (size_t element = 0; element < Factor->ElementNodes.size(); ++element)
         if (fem.Elements()[element].Nodes != Factor->ElementNodes[element])
-            throw std::invalid_argument("Block sparse reassembly requires unchanged Tet10 connectivity.");
+            throw std::invalid_argument("Tet10 Cholesky reassembly requires unchanged Tet10 connectivity.");
     Assemble(fem, Factor->Pencil);
     Factor->HasNumeric = false;
 }
 
-void BlockSparseCholesky::ScalePencil(double stiffness_scale, double mass_scale) {
+void modal::Tet10Cholesky::ScalePencil(double stiffness_scale, double mass_scale) {
     if (!(std::isfinite(stiffness_scale) && stiffness_scale > 0 && std::isfinite(mass_scale) && mass_scale > 0))
-        throw std::invalid_argument("Block sparse pencil scales must be finite and positive.");
+        throw std::invalid_argument("Tet10 Cholesky pencil scales must be finite and positive.");
     if (stiffness_scale == 1 && mass_scale == 1) return;
     for (auto &block : Factor->Pencil.Stiffness)
         for (double &value : block) value *= stiffness_scale;
@@ -576,10 +576,8 @@ void BlockSparseCholesky::ScalePencil(double stiffness_scale, double mass_scale)
     Factor->HasNumeric = false;
 }
 
-void BlockSparseCholesky::Solve(const double *input, double *output, int width) const {
-    if (width < 1) throw std::invalid_argument("Block sparse solve width must be positive.");
-    if (!Factor->HasNumeric) throw std::logic_error("Block sparse solve requires numeric factorization.");
+void modal::Tet10Cholesky::Solve(const double *input, double *output, int width) const {
+    if (width < 1) throw std::invalid_argument("Tet10 Cholesky solve width must be positive.");
+    if (!Factor->HasNumeric) throw std::logic_error("Tet10 Cholesky solve requires numeric factorization.");
     Factor->Native.Solve(input, output, width);
 }
-
-int BlockSparseCholesky::Size() const { return 3 * Factor->Pencil.Nodes; }

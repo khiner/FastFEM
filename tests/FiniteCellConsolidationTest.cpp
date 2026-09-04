@@ -1,9 +1,9 @@
 #include "FiniteCellBenchmarkGeometry.h"
 #include "ModeShapeComparison.h"
 #include "RunSuites.h"
-#include "audio/CholeskyShiftInvert.h"
+#include "audio/AccelerateShiftInvert.h"
 #include "audio/FiniteCell.h"
-#include "audio/FiniteCellBlockEigensolver.h"
+#include "audio/FiniteCellEigensolver.h"
 #include "audio/finite_cell/AssembledCholesky.h"
 
 #include <boost/ut.hpp>
@@ -29,7 +29,7 @@ struct Case {
 };
 
 suite ConsolidationTests = [] {
-    "wide tapered audio block certifies through exact fallback"_test = [] {
+    "wide tapered-key eigenpairs certify with assembled Cholesky fallback"_test = [] {
         constexpr uint32_t count{256};
         const auto geometry = finite_cell_benchmark::MakeGeometry("tapered-key");
         const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
@@ -49,24 +49,24 @@ suite ConsolidationTests = [] {
                 rhs(row, column) = std::sin(double(1 + row + 17 * column));
         Eigen::MatrixXd first_solve(rhs.rows(), rhs.cols()), repeated_solve(rhs.rows(), rhs.cols());
         double first_factor_seconds{}, first_solve_seconds{}, repeated_factor_seconds{}, repeated_solve_seconds{};
-        CholeskyShiftInvert first_inverse{p1.Stiffness, p1.Mass, first_factor_seconds, first_solve_seconds};
+        modal::AccelerateShiftInvert first_inverse{p1.Stiffness, p1.Mass, first_factor_seconds, first_solve_seconds};
         first_inverse.set_shift(-Shift);
         first_inverse.solve_panel(rhs.data(), first_solve.data(), int(rhs.cols()));
-        CholeskyShiftInvert repeated_inverse{p1.Stiffness, p1.Mass, repeated_factor_seconds, repeated_solve_seconds};
+        modal::AccelerateShiftInvert repeated_inverse{p1.Stiffness, p1.Mass, repeated_factor_seconds, repeated_solve_seconds};
         repeated_inverse.set_shift(-Shift);
         repeated_inverse.solve_panel(rhs.data(), repeated_solve.data(), int(rhs.cols()));
         expect(bool((first_solve.array() == repeated_solve.array()).all()));
-        const auto result = modal::SolveFiniteCellBlock(operation, count, Shift, 1e-8, 100);
-        const auto repeated = modal::SolveFiniteCellBlock(operation, count, Shift, 1e-8, 100);
+        const auto result = modal::SolveFiniteCellEigenpairs(operation, count, Shift, 1e-8, 100);
+        const auto repeated = modal::SolveFiniteCellEigenpairs(operation, count, Shift, 1e-8, 100);
         expect(result.Eigenvalues.size() == Eigen::Index(count));
         expect(repeated.Eigenvalues.size() == Eigen::Index(count));
-        expect(result.Profile.FallbackAttemptIterations > 0_u);
-        expect(result.Profile.FallbackAttemptIterations < 100_u);
-        expect(result.Profile.FallbackAttemptStagnated);
-        expect(repeated.Profile.FallbackAttemptIterations > 0_u);
-        expect(repeated.Profile.FallbackAttemptIterations < 100_u);
-        expect(repeated.Profile.FallbackAttemptStagnated);
-        expect(result.Profile.FallbackAttemptIterations == repeated.Profile.FallbackAttemptIterations);
+        expect(result.Profile.FailedFactorFreeIterations > 0_u);
+        expect(result.Profile.FailedFactorFreeIterations < 100_u);
+        expect(result.Profile.FailedFactorFreeStagnated);
+        expect(repeated.Profile.FailedFactorFreeIterations > 0_u);
+        expect(repeated.Profile.FailedFactorFreeIterations < 100_u);
+        expect(repeated.Profile.FailedFactorFreeStagnated);
+        expect(result.Profile.FailedFactorFreeIterations == repeated.Profile.FailedFactorFreeIterations);
         if (result.Eigenvalues.size() != count || repeated.Eigenvalues.size() != count) return;
         const auto result_certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
         const auto repeated_certification = modal::CertifyFiniteCellEigenpairs(operation, repeated.Eigenvalues, repeated.Eigenvectors);
@@ -79,8 +79,8 @@ suite ConsolidationTests = [] {
         );
         std::println(
             "wide tapered-key dofs={} modes={} fallback_iterations={}/{} spectrum={:.3e} residual={:.3e}/{:.3e} orthogonality={:.3e}/{:.3e} cluster_mac={:.6f}",
-            operation.Dofs(), count, result.Profile.FallbackAttemptIterations,
-            repeated.Profile.FallbackAttemptIterations, spectrum, residual, repeated_residual,
+            operation.Dofs(), count, result.Profile.FailedFactorFreeIterations,
+            repeated.Profile.FailedFactorFreeIterations, spectrum, residual, repeated_residual,
             result_certification.MassOrthogonalityError, repeated_certification.MassOrthogonalityError,
             shapes.ClusterMacMinimum
         );
@@ -95,7 +95,7 @@ suite ConsolidationTests = [] {
         expect(shapes.ClusterMacMinimum > 0.99999);
     };
 
-    "wide torus block cannot exhaust the preferred iteration cap"_test = [] {
+    "factor-free torus solve stays within the iteration cap"_test = [] {
         constexpr uint32_t count{128};
         const auto geometry = finite_cell_benchmark::MakeGeometry("torus");
         const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
@@ -108,15 +108,15 @@ suite ConsolidationTests = [] {
                 .PaddingCells = 0.25,
             }
         );
-        const auto result = modal::SolveFiniteCellBlock(operation, count, Shift, 1e-8, 256);
-        const auto repeated = modal::SolveFiniteCellBlock(operation, count, Shift, 1e-8, 256);
+        const auto result = modal::SolveFiniteCellEigenpairs(operation, count, Shift, 1e-8, 256);
+        const auto repeated = modal::SolveFiniteCellEigenpairs(operation, count, Shift, 1e-8, 256);
         expect(result.Eigenvalues.size() == Eigen::Index(count));
         expect(repeated.Eigenvalues.size() == Eigen::Index(count));
-        expect(result.Profile.FallbackAttemptIterations == 0_u || result.Profile.FallbackAttemptIterations < 100_u);
-        if (result.Profile.FallbackAttemptIterations) expect(result.Profile.FallbackAttemptStagnated);
-        expect(repeated.Profile.FallbackAttemptIterations == 0_u || repeated.Profile.FallbackAttemptIterations < 100_u);
-        if (repeated.Profile.FallbackAttemptIterations) expect(repeated.Profile.FallbackAttemptStagnated);
-        expect(result.Profile.FallbackAttemptIterations == repeated.Profile.FallbackAttemptIterations);
+        expect(result.Profile.FailedFactorFreeIterations == 0_u || result.Profile.FailedFactorFreeIterations < 100_u);
+        if (result.Profile.FailedFactorFreeIterations) expect(result.Profile.FailedFactorFreeStagnated);
+        expect(repeated.Profile.FailedFactorFreeIterations == 0_u || repeated.Profile.FailedFactorFreeIterations < 100_u);
+        if (repeated.Profile.FailedFactorFreeIterations) expect(repeated.Profile.FailedFactorFreeStagnated);
+        expect(result.Profile.FailedFactorFreeIterations == repeated.Profile.FailedFactorFreeIterations);
         if (result.Eigenvalues.size() != count || repeated.Eigenvalues.size() != count) return;
         const auto result_certification = modal::CertifyFiniteCellEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
         const auto repeated_certification = modal::CertifyFiniteCellEigenpairs(operation, repeated.Eigenvalues, repeated.Eigenvectors);
@@ -127,8 +127,8 @@ suite ConsolidationTests = [] {
         );
         std::println(
             "wide torus dofs={} modes={} fallback_iterations={}/{} spectrum={:.3e} cluster_mac={:.6f}",
-            operation.Dofs(), count, result.Profile.FallbackAttemptIterations,
-            repeated.Profile.FallbackAttemptIterations, spectrum, shapes.ClusterMacMinimum
+            operation.Dofs(), count, result.Profile.FailedFactorFreeIterations,
+            repeated.Profile.FailedFactorFreeIterations, spectrum, shapes.ClusterMacMinimum
         );
         expect(result_certification.RelativeResiduals.tail(count - 6).maxCoeff() < 1e-8);
         expect(repeated_certification.RelativeResiduals.tail(count - 6).maxCoeff() < 1e-8);
@@ -166,7 +166,7 @@ suite ConsolidationTests = [] {
         expect(result_certification.MassOrthogonalityError < 1e-9);
     };
 
-    "preferred finite-cell route survives conditioning and registration corpus"_test = [] {
+    "finite-cell production solve meets conditioning and registration gates"_test = [] {
         constexpr std::array cases{
             Case{"thin-plate", 9, 0.19, 1e-10, {0.20, -0.15, 0.10}},
             Case{"l-bracket", 9, 0.33, 1e-6, {-0.20, 0.15, -0.10}},
@@ -189,35 +189,35 @@ suite ConsolidationTests = [] {
                 }
             );
             const auto assembled = modal::finite_cell::SolveAssembledCholesky(operation, ModeCount, Shift, 1e-9, 1000);
-            const auto preferred = modal::SolveFiniteCellBlock(operation, ModeCount, Shift, 1e-8, 300);
+            const auto production = modal::SolveFiniteCellEigenpairs(operation, ModeCount, Shift, 1e-8, 300);
             expect(assembled.Eigenvalues.size() == Eigen::Index(ModeCount)) << entry.Geometry;
-            expect(preferred.Eigenvalues.size() == Eigen::Index(ModeCount)) << entry.Geometry;
-            expect(preferred.Profile.FallbackAttemptIterations == 0_u) << entry.Geometry;
-            if (assembled.Eigenvalues.size() != ModeCount || preferred.Eigenvalues.size() != ModeCount) continue;
+            expect(production.Eigenvalues.size() == Eigen::Index(ModeCount)) << entry.Geometry;
+            expect(production.Profile.FailedFactorFreeIterations == 0_u) << entry.Geometry;
+            if (assembled.Eigenvalues.size() != ModeCount || production.Eigenvalues.size() != ModeCount) continue;
             const auto assembled_certification = modal::CertifyFiniteCellEigenpairs(operation, assembled.Eigenvalues, assembled.Eigenvectors);
-            const auto preferred_certification = modal::CertifyFiniteCellEigenpairs(operation, preferred.Eigenvalues, preferred.Eigenvectors);
+            const auto production_certification = modal::CertifyFiniteCellEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
             const double assembled_residual = assembled_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();
             expect(assembled_residual < 1e-8) << entry.Geometry << assembled_residual;
             expect(assembled_certification.MassOrthogonalityError < 1e-9) << entry.Geometry << assembled_certification.MassOrthogonalityError;
-            const double spectrum = (preferred.Eigenvalues.tail(ModeCount - 6) - assembled.Eigenvalues.tail(ModeCount - 6)).norm() /
+            const double spectrum = (production.Eigenvalues.tail(ModeCount - 6) - assembled.Eigenvalues.tail(ModeCount - 6)).norm() /
                 assembled.Eigenvalues.tail(ModeCount - 6).norm();
-            const double residual = preferred_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();
+            const double residual = production_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff();
             const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
-                operation, assembled.Eigenvalues, assembled.Eigenvectors, preferred.Eigenvectors
+                operation, assembled.Eigenvalues, assembled.Eigenvectors, production.Eigenvectors
             );
             std::println(
                 "consolidation geometry={} dofs={} cut={} nu={:.2f} fictitious={:.0e} offset={:.2f}/{:.2f}/{:.2f} iterations={} spectrum={:.3e} residual={:.3e} orthogonality={:.3e} cluster_mac={:.6f}",
                 entry.Geometry, operation.Dofs(), operation.Profile.CutCells, entry.PoissonRatio, entry.FictitiousScale,
-                entry.GridOffset.x, entry.GridOffset.y, entry.GridOffset.z, preferred.Iterations, spectrum, residual,
-                preferred_certification.MassOrthogonalityError, shapes.ClusterMacMinimum
+                entry.GridOffset.x, entry.GridOffset.y, entry.GridOffset.z, production.Iterations, spectrum, residual,
+                production_certification.MassOrthogonalityError, shapes.ClusterMacMinimum
             );
             expect(spectrum < 1e-9) << entry.Geometry;
             expect(residual < 1e-8) << entry.Geometry;
-            expect(preferred_certification.MassOrthogonalityError < 1e-9) << entry.Geometry;
+            expect(production_certification.MassOrthogonalityError < 1e-9) << entry.Geometry;
             expect(shapes.ClusterMacMinimum > 0.99999) << entry.Geometry;
             if (entry.Geometry == "cup") {
-                const auto fallback = modal::SolveFiniteCellBlock(operation, ModeCount, Shift, 1e-8, 12);
-                expect(fallback.Profile.FallbackAttemptIterations > 0_u);
+                const auto fallback = modal::SolveFiniteCellEigenpairs(operation, ModeCount, Shift, 1e-8, 12);
+                expect(fallback.Profile.FailedFactorFreeIterations > 0_u);
                 const auto fallback_certification = modal::CertifyFiniteCellEigenpairs(operation, fallback.Eigenvalues, fallback.Eigenvectors);
                 expect(fallback_certification.RelativeResiduals.tail(ModeCount - 6).maxCoeff() < 1e-8);
                 expect(fallback_certification.MassOrthogonalityError < 1e-9);

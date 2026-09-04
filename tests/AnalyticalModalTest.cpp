@@ -3,7 +3,7 @@
 #include "RunSuites.h"
 #include "TetReference.h"
 #include "audio/FiniteCell.h"
-#include "audio/FiniteCellBlockEigensolver.h"
+#include "audio/FiniteCellEigensolver.h"
 
 #include <boost/ut.hpp>
 
@@ -398,7 +398,7 @@ SampledFinite SolveFiniteAndSample(
         {.Cells = cells, .CutDepth = cut_depth, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
     );
     const double shift = std::pow(2 * std::numbers::pi * 20, 2);
-    const auto modes = modal::SolveFiniteCellBlock(finite, count, shift, 1e-8, 300);
+    const auto modes = modal::SolveFiniteCellEigenpairs(finite, count, shift, 1e-8, 300);
     expect(modes.Eigenvalues.size() == count);
     if (modes.Eigenvalues.size() != count) return {};
     const auto modes_certification = modal::CertifyFiniteCellEigenpairs(finite, modes.Eigenvalues, modes.Eigenvectors);

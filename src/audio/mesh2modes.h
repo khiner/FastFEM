@@ -111,7 +111,4 @@ ModalModes PostprocessModes(std::span<const double> eigenvalues, const std::vect
 // A Poisson-ratio change returns nullopt.
 std::optional<ModalModes> RescaleModes(const ModalEigenSummary &, const ModalModes &current, const AcousticMaterialProperties &, SolverConfig config = {});
 
-namespace detail {
-ModalResult MakeModalResult(std::vector<double> eigenvalues, std::vector<std::vector<vec3>> shapes, const AcousticMaterialProperties &, const SolverConfig &, std::vector<vec3> positions, vec3 baked_scale, MassProperties, SolveProfile, Eigen::MatrixXf basis, std::vector<uint32_t> sample_point_of);
-}
 } // namespace modal

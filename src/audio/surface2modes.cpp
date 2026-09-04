@@ -1,6 +1,8 @@
 #include "surface2modes.h"
 
-#include "FiniteCellBlockEigensolver.h"
+#include "FiniteCellEigensolver.h"
+#include "MassPropertiesAccumulator.h"
+#include "ModalResultBuilder.h"
 
 #include <algorithm>
 #include <chrono>
@@ -21,7 +23,7 @@ template<typename Operation> auto Timed(double &seconds, Operation &&operation) 
 
 MassProperties ComputeFiniteCellMassProperties(const modal::FiniteCellOperator &operation, double density, vec3 baked_scale, double length_to_si) {
     const dvec3 inverse_scale{1.0 / baked_scale.x, 1.0 / baked_scale.y, 1.0 / baked_scale.z};
-    modal::detail::MassPropertiesAccumulator accumulator;
+    modal::MassPropertiesAccumulator accumulator;
     for (const auto &cell : operation.Cells) {
         const dvec3 half = 1.0 / cell.InverseHalf;
         const dvec3 center = operation.Nodes[cell.Nodes[0]] + half;
@@ -52,7 +54,7 @@ std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const v
     const uint32_t count = std::min(config.Modal.NumFemModes, operation.Dofs() - 1);
     const double alpha = std::pow(2 * std::numbers::pi * config.Modal.MinModeFreq, 2);
     if (monitor) monitor->Progress.store(0.3f, std::memory_order_relaxed);
-    auto eigenpairs = Timed(profile.Iterate, [&] { return modal::SolveFiniteCellBlock(operation, count, alpha, config.Modal.Tolerance, config.Modal.MaxRestarts); });
+    auto eigenpairs = Timed(profile.Iterate, [&] { return modal::SolveFiniteCellEigenpairs(operation, count, alpha, config.Modal.Tolerance, config.Modal.MaxRestarts); });
     profile.Factorize = eigenpairs.Profile.PreconditionerSetup;
     profile.Iterate -= profile.Factorize;
     profile.OpSolve = eigenpairs.Profile.Preconditioner;
@@ -87,7 +89,7 @@ std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const v
     std::vector<uint32_t> sample_point_of(excitation_positions.size());
     for (uint32_t point = 0; point < sample_point_of.size(); ++point) sample_point_of[point] = point;
     if (monitor) monitor->Progress.store(1, std::memory_order_relaxed);
-    return modal::detail::MakeModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config.Modal, std::move(sample_positions), baked_scale, std::move(mass_properties), profile, std::move(basis), std::move(sample_point_of));
+    return modal::BuildModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config.Modal, std::move(sample_positions), baked_scale, std::move(mass_properties), profile, std::move(basis), std::move(sample_point_of));
 }
 } // namespace
 

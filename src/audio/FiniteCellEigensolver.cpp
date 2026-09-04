@@ -1,11 +1,10 @@
 #define EIGEN_USE_BLAS
 
-#include "FiniteCellBlockEigensolver.h"
+#include "FiniteCellEigensolver.h"
 
-#include "CholeskyShiftInvert.h"
+#include "AccelerateShiftInvert.h"
 #include "FiniteCellMetal.h"
 #include "GeneralizedEigenSolver.h"
-#include "SparseCholesky.h"
 #include "finite_cell/AssembledCholesky.h"
 #include "numeric/Accelerate.h"
 
@@ -98,7 +97,7 @@ Eigen::MatrixXd SymmetricCrossGram(const Eigen::MatrixXd &a, const Eigen::Matrix
     return result;
 }
 
-void SetResiduals(modal::FiniteCellBlockResult &result, const Eigen::MatrixXd &mass_vectors, const Eigen::MatrixXd &shifted_vectors, double alpha) {
+void SetResiduals(modal::FiniteCellEigenpairs &result, const Eigen::MatrixXd &mass_vectors, const Eigen::MatrixXd &shifted_vectors, double alpha) {
     const Eigen::Index count = result.Eigenvalues.size();
     const auto mass = mass_vectors.leftCols(count);
     const Eigen::MatrixXd stiffness = shifted_vectors.leftCols(count) - alpha * mass;
@@ -246,8 +245,8 @@ Eigen::MatrixXd InitialSpace(
     const uint32_t basis_size = std::min<uint32_t>(p1.Mass.rows(), std::max<uint32_t>(count + 2, 20));
     const double seed_tolerance = fem.Dofs() < 20'000 ? 1e-2 : 1e-1; // Fine iterations above 20k DOFs cost more than the additional P1 accuracy.
     double factor_seconds{}, solve_seconds{};
-    CholeskyShiftInvert operation{p1.Stiffness, p1.Mass, factor_seconds, solve_seconds};
-    const auto eigensolver = modal::detail::SolveGeneralizedInverseIteration(
+    modal::AccelerateShiftInvert operation{p1.Stiffness, p1.Mass, factor_seconds, solve_seconds};
+    const auto eigensolver = modal::eigensolver::SolveGeneralizedInverseIteration(
         operation, p1.Mass, p1.Stiffness,
         {
             .Count = count,
@@ -423,7 +422,7 @@ struct MetalMultiplicativePreconditioner {
 } // namespace
 
 namespace {
-modal::FiniteCellBlockResult SolvePreferred(
+modal::FiniteCellEigenpairs SolveFactorFreeMetal(
     const modal::FiniteCellOperator &fem, uint32_t count, double alpha, double tolerance,
     uint32_t max_iterations
 ) {
@@ -431,7 +430,7 @@ modal::FiniteCellBlockResult SolvePreferred(
     constexpr uint32_t guard_vectors{4}, stagnation_window{12};
     constexpr double stagnation_reduction{0.8};
     const auto start = Clock::now();
-    modal::FiniteCellBlockResult result;
+    modal::FiniteCellEigenpairs result;
     Actions actions{fem};
     const auto apply_mass_shifted = [&](const double *input, double *mass, double *shifted, uint32_t width) {
         actions.ApplyMassShifted(input, mass, shifted, width, alpha);
@@ -701,42 +700,42 @@ modal::FiniteCellBlockResult SolvePreferred(
 
 } // namespace
 
-modal::FiniteCellBlockResult modal::SolveFiniteCellBlock(
+modal::FiniteCellEigenpairs modal::SolveFiniteCellEigenpairs(
     const FiniteCellOperator &fem, uint32_t count, double alpha, double tolerance, uint32_t max_iterations
 ) {
     const auto start = Clock::now();
-    auto preferred = SolvePreferred(fem, count, alpha, tolerance, max_iterations);
+    auto factor_free = SolveFactorFreeMetal(fem, count, alpha, tolerance, max_iterations);
     const uint32_t first_physical = std::min(6u, count), physical_count = count - first_physical;
-    const auto converged = [&](const FiniteCellBlockResult &result) {
+    const auto converged = [&](const FiniteCellEigenpairs &result) {
         return result.Eigenvalues.size() == count && result.RelativeResiduals.size() == count && result.Eigenvalues.allFinite() && result.RelativeResiduals.allFinite() &&
             (!physical_count || result.RelativeResiduals.segment(first_physical, physical_count).maxCoeff() < tolerance);
     };
-    if (converged(preferred)) return preferred;
+    if (converged(factor_free)) return factor_free;
     const double attempt_seconds = SecondsSince(start);
-    const uint32_t attempt_iterations = preferred.Iterations;
-    const bool attempt_stagnated = preferred.Profile.Stagnated;
-    const bool attempt_converged = preferred.RelativeResiduals.size() == count;
+    const uint32_t attempt_iterations = factor_free.Iterations;
+    const bool attempt_stagnated = factor_free.Profile.Stagnated;
+    const bool attempt_converged = factor_free.RelativeResiduals.size() == count;
     const double attempt_residual = attempt_converged && physical_count ?
-        preferred.RelativeResiduals.segment(first_physical, physical_count).maxCoeff() :
+        factor_free.RelativeResiduals.segment(first_physical, physical_count).maxCoeff() :
         physical_count ? std::numeric_limits<double>::infinity() :
                          0;
-    preferred = {};
+    factor_free = {};
     auto cholesky = finite_cell::SolveAssembledCholesky(fem, count, alpha, tolerance, max_iterations);
     if (!converged(cholesky)) throw std::runtime_error("Finite-cell default and fallback solvers did not converge within the iteration budget.");
-    cholesky.Profile.FallbackAttempt = attempt_seconds;
-    cholesky.Profile.FallbackAttemptIterations = attempt_iterations;
-    cholesky.Profile.FallbackAttemptStagnated = attempt_stagnated;
-    cholesky.Profile.FallbackAttemptResidual = attempt_residual;
+    cholesky.Profile.FailedFactorFreeSeconds = attempt_seconds;
+    cholesky.Profile.FailedFactorFreeIterations = attempt_iterations;
+    cholesky.Profile.FailedFactorFreeStagnated = attempt_stagnated;
+    cholesky.Profile.FailedFactorFreeResidual = attempt_residual;
     cholesky.Profile.Total += attempt_seconds;
     return cholesky;
 }
 
-modal::FiniteCellBlockResult modal::finite_cell::SolveAssembledCholesky(
+modal::FiniteCellEigenpairs modal::finite_cell::SolveAssembledCholesky(
     const FiniteCellOperator &fem, uint32_t count, double alpha, double tolerance,
     uint32_t max_iterations
 ) {
     const auto start = Clock::now();
-    FiniteCellBlockResult result;
+    FiniteCellEigenpairs result;
     if (!count || count >= fem.Dofs()) return result;
     const auto assembly_start = Clock::now();
     const auto assembled = fem.AssembleLower();
@@ -763,10 +762,10 @@ modal::FiniteCellBlockResult modal::finite_cell::SolveAssembledCholesky(
         }
     }
     double factor_seconds{}, solve_seconds{};
-    CholeskyShiftInvert inverse{assembled.Stiffness, assembled.Mass, factor_seconds, solve_seconds};
+    modal::AccelerateShiftInvert inverse{assembled.Stiffness, assembled.Mass, factor_seconds, solve_seconds};
     const uint32_t solve_count = std::min<uint32_t>(fem.Dofs() - 1, count + 4);
     const uint32_t basis = std::min<uint32_t>(fem.Dofs(), solve_count + 20);
-    const auto eigensolver = modal::detail::SolveGeneralizedEigenproblem(
+    const auto eigensolver = modal::eigensolver::SolveGeneralizedEigenproblem(
         inverse, assembled.Mass, assembled.Stiffness,
         {
             .Count = solve_count,

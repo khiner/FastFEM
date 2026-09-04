@@ -1,7 +1,7 @@
 #include "LoadObj.h"
 #include "StructuredBar.h"
-#include "audio/BlockSparseCholesky.h"
 #include "audio/Tet10Assembler.h"
+#include "audio/Tet10Cholesky.h"
 #include "mesh/Tets.h"
 
 #include <Eigen/Core>
@@ -140,7 +140,7 @@ int main(int argc, char **argv) {
             const auto assembly_start = Clock::now();
             const auto [mass, stiffness] = fem.AssembleLower();
             std::println("tet10 assembly={:.6f}s elements={}", Seconds(assembly_start), fem.Elements().size());
-            BenchmarkPencil("tet10", mass, stiffness, repetitions, width, [&] { return BlockSparseCholesky{fem}; });
+            BenchmarkPencil("tet10", mass, stiffness, repetitions, width, [&] { return modal::Tet10Cholesky{fem}; });
             return 0;
         }
         if (std::string_view{argv[1]} == "--obj") {
@@ -155,7 +155,7 @@ int main(int argc, char **argv) {
             const auto assembly_start = Clock::now();
             const auto [mass, stiffness] = fem.AssembleLower();
             std::println("obj assembly={:.6f}s elements={}", Seconds(assembly_start), fem.Elements().size());
-            BenchmarkPencil("obj", mass, stiffness, repetitions, width, [&] { return BlockSparseCholesky{fem}; });
+            BenchmarkPencil("obj", mass, stiffness, repetitions, width, [&] { return modal::Tet10Cholesky{fem}; });
             return 0;
         }
         throw std::invalid_argument("unknown benchmark route");

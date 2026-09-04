@@ -1,4 +1,4 @@
-#include "SparseCholesky.h"
+#include "AccelerateSparseCholesky.h"
 
 #include "SparseExecution.h"
 
@@ -106,13 +106,13 @@ bool UseBlock3(const Eigen::SparseMatrix<double> &matrix) {
 }
 } // namespace
 
-struct SparseCholesky::Factorization {
+struct modal::AccelerateSparseCholesky::Factorization {
     SparseOpaqueFactorization_Double Opaque;
     int Size{};
     ~Factorization() { SparseCleanup(Opaque); }
 };
 
-SparseCholesky::SparseCholesky(const Eigen::SparseMatrix<double> &matrix) {
+modal::AccelerateSparseCholesky::AccelerateSparseCholesky(const Eigen::SparseMatrix<double> &matrix) {
     ConfigureAccelerateSparseExecution();
     const bool large = matrix.rows() >= BlockCrossover;
     const bool blocked = UseBlock3(matrix);
@@ -130,9 +130,9 @@ SparseCholesky::SparseCholesky(const Eigen::SparseMatrix<double> &matrix) {
     Factor = std::make_unique<Factorization>(std::move(opaque), int(matrix.rows()));
 }
 
-SparseCholesky::~SparseCholesky() = default;
+modal::AccelerateSparseCholesky::~AccelerateSparseCholesky() = default;
 
-void SparseCholesky::Solve(const double *input, double *output, int width) const {
+void modal::AccelerateSparseCholesky::Solve(const double *input, double *output, int width) const {
     if (width < 1) throw std::invalid_argument("Sparse Cholesky solve width must be positive.");
     const DenseMatrix_Double b{Factor->Size, width, Factor->Size, SparseAttributes_t{}, const_cast<double *>(input)};
     const DenseMatrix_Double x{Factor->Size, width, Factor->Size, SparseAttributes_t{}, output};

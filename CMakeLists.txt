@@ -37,13 +37,13 @@ find_library(FASTFEM_FOUNDATION_FRAMEWORK Foundation REQUIRED)
 find_library(FASTFEM_METAL_FRAMEWORK Metal REQUIRED)
 
 add_library(FastFEM
-    src/audio/BlockSparseCholesky.cpp
-    src/audio/CholeskyShiftInvert.cpp
+    src/audio/Tet10Cholesky.cpp
+    src/audio/AccelerateShiftInvert.cpp
     src/audio/FiniteCell.cpp
-    src/audio/FiniteCellBlockEigensolver.cpp
+    src/audio/FiniteCellEigensolver.cpp
     src/audio/FiniteCellMetal.mm
     src/audio/MassProperties.cpp
-    src/audio/SparseCholesky.cpp
+    src/audio/AccelerateSparseCholesky.cpp
     src/audio/surface2modes.cpp
     src/audio/Tet10Assembler.cpp
     src/audio/mesh2modes.cpp
@@ -162,9 +162,9 @@ if(FASTFEM_BUILD_TOOLS)
     add_executable(FastFEMFiniteCellAudioCorpus tools/FiniteCellAudioCorpus.cpp)
     target_link_libraries(FastFEMFiniteCellAudioCorpus PRIVATE FastFEM::FastFEM)
 
-    add_executable(FastFEMBlockSparseBenchmark tools/BlockSparseBenchmark.cpp)
-    target_link_libraries(FastFEMBlockSparseBenchmark PRIVATE FastFEM::FastFEM ${FASTFEM_TINYOBJLOADER_TARGET})
-    target_include_directories(FastFEMBlockSparseBenchmark PRIVATE tests)
+    add_executable(FastFEMTet10CholeskyBenchmark tools/Tet10CholeskyBenchmark.cpp)
+    target_link_libraries(FastFEMTet10CholeskyBenchmark PRIVATE FastFEM::FastFEM ${FASTFEM_TINYOBJLOADER_TARGET})
+    target_include_directories(FastFEMTet10CholeskyBenchmark PRIVATE tests)
 
 endif()
 

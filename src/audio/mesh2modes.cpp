@@ -1,12 +1,14 @@
-// Eigen delegates large dense products used by Lanczos orthogonalization to Accelerate BLAS.
+// Eigen delegates large dense products in block eigensolver orthogonalization to Accelerate BLAS.
 #define EIGEN_USE_BLAS
 
 #include "mesh2modes.h"
 
 #include "AcousticMaterialProperties.h"
-#include "BlockSparseCholesky.h"
 #include "GeneralizedEigenSolver.h"
+#include "MassPropertiesAccumulator.h"
+#include "ModalResultBuilder.h"
 #include "Tet10Assembler.h"
+#include "Tet10Cholesky.h"
 #include "numeric/vec3.h"
 
 #include "mesh/TetMesh.h"
@@ -37,10 +39,10 @@ struct modal::SolveCache::State {
     std::shared_ptr<const Tet10Assembler::Topology> Topology;
     std::shared_ptr<const Tet10Assembler::AssembledLower> Assembly;
     std::optional<ElasticProperties> AssemblyMaterial;
-    std::mutex BlockFactorMutex;
-    std::unique_ptr<BlockSparseCholesky> BlockFactor;
-    std::shared_ptr<const Tet10Assembler::Topology> BlockTopology;
-    std::optional<ElasticProperties> BlockMaterial;
+    std::mutex Tet10FactorMutex;
+    std::unique_ptr<Tet10Cholesky> Tet10Factor;
+    std::shared_ptr<const Tet10Assembler::Topology> Tet10FactorTopology;
+    std::optional<ElasticProperties> Tet10FactorMaterial;
 };
 
 modal::SolveCache::SolveCache() : Reuse(std::make_unique<State>()) {}
@@ -152,7 +154,7 @@ MassProperties ComputeTetMassProperties(const TetMesh &tets, double density, vec
         for (int c = 0; c < 4; ++c) vol[t[c]] += quarter;
     }
 
-    return modal::detail::ComputeMassProperties(pos, vol, density, length_to_si);
+    return modal::ComputeMassProperties(pos, vol, density, length_to_si);
 }
 
 struct Tet10SolveOptions {
@@ -162,54 +164,48 @@ struct Tet10SolveOptions {
     modal::SolveMonitor *Monitor{};
 };
 
-struct Tet10BlockShiftInvert {
-    using Scalar = double;
-    using Index = Eigen::Index;
-
+struct Tet10ShiftInvert {
     const modal::Tet10Assembler &Fem;
     const AcousticMaterialProperties &Material;
     double &FactorizeSeconds, &SolveSeconds;
     bool &SymbolicReuse;
     modal::SolveCache::State *Cache{};
     std::unique_lock<std::mutex> CacheLock;
-    std::unique_ptr<BlockSparseCholesky> LocalFactor;
-    BlockSparseCholesky *Factor{};
+    std::unique_ptr<modal::Tet10Cholesky> LocalFactor;
+    modal::Tet10Cholesky *Factor{};
 
-    Tet10BlockShiftInvert(
+    Tet10ShiftInvert(
         const modal::Tet10Assembler &fem, const AcousticMaterialProperties &material, double &factorize_seconds,
         double &solve_seconds, bool &symbolic_reuse, modal::SolveCache *cache
     ) : Fem(fem), Material(material), FactorizeSeconds(factorize_seconds), SolveSeconds(solve_seconds),
         SymbolicReuse(symbolic_reuse), Cache(cache ? cache->Reuse.get() : nullptr),
-        CacheLock(Cache ? std::unique_lock{Cache->BlockFactorMutex, std::try_to_lock} : std::unique_lock<std::mutex>{}) {}
+        CacheLock(Cache ? std::unique_lock{Cache->Tet10FactorMutex, std::try_to_lock} : std::unique_lock<std::mutex>{}) {}
 
-    Index rows() const { return Fem.Dofs(); }
-    Index cols() const { return Fem.Dofs(); }
-
-    void set_shift(const Scalar &sigma) {
+    void set_shift(double sigma) {
         const auto start = std::chrono::steady_clock::now();
         if (!Factor) {
             bool reused{};
             if (CacheLock.owns_lock()) {
                 const auto properties = modal::SolveCache::State::Elastic(Material);
-                reused = bool(Cache->BlockFactor);
-                if (!Cache->BlockFactor) {
-                    Cache->BlockFactor = std::make_unique<BlockSparseCholesky>(Fem);
-                } else if (Cache->BlockTopology == Fem.State && Cache->BlockMaterial && Cache->BlockMaterial->PoissonRatio == properties.PoissonRatio) {
-                    if (*Cache->BlockMaterial != properties)
-                        Cache->BlockFactor->ScalePencil(properties.YoungModulus / Cache->BlockMaterial->YoungModulus, properties.Density / Cache->BlockMaterial->Density);
+                reused = bool(Cache->Tet10Factor);
+                if (!Cache->Tet10Factor) {
+                    Cache->Tet10Factor = std::make_unique<modal::Tet10Cholesky>(Fem);
+                } else if (Cache->Tet10FactorTopology == Fem.State && Cache->Tet10FactorMaterial && Cache->Tet10FactorMaterial->PoissonRatio == properties.PoissonRatio) {
+                    if (*Cache->Tet10FactorMaterial != properties)
+                        Cache->Tet10Factor->ScalePencil(properties.YoungModulus / Cache->Tet10FactorMaterial->YoungModulus, properties.Density / Cache->Tet10FactorMaterial->Density);
                 } else {
                     try {
-                        Cache->BlockFactor->Reassemble(Fem);
+                        Cache->Tet10Factor->Reassemble(Fem);
                     } catch (const std::invalid_argument &) {
-                        Cache->BlockFactor = std::make_unique<BlockSparseCholesky>(Fem);
+                        Cache->Tet10Factor = std::make_unique<modal::Tet10Cholesky>(Fem);
                         reused = false;
                     }
                 }
-                Cache->BlockTopology = Fem.State;
-                Cache->BlockMaterial = properties;
-                Factor = Cache->BlockFactor.get();
+                Cache->Tet10FactorTopology = Fem.State;
+                Cache->Tet10FactorMaterial = properties;
+                Factor = Cache->Tet10Factor.get();
             } else {
-                LocalFactor = std::make_unique<BlockSparseCholesky>(Fem);
+                LocalFactor = std::make_unique<modal::Tet10Cholesky>(Fem);
                 Factor = LocalFactor.get();
             }
             SymbolicReuse = reused;
@@ -218,27 +214,21 @@ struct Tet10BlockShiftInvert {
         FactorizeSeconds += SecondsSince(start);
     }
 
-    void perform_op(const Scalar *input, Scalar *output) const {
-        const auto start = std::chrono::steady_clock::now();
-        Factor->Solve(input, output);
-        SolveSeconds += SecondsSince(start);
-    }
-
-    void solve_panel(const Scalar *input, Scalar *output, int width) const {
+    void solve_panel(const double *input, double *output, int width) const {
         const auto start = std::chrono::steady_clock::now();
         Factor->Solve(input, output, width);
         SolveSeconds += SecondsSince(start);
     }
 };
 
-modal::detail::GeneralizedEigenResult SolveTet10Eigenpairs(
+modal::eigensolver::GeneralizedEigenResult SolveTet10Eigenpairs(
     const modal::Tet10Assembler &fem,
     const Eigen::SparseMatrix<double> &M,
     const Eigen::SparseMatrix<double> &K,
     Tet10SolveOptions opts,
     modal::SolveProfile &profile
 ) {
-    using OpType = Tet10BlockShiftInvert;
+    using OpType = Tet10ShiftInvert;
     const auto &config = opts.Config;
     const uint n = fem.Dofs();
     const uint fem_n_modes = std::min(config.NumFemModes, n - 1);
@@ -254,7 +244,7 @@ modal::detail::GeneralizedEigenResult SolveTet10Eigenpairs(
     const bool use_subspace = reuse.SeedBasis != nullptr && reuse.SeedBasis->rows() == Eigen::Index(n) &&
         reuse.SeedBasis->cols() >= Eigen::Index(fem_n_modes);
     const auto eig_start = std::chrono::steady_clock::now();
-    const auto subspace = modal::detail::SolveGeneralizedEigenproblem(
+    const auto subspace = modal::eigensolver::SolveGeneralizedEigenproblem(
         op, M, K,
         {
             .Count = fem_n_modes,
@@ -371,7 +361,7 @@ std::optional<ModalModes> modal::RescaleModes(const ModalEigenSummary &summary, 
     return modes;
 }
 
-modal::ModalResult modal::detail::MakeModalResult(std::vector<double> eigenvalues, std::vector<std::vector<vec3>> shapes, const AcousticMaterialProperties &material, const SolverConfig &config, std::vector<vec3> positions, vec3 baked_scale, MassProperties mass_properties, SolveProfile profile, Eigen::MatrixXf basis, std::vector<uint32_t> sample_point_of) {
+modal::ModalResult modal::BuildModalResult(std::vector<double> eigenvalues, std::vector<std::vector<vec3>> shapes, const AcousticMaterialProperties &material, const SolverConfig &config, std::vector<vec3> positions, vec3 baked_scale, MassProperties mass_properties, SolveProfile profile, Eigen::MatrixXf basis, std::vector<uint32_t> sample_point_of) {
     ModalEigenSummary summary{
         .Eigenvalues = std::move(eigenvalues),
         .Shapes = std::move(shapes),
@@ -445,5 +435,5 @@ modal::ModalResult modal::mesh2modes(const TetMesh &input_tets, const AcousticMa
                 shapes[point][size_t(mode)][component] = eigenpairs.Eigenvectors(3 * excite_points[point] + component, mode);
     Eigen::MatrixXf basis;
     if (reuse.KeepBasis) basis = eigenpairs.Eigenvectors.cast<float>();
-    return detail::MakeModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config, std::move(positions), baked_scale, std::move(mass_props), profile, std::move(basis), std::move(sample_point_of));
+    return BuildModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config, std::move(positions), baked_scale, std::move(mass_props), profile, std::move(basis), std::move(sample_point_of));
 }
