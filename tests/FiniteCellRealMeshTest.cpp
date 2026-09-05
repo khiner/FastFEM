@@ -1,5 +1,5 @@
-#include "FiniteCellBenchmarkGeometry.h"
 #include "LoadObj.h"
+#include "ModalTestGeometry.h"
 #include "ModeShapeComparison.h"
 #include "audio/FiniteCell.h"
 #include "audio/FiniteCellEigensolver.h"
@@ -30,7 +30,7 @@ constexpr double Shift{Omega * Omega};
 constexpr AcousticMaterialProperties Material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
 
 struct Geometry {
-    finite_cell_benchmark::Surface Boundary;
+    modal_test::Surface Boundary;
     dvec3 Extent;
 };
 
@@ -68,7 +68,7 @@ Geometry LoadGeometry(const fs::path &path) {
     const auto loaded = LoadObj(path);
     if (!loaded || loaded->Positions.empty() || !IsWatertight(loaded->TriangleIndices))
         throw std::invalid_argument("not a nonempty watertight triangle mesh");
-    finite_cell_benchmark::Surface surface;
+    modal_test::Surface surface;
     surface.Triangles = loaded->TriangleIndices;
     surface.Points.reserve(loaded->Positions.size());
     dvec3 minimum{std::numeric_limits<double>::max()}, maximum{std::numeric_limits<double>::lowest()};
@@ -82,7 +82,7 @@ Geometry LoadGeometry(const fs::path &path) {
     if (!(longest > 0) || !std::isfinite(longest)) throw std::invalid_argument("has invalid bounds");
     const double scale = 0.3 / longest;
     for (const vec3 &point : loaded->Positions) surface.Points.push_back((dvec3{point} - minimum) * scale);
-    const auto [normalized_minimum, normalized_maximum] = finite_cell_benchmark::Bounds(surface);
+    const auto [normalized_minimum, normalized_maximum] = modal_test::Bounds(surface);
     return {.Boundary = std::move(surface), .Extent = normalized_maximum - normalized_minimum};
 }
 
@@ -121,7 +121,7 @@ std::vector<fs::path> Objects(const fs::path &root, const std::vector<std::strin
 
 RunResult Run(const fs::path &path, uint32_t resolution, uint32_t max_iterations) {
     const auto geometry = LoadGeometry(path);
-    const auto cells = finite_cell_benchmark::Resolution(geometry.Extent, resolution);
+    const auto cells = modal_test::Resolution(geometry.Extent, resolution);
     const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
     const auto operation = modal::BuildFiniteCellOperator(
         domain, Material,
@@ -140,7 +140,7 @@ RunResult Run(const fs::path &path, uint32_t resolution, uint32_t max_iterations
         numeric::Norm(assembled.Eigenvalues.Subvector(6, AcceptedModeCount - 6));
     const double residual = numeric::Maximum(production_certification.RelativeResiduals.Subvector(6, AcceptedModeCount - 6));
     const double assembled_residual = numeric::Maximum(assembled_certification.RelativeResiduals.Subvector(6, AcceptedModeCount - 6));
-    const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
+    const auto shapes = modal_test::CompareSameDiscretizationModeShapes(
         operation, assembled.Eigenvalues, assembled.Eigenvectors, production.Eigenvectors, 6, AcceptedModeCount
     );
     const auto fractions = PhysicalCellFractions(operation);

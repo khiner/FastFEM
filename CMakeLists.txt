@@ -166,9 +166,6 @@ if(FASTFEM_BUILD_TOOLS)
     target_link_libraries(FastFEMModalSolve PRIVATE FastFEM::FastFEM ${FASTFEM_TINYOBJLOADER_TARGET})
     target_include_directories(FastFEMModalSolve PRIVATE tests)
 
-    fastfem_add_internal_executable(FastFEMFiniteCellAudioCorpus tools/FiniteCellAudioCorpus.cpp)
-    target_link_libraries(FastFEMFiniteCellAudioCorpus PRIVATE FastFEM::FastFEM)
-
     fastfem_add_internal_executable(FastFEMTet10CholeskyBenchmark tools/Tet10CholeskyBenchmark.cpp)
     target_link_libraries(FastFEMTet10CholeskyBenchmark PRIVATE FastFEM::FastFEM ${FASTFEM_TINYOBJLOADER_TARGET})
     target_include_directories(FastFEMTet10CholeskyBenchmark PRIVATE tests)
@@ -177,6 +174,8 @@ endif()
 
 if(FASTFEM_BUILD_TESTS)
     enable_testing()
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME FastFEMSurfaceBenchmarkDiagnostics COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/BenchmarkSurfaceTest.py)
     if(NOT TARGET Boost::ut)
         set(BOOST_UT_DISABLE_MODULE ON CACHE BOOL "" FORCE)
         set(BOOST_UT_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
@@ -187,43 +186,22 @@ if(FASTFEM_BUILD_TESTS)
         add_subdirectory(lib/ut EXCLUDE_FROM_ALL)
     endif()
 
-    fastfem_add_internal_executable(FastFEMModalSolverTest tests/ModalSolverTest.cpp)
+    foreach(suite ModalSolver Surface2Modes FiniteCell AnalyticalModal FiniteCellRobustness)
+        fastfem_add_internal_executable(FastFEM${suite}Test tests/${suite}Test.cpp)
+        target_include_directories(FastFEM${suite}Test PRIVATE tests)
+        target_link_libraries(FastFEM${suite}Test PRIVATE FastFEM::FastFEM Boost::ut)
+        add_test(NAME FastFEM${suite} COMMAND FastFEM${suite}Test)
+    endforeach()
     target_compile_definitions(FastFEMModalSolverTest PRIVATE
         REALIMPACT_DATASET_DIR="${FASTFEM_REALIMPACT_DATASET_DIR}"
     )
-    target_include_directories(FastFEMModalSolverTest PRIVATE tests tools)
-    target_link_libraries(FastFEMModalSolverTest PRIVATE
-        FastFEM::FastFEM
-        Boost::ut
-        ${FASTFEM_TINYOBJLOADER_TARGET}
-    )
-    add_test(NAME FastFEMModalSolver COMMAND FastFEMModalSolverTest)
-
-    fastfem_add_internal_executable(FastFEMSurface2ModesTest tests/Surface2ModesTest.cpp)
-    target_include_directories(FastFEMSurface2ModesTest PRIVATE tests tools)
-    target_link_libraries(FastFEMSurface2ModesTest PRIVATE FastFEM::FastFEM Boost::ut)
-    add_test(NAME FastFEMSurface2Modes COMMAND FastFEMSurface2ModesTest)
-
-    fastfem_add_internal_executable(FastFEMFiniteCellTest tests/FiniteCellTest.cpp)
-    target_include_directories(FastFEMFiniteCellTest PRIVATE tests tools)
-    target_link_libraries(FastFEMFiniteCellTest PRIVATE FastFEM::FastFEM Boost::ut)
-    add_test(NAME FastFEMFiniteCell COMMAND FastFEMFiniteCellTest)
-
-    fastfem_add_internal_executable(FastFEMAnalyticalModalTest tests/AnalyticalModalTest.cpp)
-    target_include_directories(FastFEMAnalyticalModalTest PRIVATE tests tools)
-    target_link_libraries(FastFEMAnalyticalModalTest PRIVATE FastFEM::FastFEM Boost::ut)
-    add_test(NAME FastFEMAnalyticalModal COMMAND FastFEMAnalyticalModalTest)
-
-    fastfem_add_internal_executable(FastFEMFiniteCellRobustnessTest tests/FiniteCellRobustnessTest.cpp)
-    target_include_directories(FastFEMFiniteCellRobustnessTest PRIVATE tests tools)
-    target_link_libraries(FastFEMFiniteCellRobustnessTest PRIVATE FastFEM::FastFEM Boost::ut)
-    add_test(NAME FastFEMFiniteCellRobustness COMMAND FastFEMFiniteCellRobustnessTest)
+    target_link_libraries(FastFEMModalSolverTest PRIVATE ${FASTFEM_TINYOBJLOADER_TARGET})
 
     fastfem_add_internal_executable(FastFEMFiniteCellRealMeshTest tests/FiniteCellRealMeshTest.cpp)
     target_compile_definitions(FastFEMFiniteCellRealMeshTest PRIVATE
         FASTFEM_TET_CORPUS_DIR="${FASTFEM_TET_CORPUS_DIR}"
     )
-    target_include_directories(FastFEMFiniteCellRealMeshTest PRIVATE tests tools)
+    target_include_directories(FastFEMFiniteCellRealMeshTest PRIVATE tests)
     target_link_libraries(FastFEMFiniteCellRealMeshTest PRIVATE FastFEM::FastFEM ${FASTFEM_TINYOBJLOADER_TARGET})
     add_test(
         NAME FastFEMFiniteCellRealMesh

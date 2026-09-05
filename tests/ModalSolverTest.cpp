@@ -16,7 +16,6 @@
 #include <boost/ut.hpp>
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -417,7 +416,7 @@ int main() {
         };
         for (const auto &[name, surface] : cases) {
             for (const bool quality : {false, true}) {
-                const auto tets = tetra::Tetrahedralize(surface.Points, surface.Tris, {.Quality = quality});
+                const auto tets = tetra::Tetrahedralize(surface.Points, surface.Tris, {.Refinement = quality ? fastfem::TetRefinement::Quality : fastfem::TetRefinement::None});
                 if (!tets) {
                     expect(false) << name << "tetrahedralization failed:" << tets.error();
                     continue;
@@ -428,6 +427,51 @@ int main() {
         }
     };
 
+    "surface refinement preserves closed geometry and bounds edge lengths"_test = [] {
+        const auto cube = GridBox(1);
+        for (const double spacing : {0.8, 0.3}) {
+            std::vector<vec3> points(cube.Points.begin(), cube.Points.end());
+            auto triangles = cube.Tris;
+            RefineSurface(points, triangles, spacing);
+            expect(triangles.size() > cube.Tris.size());
+            for (size_t i = 0; i < cube.Points.size(); ++i) expect(points[i] == vec3{cube.Points[i]});
+            std::map<std::pair<uint32_t, uint32_t>, uint32_t> edge_counts;
+            double area{};
+            for (size_t t = 0; t < triangles.size(); t += 3) {
+                const dvec3 a{points[triangles[t]]}, b{points[triangles[t + 1]]}, c{points[triangles[t + 2]]};
+                area += 0.5 * numeric::Length(numeric::Cross(b - a, c - a));
+                bool on_face{};
+                for (uint32_t axis = 0; axis < 3; ++axis)
+                    on_face |= (a[axis] == 0 || a[axis] == 1) && a[axis] == b[axis] && b[axis] == c[axis];
+                expect(on_face);
+                for (uint32_t e = 0; e < 3; ++e) {
+                    const auto x = triangles[t + e], y = triangles[t + (e + 1) % 3];
+                    ++edge_counts[std::minmax(x, y)];
+                    expect(numeric::Length(dvec3{points[x]} - dvec3{points[y]}) <= spacing * (1 + 1e-6));
+                }
+            }
+            expect(std::abs(area - 6) < 1e-10);
+            for (const auto &[edge, count] : edge_counts) expect(count == 2u);
+        }
+    };
+
+    "size refinement reduces tetrahedron volumes on a subdivided surface"_test = [] {
+        const auto surface = GridBox(4);
+        const auto quality = tetra::Tetrahedralize(surface.Points, surface.Tris, {.Refinement = fastfem::TetRefinement::Quality});
+        const auto sized = tetra::Tetrahedralize(surface.Points, surface.Tris, {.Refinement = fastfem::TetRefinement::QualityAndResolution, .MaxVolume = 0.002});
+        expect(bool(quality) && bool(sized));
+        if (!quality || !sized) return;
+        expect(ValidateTetMesh(surface.Points, surface.Tris, sized->Mesh).empty());
+        expect(sized->Mesh.Tets.size() > quality->Mesh.Tets.size());
+        const auto maximum_volume = [](const TetMesh &mesh) {
+            double maximum{};
+            for (const auto &tet : mesh.Tets)
+                maximum = std::max(maximum, std::abs(geom::Orient3D(mesh.Points[tet[0]], mesh.Points[tet[1]], mesh.Points[tet[2]], mesh.Points[tet[3]])) / 6);
+            return maximum;
+        };
+        expect(maximum_volume(sized->Mesh) < maximum_volume(quality->Mesh));
+    };
+
     "tetrahedralizer cavity seeds remove enclosed voids"_test = [] {
         Surface surface = GridBox(2), inner = GridBox(2);
         for (dvec3 &point : inner.Points) point = 0.25 + 0.5 * point;
@@ -435,7 +479,7 @@ int main() {
         surface.Points.insert(surface.Points.end(), inner.Points.begin(), inner.Points.end());
         for (const uint32_t point : inner.Tris) surface.Tris.push_back(offset + point);
         const std::array holes{dvec3{0.5}};
-        const auto result = tetra::Tetrahedralize(surface.Points, surface.Tris, {.Quality = true, .Holes = holes});
+        const auto result = tetra::Tetrahedralize(surface.Points, surface.Tris, {.Refinement = fastfem::TetRefinement::Quality, .Holes = holes});
         expect(bool(result));
         if (!result) return;
         expect(ValidateTetMesh(surface.Points, surface.Tris, result->Mesh).empty());
@@ -446,32 +490,6 @@ int main() {
             volume += std::abs(geom::Orient3D(result->Mesh.Points[tet[0]], result->Mesh.Points[tet[1]], result->Mesh.Points[tet[2]], result->Mesh.Points[tet[3]])) / 6;
         }
         expect(std::abs(volume - 0.875) < 1e-12);
-    };
-
-    "RealImpact bowl solves in reasonable time"_test = [] {
-        const auto path = DatasetDir() / "9_BowlCeramic/preprocessed/transformed.obj";
-        if (!std::filesystem::exists(path)) {
-            std::println("skipping RealImpact benchmark: {} not found", path.string());
-            return;
-        }
-        auto surface = LoadObj(path);
-        if (!surface || surface->Positions.empty()) {
-            std::println("skipping RealImpact benchmark: no mesh data in {}", path.string());
-            return;
-        }
-        const std::vector<vec3> excite{surface->Positions.front()};
-        const auto n_verts = surface->Positions.size(), n_tris = surface->TriangleIndices.size() / 3;
-        const auto tets = GenerateTets(std::move(surface->Positions), std::move(surface->TriangleIndices), {});
-        expect(tets.has_value());
-        if (!tets) return;
-        std::println("--- RealImpact bowl: {} welded verts, {} tris -> {} tet nodes, {} tets ---", n_verts, n_tris, tets->Mesh.Points.size(), tets->Mesh.Tets.size());
-
-        constexpr AcousticMaterialProperties Ceramic{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19, .Alpha = 5, .Beta = 1e-8};
-        const auto start = std::chrono::steady_clock::now();
-        const auto result = modal::SolveTet10Modes(tets->Mesh, Ceramic, excite, vec3{1}, {});
-        const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        expect(!result.Modes.Freqs.empty());
-        std::println("{:6.2f} s, {} modes, f1 {:8.1f} Hz", seconds, result.Modes.Freqs.size(), result.Modes.Freqs.empty() ? 0.0 : double(result.Modes.Freqs.front()));
     };
 
     // Requires a structurally valid tetrahedral mesh at every application simplification resolution.

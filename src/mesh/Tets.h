@@ -7,6 +7,9 @@
 // The function retries folds with their neighborhoods fixed and preserves resolution where every collapse causes an intersection.
 void SimplifySurface(std::vector<vec3> &positions, std::vector<uint32_t> &triangle_indices, float ratio);
 
+// Conforming midpoint subdivision preserves the piecewise-planar surface and winding.
+void RefineSurface(std::vector<vec3> &positions, std::vector<uint32_t> &triangle_indices, double maximum_edge_length);
+
 // Returns a tetrahedral mesh whose boundary contains the closed input triangle surface exactly.
 // Returns an error string for invalid or unrecoverable input.
 // Call SimplifySurface first to reduce surface resolution.

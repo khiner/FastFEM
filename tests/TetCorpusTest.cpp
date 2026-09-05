@@ -75,7 +75,7 @@ ObjectResult RunObject(const WorkItem &work) {
 
     const std::vector<dvec3> input_points(surface->Positions.begin(), surface->Positions.end());
     for (const bool quality : {false, true}) {
-        const auto tets = GenerateTets(surface->Positions, surface->TriangleIndices, {.Quality = quality});
+        const auto tets = GenerateTets(surface->Positions, surface->TriangleIndices, {.Refinement = quality ? fastfem::TetRefinement::Quality : fastfem::TetRefinement::None});
         if (!tets) {
             result.Out += std::format("{}/{} {}: tetrahedralization failed: {}\n", work.Corpus, work.Obj.stem().string(), quality ? "q" : "noq", tets.error());
             ++result.Failures;

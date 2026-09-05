@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Compare complete production solves from identical OBJ input in fresh processes."""
+
+import argparse
+import hashlib
+import json
+import math
+from pathlib import Path
+import statistics
+import subprocess
+import sys
+
+
+def positive(value):
+    result = int(value)
+    if result <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return result
+
+
+def dot(a, b):
+    return sum(x * y for x, y in zip(a, b, strict=True))
+
+
+def basis(vectors):
+    """Orthonormalize sampled shapes twice. Return None for an unobservable mode."""
+    result = []
+    for vector in vectors:
+        norm = math.sqrt(dot(vector, vector))
+        if norm == 0:
+            return None
+        v = [x / norm for x in vector]
+        for _ in range(2):
+            for q in result:
+                projection = dot(v, q)
+                v = [x - projection * y for x, y in zip(v, q, strict=True)]
+        norm = math.sqrt(dot(v, v))
+        if norm < 1e-8:
+            return None
+        result.append([x / norm for x in v])
+    return result
+
+
+def compare(tet, finite):
+    if tet["samples"] != finite["samples"]:
+        raise ValueError("solves used different excitation positions")
+    a, b = tet["frequencies"], finite["frequencies"]
+    if len(a) != len(b) or not a:
+        raise ValueError("solves did not return the same number of physical modes")
+    gaps = [abs(x - y) / max(x, y) for x, y in zip(a, b, strict=True)]
+    clusters, start = [], 0
+    for end in range(1, len(a) + 1):
+        # Group adjacent modes if either solve places them within one percent.
+        if end < len(a) and (a[end] - a[end - 1] <= 0.01 * a[end] or b[end] - b[end - 1] <= 0.01 * b[end]):
+            continue
+        qa = basis(tet["shapes"][start:end])
+        qb = basis(finite["shapes"][start:end])
+        complete = end < len(a)
+        overlap = None if not complete or qa is None or qb is None else min(1.0, sum(dot(x, y) ** 2 for x in qa for y in qb) / (end - start))
+        clusters.append({"first_physical_mode": start, "count": end - start, "complete": complete, "mean_squared_subspace_overlap": overlap})
+        start = end
+    return {
+        "physical_modes": len(a),
+        "frequency_relative_difference_max": max(gaps),
+        "frequency_relative_difference_rms": math.sqrt(statistics.mean(x * x for x in gaps)),
+        "mass_relative_difference": abs(tet["mass"] - finite["mass"]) / max(tet["mass"], finite["mass"]),
+        "shape_clusters": clusters,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mesh", type=Path)
+    parser.add_argument("--solver", type=Path, default=Path(__file__).resolve().parents[1] / "build/FastFEMModalSolve")
+    parser.add_argument("--resolution", type=positive, default=12)
+    parser.add_argument("--fem-modes", type=positive, default=45)
+    parser.add_argument("--repetitions", type=positive, default=3)
+    parser.add_argument("--timeout", type=positive, default=300)
+    args = parser.parse_args()
+    if args.fem_modes <= 6:
+        parser.error("--fem-modes must exceed the six rigid modes")
+    mesh = args.mesh.resolve()
+    digest = hashlib.sha256(mesh.read_bytes()).hexdigest()
+    command = [str(args.solver.resolve()), str(mesh), "--benchmark", "--resolution", str(args.resolution),
+               "--fem-modes", str(args.fem_modes), "--refinement", "quality-and-resolution"]
+    samples = {"tet10": [], "finite-cell": []}
+    commands = {route: command + ["--discretization", route] for route in samples}
+    for repetition in range(args.repetitions):
+        for route in list(samples)[::1 if repetition % 2 == 0 else -1]:
+            print(f"sample {repetition + 1}/{args.repetitions}: {route}", file=sys.stderr, flush=True)
+            process = subprocess.run(commands[route], capture_output=True, text=True, timeout=args.timeout)
+            if process.returncode:
+                raise RuntimeError(f"{route} failed ({process.returncode}): {process.stderr.strip()}")
+            sample = json.loads(process.stdout)
+            if not math.isfinite(sample["solve_seconds"]) or sample["solve_seconds"] <= 0:
+                raise ValueError("invalid solve timing")
+            if len(sample["frequencies"]) != args.fem_modes - 6 or len(sample["shapes"]) != args.fem_modes - 6:
+                raise ValueError("incomplete physical spectrum")
+            if any(not math.isfinite(f) or f <= 0 for f in sample["frequencies"]):
+                raise ValueError("invalid physical frequency")
+            if any(len(shape) != 3 * len(sample["samples"]) or any(not math.isfinite(x) for x in shape) for shape in sample["shapes"]):
+                raise ValueError("invalid sampled mode shape")
+            if samples[route] and any(sample[k] != samples[route][0][k] for k in ("input_vertices", "input_triangles", "tetrahedra", "frequencies", "samples", "shapes")):
+                raise ValueError(f"{route} results changed between repetitions")
+            samples[route].append(sample)
+    if hashlib.sha256(mesh.read_bytes()).hexdigest() != digest:
+        raise ValueError("input mesh changed during the benchmark")
+    comparison = compare(samples["tet10"][0], samples["finite-cell"][0])
+    report = {"mesh": str(mesh), "sha256": digest, "resolution": args.resolution, "fem_modes": args.fem_modes,
+              "timing_scope": "public Surface2Modes call, including preparation, assembly, solve/fallback, sampling, and result construction. Excludes process startup, OBJ loading, and JSON output",
+              "process_policy": "fresh process per sample. Alternating route order. No warmup or reuse",
+              "comparison": comparison, "routes": {}}
+    for route, runs in samples.items():
+        times = [run["solve_seconds"] for run in runs]
+        report["routes"][route] = {"command": commands[route], "seconds": times, "median_seconds": statistics.median(times),
+                                   "input_vertices": runs[0]["input_vertices"], "input_triangles": runs[0]["input_triangles"],
+                                   "tetrahedra": runs[0]["tetrahedra"], "frequencies_hz": runs[0]["frequencies"]}
+    json.dump(report, sys.stdout, indent=2, allow_nan=False)
+    print()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)

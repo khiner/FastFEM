@@ -9972,10 +9972,18 @@ struct Mesh {
 
 std::expected<Result, std::string> Tetrahedralize(std::span<const dvec3> points, std::span<const uint32_t> triangle_indices, Options options) {
     Mesh m;
-    m.MaxVolume = options.MaxVolume;
+    switch (options.Refinement) {
+        case fastfem::TetRefinement::None: break;
+        case fastfem::TetRefinement::Quality: m.Quality = true; break;
+        case fastfem::TetRefinement::QualityAndResolution:
+            if (!std::isfinite(options.MaxVolume) || options.MaxVolume <= 0)
+                return std::unexpected("QualityAndResolution refinement requires a positive finite maximum tetrahedron volume.");
+            m.Quality = true;
+            m.MaxVolume = options.MaxVolume;
+            break;
+        default: return std::unexpected("Unknown tetrahedral refinement mode.");
+    }
     m.HoleSeeds = options.Holes;
-    // A volume bound enables the quality pass with its radius-edge and dihedral targets.
-    m.Quality = options.Quality || options.MaxVolume > 0;
     // Without a quality bound the dihedral target relaxes.
     if (!m.Quality) m.OptMaxDihedral = 179.9;
 

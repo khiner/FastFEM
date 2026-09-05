@@ -17,17 +17,16 @@ modal::SurfaceSolveConfig Import(const fastfem::SurfaceSolveConfig &config) {
     return {
         .Modal = Import(config.Modal),
         .Tetrahedralization = {
-            .Quality = config.Tetrahedralization.Quality,
-            .MaxVolume = config.Tetrahedralization.MaxVolume,
+            .Refinement = config.Tetrahedralization.Refinement,
             .Holes = config.Tetrahedralization.Holes,
         },
         .FiniteCell = {
-            .Cells = {config.FiniteCell.Cells[0], config.FiniteCell.Cells[1], config.FiniteCell.Cells[2]},
             .CutDepth = config.FiniteCell.CutDepth,
             .FictitiousScale = config.FiniteCell.FictitiousScale,
             .PaddingCells = config.FiniteCell.PaddingCells,
             .GridOffsetCells = config.FiniteCell.GridOffsetCells,
         },
+        .Resolution = config.Resolution,
         .SurfaceSimplificationRatio = config.SurfaceSimplificationRatio,
     };
 }

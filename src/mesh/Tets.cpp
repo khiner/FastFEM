@@ -249,6 +249,52 @@ void SimplifySurface(std::vector<vec3> &positions, std::vector<uint32_t> &triang
     triangle_indices = std::move(tris);
 }
 
+void RefineSurface(std::vector<vec3> &positions, std::vector<uint32_t> &triangle_indices, double maximum_edge_length) {
+    if (!std::isfinite(maximum_edge_length) || maximum_edge_length <= 0)
+        throw std::invalid_argument("Surface edge length must be positive and finite.");
+    const double limit_squared = maximum_edge_length * maximum_edge_length;
+    for (;;) {
+        std::unordered_map<uint64_t, uint32_t> midpoints;
+        std::vector<uint32_t> refined;
+        for (size_t t = 0; t < triangle_indices.size(); t += 3) {
+            std::array<uint32_t, 3> v{triangle_indices[t], triangle_indices[t + 1], triangle_indices[t + 2]}, m{};
+            std::array<bool, 3> split{};
+            uint32_t count{};
+            for (uint32_t edge = 0; edge < 3; ++edge) {
+                const auto a = v[edge], b = v[(edge + 1) % 3];
+                const dvec3 delta = dvec3{positions[a]} - dvec3{positions[b]};
+                if (numeric::Dot(delta, delta) <= limit_squared) continue;
+                split[edge] = true;
+                ++count;
+                const uint64_t key = uint64_t(std::min(a, b)) << 32 | std::max(a, b);
+                const auto [entry, inserted] = midpoints.try_emplace(key, uint32_t(positions.size()));
+                if (inserted) {
+                    const vec3 midpoint{(dvec3{positions[a]} + dvec3{positions[b]}) * 0.5};
+                    if (midpoint == positions[a] || midpoint == positions[b])
+                        throw std::runtime_error("Surface resolution exceeds coordinate precision.");
+                    positions.push_back(midpoint);
+                }
+                m[edge] = entry->second;
+            }
+            if (!count) refined.insert(refined.end(), v.begin(), v.end());
+            else if (count == 3) {
+                refined.insert(refined.end(), {v[0], m[0], m[2], m[0], v[1], m[1], m[2], m[1], v[2], m[0], m[1], m[2]});
+            } else {
+                uint32_t edge{};
+                while (split[edge] != (count == 1)) ++edge;
+                const auto a = v[edge], b = v[(edge + 1) % 3], c = v[(edge + 2) % 3];
+                if (count == 1) refined.insert(refined.end(), {a, m[edge], c, m[edge], b, c});
+                else {
+                    const auto bc = m[(edge + 1) % 3], ca = m[(edge + 2) % 3];
+                    refined.insert(refined.end(), {a, b, ca, b, bc, ca, bc, c, ca});
+                }
+            }
+        }
+        if (midpoints.empty()) return;
+        triangle_indices = std::move(refined);
+    }
+}
+
 std::expected<tetra::Result, std::string> GenerateTets(std::vector<vec3> positions, std::vector<uint32_t> triangle_indices, tetra::Options options) {
     const std::vector<dvec3> points(positions.begin(), positions.end());
     return tetra::Tetrahedralize(points, triangle_indices, options);

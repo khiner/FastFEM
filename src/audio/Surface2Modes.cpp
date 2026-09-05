@@ -98,12 +98,28 @@ std::expected<modal::ModalResult, std::string> modal::Surface2Modes(std::span<co
     fastfem::SetSolveProgress(monitor, 0, fastfem::SolveStage::PreparingSurface);
     if (positions.empty() || triangle_indices.empty() || triangle_indices.size() % 3) return std::unexpected("A surface solve requires indexed triangles.");
     if (baked_scale.x <= 0 || baked_scale.y <= 0 || baked_scale.z <= 0) return std::unexpected("Baked scale components must be positive.");
+    if (!config.Resolution) return std::unexpected("Surface resolution must be positive.");
+    dvec3 min{std::numeric_limits<double>::infinity()}, max{-std::numeric_limits<double>::infinity()};
+    for (const auto point : positions) {
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) return std::unexpected("Surface positions must be finite.");
+        min = numeric::Min(min, dvec3{point});
+        max = numeric::Max(max, dvec3{point});
+    }
+    for (const auto index : triangle_indices)
+        if (index >= positions.size()) return std::unexpected("Surface triangle index is out of range.");
+    const dvec3 extent = max - min;
+    const double spacing = std::max({extent.x, extent.y, extent.z}) / config.Resolution;
+    if (!(spacing > 0)) return std::unexpected("Surface bounds must have positive extent.");
     try {
         switch (discretization) {
             case Discretization::Tet10: {
                 std::vector<vec3> surface_positions{positions.begin(), positions.end()};
                 std::vector<uint32_t> surface_indices{triangle_indices.begin(), triangle_indices.end()};
                 SimplifySurface(surface_positions, surface_indices, config.SurfaceSimplificationRatio);
+                if (config.Tetrahedralization.Refinement == fastfem::TetRefinement::QualityAndResolution) {
+                    RefineSurface(surface_positions, surface_indices, spacing);
+                    config.Tetrahedralization.MaxVolume = spacing * spacing * spacing / 6;
+                }
                 fastfem::SetSolveProgress(monitor, 0.03f, fastfem::SolveStage::GeneratingTetrahedra);
                 auto tetrahedra = GenerateTets(std::move(surface_positions), std::move(surface_indices), config.Tetrahedralization);
                 if (!tetrahedra) return std::unexpected(std::move(tetrahedra.error()));
@@ -113,6 +129,8 @@ std::expected<modal::ModalResult, std::string> modal::Surface2Modes(std::span<co
             }
             case Discretization::FiniteCell:
                 if (reuse.SeedBasis || reuse.Cache) return std::unexpected("Finite-cell surface solves do not accept Tet10 reuse state.");
+                for (uint32_t axis = 0; axis < 3; ++axis)
+                    config.FiniteCell.Cells[axis] = std::max(1u, uint32_t(std::ceil(extent[axis] / spacing)));
                 return SolveFiniteCell(positions, triangle_indices, material, excitation_positions, baked_scale, config, monitor);
         }
     } catch (const std::exception &error) {

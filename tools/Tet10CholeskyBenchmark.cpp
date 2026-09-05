@@ -1,5 +1,4 @@
 #include "LoadObj.h"
-#include "StructuredBar.h"
 #include "audio/Tet10Assembler.h"
 #include "audio/Tet10Cholesky.h"
 #include "mesh/Tets.h"
@@ -124,43 +123,27 @@ int Integer(const char *text, std::string_view name) {
 
 } // namespace
 
-int main(int argc, char **argv) {
-    try {
-        if (argc < 2) {
-            std::println(stderr, "usage: {} --tet NX NY NZ [REPETITIONS] [WIDTH] | --obj PATH [REPETITIONS] [WIDTH]", argv[0]);
-            return 2;
-        }
-        constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
-        if (std::string_view{argv[1]} == "--tet") {
-            if (argc < 5) throw std::invalid_argument("--tet requires NX NY NZ");
-            const int nx = Integer(argv[2], "NX"), ny = Integer(argv[3], "NY"), nz = Integer(argv[4], "NZ");
-            const int repetitions = argc > 5 ? Integer(argv[5], "REPETITIONS") : 5;
-            const int width = argc > 6 ? Integer(argv[6], "WIDTH") : 16;
-            const modal::Tet10Assembler fem{MakeStructuredBar(nx, ny, nz), material};
-            const auto assembly_start = Clock::now();
-            const auto [mass, stiffness] = fem.AssembleLower();
-            std::println("tet10 assembly={:.6f}s elements={}", Seconds(assembly_start), fem.Elements().size());
-            BenchmarkPencil("tet10", mass, stiffness, repetitions, width, [&] { return modal::Tet10Cholesky{fem}; });
-            return 0;
-        }
-        if (std::string_view{argv[1]} == "--obj") {
-            if (argc < 3) throw std::invalid_argument("--obj requires PATH");
-            const int repetitions = argc > 3 ? Integer(argv[3], "REPETITIONS") : 5;
-            const int width = argc > 4 ? Integer(argv[4], "WIDTH") : 16;
-            const auto surface = LoadObj(argv[2]);
-            if (!surface) throw std::runtime_error("failed to load OBJ");
-            const auto tets = GenerateTets(surface->Positions, surface->TriangleIndices);
-            if (!tets) throw std::runtime_error("tetrahedralization failed: " + tets.error());
-            const modal::Tet10Assembler fem{tets->Mesh, material};
-            const auto assembly_start = Clock::now();
-            const auto [mass, stiffness] = fem.AssembleLower();
-            std::println("obj assembly={:.6f}s elements={}", Seconds(assembly_start), fem.Elements().size());
-            BenchmarkPencil("obj", mass, stiffness, repetitions, width, [&] { return modal::Tet10Cholesky{fem}; });
-            return 0;
-        }
-        throw std::invalid_argument("unknown benchmark route");
-    } catch (const std::exception &error) {
-        std::println(stderr, "error: {}", error.what());
-        return 1;
+int main(int argc, char **argv) try {
+    if (argc < 2) {
+        std::println(stderr, "usage: {} --obj PATH [REPETITIONS] [WIDTH]", argv[0]);
+        return 2;
     }
+    constexpr AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19};
+    if (std::string_view{argv[1]} != "--obj") throw std::invalid_argument("unknown benchmark route");
+    if (argc < 3) throw std::invalid_argument("--obj requires PATH");
+    const int repetitions = argc > 3 ? Integer(argv[3], "REPETITIONS") : 5;
+    const int width = argc > 4 ? Integer(argv[4], "WIDTH") : 16;
+    const auto surface = LoadObj(argv[2]);
+    if (!surface) throw std::runtime_error("failed to load OBJ");
+    const auto tets = GenerateTets(surface->Positions, surface->TriangleIndices);
+    if (!tets) throw std::runtime_error("tetrahedralization failed: " + tets.error());
+    const modal::Tet10Assembler fem{tets->Mesh, material};
+    const auto assembly_start = Clock::now();
+    const auto [mass, stiffness] = fem.AssembleLower();
+    std::println("obj assembly={:.6f}s elements={}", Seconds(assembly_start), fem.Elements().size());
+    BenchmarkPencil("obj", mass, stiffness, repetitions, width, [&] { return modal::Tet10Cholesky{fem}; });
+    return 0;
+} catch (const std::exception &error) {
+    std::println(stderr, "error: {}", error.what());
+    return 1;
 }

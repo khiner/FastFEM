@@ -9,12 +9,10 @@
 namespace tetra {
 struct Options {
     // Inserts interior points until tetrahedra meet a circumradius-to-shortest-edge ratio of 2 where the fixed surface permits refinement.
-    // Quality controls refinement, while sliver repair and vertex optimization always run.
-    bool Quality{false};
-    // Split any tet whose volume exceeds this.
-    // Uses an absolute tetrahedron volume in input coordinate units.
-    // A positive value also enables Quality.
-    // Zero permits any tetrahedron volume.
+    // Quality and QualityAndResolution enable this refinement; sliver repair and vertex optimization always run.
+    fastfem::TetRefinement Refinement{fastfem::TetRefinement::None};
+    // QualityAndResolution also targets this volume in cubed input coordinate units where the fixed surface permits splitting.
+    // Required positive and finite for QualityAndResolution; ignored by other modes.
     double MaxVolume{0};
     // Provides one point strictly inside each enclosed void and removes tetrahedra connected to that point without crossing an input face.
     std::span<const dvec3> Holes{};

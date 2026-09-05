@@ -1,5 +1,5 @@
 #include "audio/FiniteCell.h"
-#include "FiniteCellBenchmarkGeometry.h"
+#include "ModalTestGeometry.h"
 #include "ModeShapeComparison.h"
 #include "RunSuites.h"
 #include "Tet10Eigenpairs.h"
@@ -27,8 +27,8 @@ using namespace boost::ut;
 namespace {
 constexpr AcousticMaterialProperties Material{.Density = 1000, .YoungModulus = 1e7, .PoissonRatio = 0, .Alpha = 0, .Beta = 0};
 
-finite_cell_benchmark::Surface GriddedBox(dvec3 extent, uvec3 cells) {
-    finite_cell_benchmark::Surface surface;
+modal_test::Surface GriddedBox(dvec3 extent, uvec3 cells) {
+    modal_test::Surface surface;
     std::map<std::array<uint32_t, 3>, uint32_t> nodes;
     const auto Node = [&](uvec3 coordinate) {
         const std::array key{coordinate.x, coordinate.y, coordinate.z};
@@ -113,23 +113,23 @@ std::pair<BarFrequencies, BarFrequencies> SampleBarFrequencies(
     const TetMesh &mesh, const modal::Tet10Assembler &tet, const Tet10Eigenpairs &tet_modes, dvec3 extent
 ) {
     constexpr uvec3 samples{9, 3, 3};
-    std::vector<finite_cell_benchmark::InterpolationStencil> finite_stencils, tet_stencils;
+    std::vector<modal_test::InterpolationStencil> finite_stencils, tet_stencils;
     finite_stencils.reserve(samples.x * samples.y * samples.z);
     tet_stencils.reserve(samples.x * samples.y * samples.z);
     for (uint32_t x = 0; x < samples.x; ++x)
         for (uint32_t y = 0; y < samples.y; ++y)
             for (uint32_t z = 0; z < samples.z; ++z) {
                 const dvec3 point = extent * (dvec3{double(x), double(y), double(z)} + 0.5) / dvec3{samples};
-                const auto finite_stencil = finite_cell_benchmark::FiniteCellStencil(finite, point);
-                const auto tet_stencil = finite_cell_benchmark::Tet10Stencil(mesh, tet, point);
+                const auto finite_stencil = modal_test::FiniteCellStencil(finite, point);
+                const auto tet_stencil = modal_test::Tet10Stencil(mesh, tet, point);
                 expect(bool(finite_stencil));
                 expect(bool(tet_stencil));
                 if (!finite_stencil || !tet_stencil) continue;
                 finite_stencils.push_back(*finite_stencil);
                 tet_stencils.push_back(*tet_stencil);
             }
-    const auto finite_sampled = finite_cell_benchmark::SampleModes(finite_stencils, finite_modes.Eigenvectors, 6);
-    const auto tet_sampled = finite_cell_benchmark::SampleModes(tet_stencils, tet_modes.Eigenvectors, 6);
+    const auto finite_sampled = modal_test::SampleModes(finite_stencils, finite_modes.Eigenvectors, 6);
+    const auto tet_sampled = modal_test::SampleModes(tet_stencils, tet_modes.Eigenvectors, 6);
     return {
         ClassifyBarFrequencies(finite_sampled, finite_modes.Eigenvalues, extent, samples),
         ClassifyBarFrequencies(tet_sampled, tet_modes.Eigenvalues, extent, samples),
@@ -178,8 +178,8 @@ suite FiniteCellTests = [] {
         const TetMesh mesh = MakeStructuredBar(3, 2, 2);
         const modal::Tet10Assembler tet{mesh, Material};
         const dvec3 point{0.137, 0.023, 0.011};
-        const auto finite_stencil = finite_cell_benchmark::FiniteCellStencil(finite, point);
-        const auto tet_stencil = finite_cell_benchmark::Tet10Stencil(mesh, tet, point);
+        const auto finite_stencil = modal_test::FiniteCellStencil(finite, point);
+        const auto tet_stencil = modal_test::Tet10Stencil(mesh, tet, point);
         expect(bool(finite_stencil));
         expect(bool(tet_stencil));
         const auto Interpolate = [&](const auto &stencil, const std::vector<dvec3> &nodes) {
@@ -233,13 +233,13 @@ suite FiniteCellTests = [] {
     };
 
     "finite-cell benchmark geometries build volume-preserving Tet meshes"_test = [] {
-        for (const std::string_view name : finite_cell_benchmark::GeometryNames) {
-            const auto geometry = finite_cell_benchmark::MakeGeometry(name);
+        for (const std::string_view name : modal_test::GeometryNames) {
+            const auto geometry = modal_test::MakeGeometry(name);
             const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
             expect(domain.SignedDistance(geometry.InteriorPoint) < 0) << name;
             expect(domain.SignedDistance(domain.Max + numeric::Max(domain.Max - domain.Min, dvec3{1})) > 0) << name;
 
-            const uvec3 resolution = finite_cell_benchmark::TetResolution(geometry, 3);
+            const uvec3 resolution = modal_test::TetResolution(geometry, 3);
             const auto tet_mesh = geometry.BuildTetMesh(resolution.x, resolution.y, resolution.z);
             expect(!tet_mesh.Points.empty()) << name;
             expect(!tet_mesh.Tets.empty()) << name;
@@ -276,7 +276,7 @@ suite FiniteCellTests = [] {
             const uvec3 cells = levels[level];
             const auto surface = GriddedBox(extent, cells);
             const auto domain = modal::MakeTriangleSurfaceDomain(surface.Points, surface.Triangles);
-            const TetMesh mesh = finite_cell_benchmark::TetrahedralizeSurface(surface, cells.x, cells.y, cells.z);
+            const TetMesh mesh = modal_test::TetrahedralizeSurface(surface, cells.x, cells.y, cells.z);
             const modal::Tet10Assembler tet{mesh, Material};
             const auto finite = modal::BuildFiniteCellOperator(
                 domain, Material,
@@ -330,12 +330,12 @@ suite FiniteCellTests = [] {
     "finite-cell production solve matches assembled FP64 across audio geometries"_test = [] {
         constexpr uint32_t Count{18};
         const double shift = std::pow(2 * std::numbers::pi * 20, 2);
-        for (const std::string_view name : finite_cell_benchmark::AudioGeometryNames) {
-            const auto geometry = finite_cell_benchmark::MakeGeometry(name);
+        for (const std::string_view name : modal_test::AudioGeometryNames) {
+            const auto geometry = modal_test::MakeGeometry(name);
             const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
             const auto operation = modal::BuildFiniteCellOperator(
                 domain, Material,
-                {.Cells = finite_cell_benchmark::GridResolution(geometry, 6), .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
+                {.Cells = modal_test::GridResolution(geometry, 6), .CutDepth = 2, .FictitiousScale = 1e-8, .PaddingCells = 0.25}
             );
             const auto assembled = modal::finite_cell::SolveAssembledEigenpairs(operation, Count, shift, 5e-9, 150);
             const auto production = modal::SolveFiniteCellEigenpairs(operation, Count, shift, 5e-9, 150);
@@ -346,7 +346,7 @@ suite FiniteCellTests = [] {
             const double spectrum_error = DifferenceNorm(production.Eigenvalues.Last(Count - 6), assembled.Eigenvalues.Last(Count - 6)) /
                 numeric::Norm(assembled.Eigenvalues.Last(Count - 6));
             const double residual = numeric::Maximum(production_certification.RelativeResiduals.Last(Count - 6));
-            const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
+            const auto shapes = modal_test::CompareSameDiscretizationModeShapes(
                 operation, assembled.Eigenvalues, assembled.Eigenvectors, production.Eigenvectors
             );
             std::println(
@@ -591,7 +591,7 @@ suite FiniteCellTests = [] {
 
     "triangle surface drives cut-cell integration without tetrahedra"_test = [] {
         const dvec3 extent{0.3, 0.08, 0.05};
-        const auto surface = finite_cell_benchmark::BoxSurface(extent, 0.29, -0.17);
+        const auto surface = modal_test::BoxSurface(extent, 0.29, -0.17);
         const auto domain = modal::MakeTriangleSurfaceDomain(surface.Points, surface.Triangles);
         expect(domain.SignedDistance(0.5 * extent) < 0);
         expect(domain.SignedDistance({1, 1, 1}) > 0);

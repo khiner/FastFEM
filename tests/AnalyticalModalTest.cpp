@@ -1,4 +1,4 @@
-#include "FiniteCellBenchmarkGeometry.h"
+#include "ModalTestGeometry.h"
 #include "ModeShapeComparison.h"
 #include "RunSuites.h"
 #include "Tet10Eigenpairs.h"
@@ -145,13 +145,13 @@ SphereReference HollowSphereReference(double radius_ratio) {
     };
 }
 
-finite_cell_benchmark::Surface SphereSurface(uint32_t subdivisions, double radius) {
-    auto surface = finite_cell_benchmark::Icosphere(subdivisions);
+modal_test::Surface SphereSurface(uint32_t subdivisions, double radius) {
+    auto surface = modal_test::Icosphere(subdivisions);
     for (auto &point : surface.Points) point *= radius;
     return surface;
 }
 
-finite_cell_benchmark::Surface HollowSphereSurface(uint32_t subdivisions, double inner_radius, double outer_radius) {
+modal_test::Surface HollowSphereSurface(uint32_t subdivisions, double inner_radius, double outer_radius) {
     auto surface = SphereSurface(subdivisions, outer_radius);
     auto inner = SphereSurface(subdivisions, inner_radius);
     const uint32_t offset = uint32_t(surface.Points.size());
@@ -160,10 +160,10 @@ finite_cell_benchmark::Surface HollowSphereSurface(uint32_t subdivisions, double
     return surface;
 }
 
-finite_cell_benchmark::Surface CylinderSurface(
+modal_test::Surface CylinderSurface(
     double radius, double length, uint32_t segments, uint32_t axial_cells, uint32_t radial_cells = 1
 ) {
-    finite_cell_benchmark::Surface surface;
+    modal_test::Surface surface;
     const auto Side = [=](uint32_t z, uint32_t segment) { return z * segments + segment % segments; };
     for (uint32_t z = 0; z <= axial_cells; ++z)
         for (uint32_t segment = 0; segment < segments; ++segment) {
@@ -401,15 +401,15 @@ SampledFinite SolveFiniteAndSample(
     expect(modes.Eigenvalues.size() == count);
     if (modes.Eigenvalues.size() != count) return {};
     const auto modes_certification = modal::finite_cell::CertifyEigenpairs(finite, modes.Eigenvalues, modes.Eigenvectors);
-    std::vector<finite_cell_benchmark::InterpolationStencil> stencils;
+    std::vector<modal_test::InterpolationStencil> stencils;
     for (const dvec3 point : samples) {
-        const auto stencil = finite_cell_benchmark::FiniteCellStencil(finite, point);
+        const auto stencil = modal_test::FiniteCellStencil(finite, point);
         expect(bool(stencil));
         if (stencil) stencils.push_back(*stencil);
     }
     return {
         .Values = modes.Eigenvalues,
-        .Modes = finite_cell_benchmark::SampleModes(stencils, modes.Eigenvectors, 6),
+        .Modes = modal_test::SampleModes(stencils, modes.Eigenvectors, 6),
         .Residual = numeric::Maximum(modes_certification.RelativeResiduals.Last(count - 6)),
         .Volume = finite.Profile.PhysicalVolume,
         .Dofs = finite.Dofs(),
@@ -427,12 +427,12 @@ struct SampledPair {
 };
 
 SampledPair SolveAndSample(
-    const finite_cell_benchmark::Surface &surface, uvec3 finite_cells, uvec3 tet_cells, uint32_t count,
+    const modal_test::Surface &surface, uvec3 finite_cells, uvec3 tet_cells, uint32_t count,
     const std::vector<dvec3> &samples, uint32_t cut_depth = 3, std::span<const dvec3> holes = {}
 ) {
     const auto domain = modal::MakeTriangleSurfaceDomain(surface.Points, surface.Triangles);
     SampledFinite finite = SolveFiniteAndSample(domain, finite_cells, count, samples, cut_depth);
-    const auto mesh = finite_cell_benchmark::TetrahedralizeSurface(
+    const auto mesh = modal_test::TetrahedralizeSurface(
         surface, tet_cells.x, tet_cells.y, tet_cells.z, holes
     );
     const modal::Tet10Assembler tet{mesh, Material};
@@ -440,16 +440,16 @@ SampledPair SolveAndSample(
     const auto tet_modes = SolveTet10Eigenpairs(mesh, Material, count, shift, 1e-8, 200);
     expect(tet_modes.Eigenvalues.size() == count);
     if (tet_modes.Eigenvalues.size() != count) return {};
-    std::vector<finite_cell_benchmark::InterpolationStencil> tet_stencils;
+    std::vector<modal_test::InterpolationStencil> tet_stencils;
     for (const dvec3 point : samples) {
-        const auto tet_stencil = finite_cell_benchmark::Tet10Stencil(mesh, tet, point);
+        const auto tet_stencil = modal_test::Tet10Stencil(mesh, tet, point);
         expect(bool(tet_stencil));
         if (tet_stencil) tet_stencils.push_back(*tet_stencil);
     }
     return {
         .Finite = std::move(finite),
         .TetValues = tet_modes.Eigenvalues,
-        .TetModes = finite_cell_benchmark::SampleModes(tet_stencils, tet_modes.Eigenvectors, 6),
+        .TetModes = modal_test::SampleModes(tet_stencils, tet_modes.Eigenvectors, 6),
         .TetResidual = tet_modes.RelativeResidual,
         .TetDofs = tet.Dofs(),
     };

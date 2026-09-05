@@ -1,4 +1,4 @@
-#include "FiniteCellBenchmarkGeometry.h"
+#include "ModalTestGeometry.h"
 #include "ModeShapeComparison.h"
 #include "RunSuites.h"
 #include "audio/FiniteCell.h"
@@ -38,12 +38,12 @@ double RelativeDifference(numeric::VectorView<const double> a, numeric::VectorVi
 suite RobustnessTests = [] {
     "wide tapered-key eigenpairs certify with the assembled fallback"_test = [] {
         constexpr uint32_t count{256};
-        const auto geometry = finite_cell_benchmark::MakeGeometry("tapered-key");
+        const auto geometry = modal_test::MakeGeometry("tapered-key");
         const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
         const auto operation = modal::BuildFiniteCellOperator(
             domain, {.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19},
             {
-                .Cells = finite_cell_benchmark::GridResolution(geometry, 8),
+                .Cells = modal_test::GridResolution(geometry, 8),
                 .CutDepth = 2,
                 .FictitiousScale = 1e-8,
                 .PaddingCells = 0.25,
@@ -80,7 +80,7 @@ suite RobustnessTests = [] {
         const double residual = numeric::Maximum(result_certification.RelativeResiduals.Last(count - 6));
         const double repeated_residual = numeric::Maximum(repeated_certification.RelativeResiduals.Last(count - 6));
         const double spectrum = RelativeDifference(repeated.Eigenvalues.Last(count - 6), result.Eigenvalues.Last(count - 6));
-        const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
+        const auto shapes = modal_test::CompareSameDiscretizationModeShapes(
             operation, result.Eigenvalues, result.Eigenvectors, repeated.Eigenvectors
         );
         std::println(
@@ -103,12 +103,12 @@ suite RobustnessTests = [] {
 
     "factor-free torus solve stays within the iteration cap"_test = [] {
         constexpr uint32_t count{128};
-        const auto geometry = finite_cell_benchmark::MakeGeometry("torus");
+        const auto geometry = modal_test::MakeGeometry("torus");
         const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
         const auto operation = modal::BuildFiniteCellOperator(
             domain, {.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19},
             {
-                .Cells = finite_cell_benchmark::GridResolution(geometry, 6),
+                .Cells = modal_test::GridResolution(geometry, 6),
                 .CutDepth = 2,
                 .FictitiousScale = 1e-8,
                 .PaddingCells = 0.25,
@@ -127,7 +127,7 @@ suite RobustnessTests = [] {
         const auto result_certification = modal::finite_cell::CertifyEigenpairs(operation, result.Eigenvalues, result.Eigenvectors);
         const auto repeated_certification = modal::finite_cell::CertifyEigenpairs(operation, repeated.Eigenvalues, repeated.Eigenvectors);
         const double spectrum = RelativeDifference(repeated.Eigenvalues.Last(count - 6), result.Eigenvalues.Last(count - 6));
-        const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
+        const auto shapes = modal_test::CompareSameDiscretizationModeShapes(
             operation, result.Eigenvalues, result.Eigenvectors, repeated.Eigenvectors
         );
         std::println(
@@ -147,12 +147,12 @@ suite RobustnessTests = [] {
     };
 
     "exact fallback refines marginal physical modes"_test = [] {
-        const auto geometry = finite_cell_benchmark::MakeGeometry("bar");
+        const auto geometry = modal_test::MakeGeometry("bar");
         const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
         const auto operation = modal::BuildFiniteCellOperator(
             domain, {.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = 0.19},
             {
-                .Cells = finite_cell_benchmark::GridResolution(geometry, 48),
+                .Cells = modal_test::GridResolution(geometry, 48),
                 .CutDepth = 2,
                 .FictitiousScale = 1e-8,
                 .PaddingCells = 0.25,
@@ -180,13 +180,13 @@ suite RobustnessTests = [] {
             Case{"ellipsoid", 10, 0.45, 1e-6, {0.20, -0.10, -0.20}},
         };
         for (const auto &entry : cases) {
-            const auto geometry = finite_cell_benchmark::MakeGeometry(entry.Geometry);
+            const auto geometry = modal_test::MakeGeometry(entry.Geometry);
             const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
             const AcousticMaterialProperties material{.Density = 2700, .YoungModulus = 7.2e10, .PoissonRatio = entry.PoissonRatio};
             const auto operation = modal::BuildFiniteCellOperator(
                 domain, material,
                 {
-                    .Cells = finite_cell_benchmark::GridResolution(geometry, entry.Resolution),
+                    .Cells = modal_test::GridResolution(geometry, entry.Resolution),
                     .CutDepth = 2,
                     .FictitiousScale = entry.FictitiousScale,
                     .PaddingCells = 0.25,
@@ -206,7 +206,7 @@ suite RobustnessTests = [] {
             expect(assembled_certification.MassOrthogonalityError < 1e-9) << entry.Geometry << assembled_certification.MassOrthogonalityError;
             const double spectrum = RelativeDifference(production.Eigenvalues.Last(ModeCount - 6), assembled.Eigenvalues.Last(ModeCount - 6));
             const double residual = numeric::Maximum(production_certification.RelativeResiduals.Last(ModeCount - 6));
-            const auto shapes = finite_cell_benchmark::CompareSameDiscretizationModeShapes(
+            const auto shapes = modal_test::CompareSameDiscretizationModeShapes(
                 operation, assembled.Eigenvalues, assembled.Eigenvectors, production.Eigenvectors
             );
             std::println(

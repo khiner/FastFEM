@@ -14,7 +14,7 @@
 #include <string_view>
 #include <vector>
 
-namespace finite_cell_benchmark {
+namespace modal_test {
 struct Surface {
     std::vector<dvec3> Points;
     std::vector<uint32_t> Triangles;
@@ -388,7 +388,7 @@ inline TetMesh TetrahedralizeSurface(
 ) {
     const auto [min, max] = Bounds(surface);
     const double max_volume = ((max.x - min.x) * (max.y - min.y) * (max.z - min.z)) / (6.0 * nx * ny * nz);
-    auto result = tetra::Tetrahedralize(surface.Points, surface.Triangles, {.MaxVolume = max_volume, .Holes = holes});
+    auto result = tetra::Tetrahedralize(surface.Points, surface.Triangles, {.Refinement = fastfem::TetRefinement::QualityAndResolution, .MaxVolume = max_volume, .Holes = holes});
     if (!result) throw std::runtime_error("Surface tetrahedralization failed: " + result.error());
     return std::move(result->Mesh);
 }
@@ -535,4 +535,4 @@ inline uvec3 GridResolution(const Geometry &geometry, uint32_t longitudinal) {
 inline uvec3 TetResolution(const Geometry &geometry, uint32_t longitudinal) {
     return Resolution(geometry.TetExtent, longitudinal);
 }
-} // namespace finite_cell_benchmark
+} // namespace modal_test

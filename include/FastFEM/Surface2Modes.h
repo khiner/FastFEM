@@ -102,14 +102,16 @@ struct SolverConfig {
     std::optional<float> FundamentalFreq{};
 };
 
+enum class TetRefinement { None,
+                           Quality,
+                           QualityAndResolution };
+
 struct TetrahedralizationConfig {
-    bool Quality{};
-    double MaxVolume{};
+    TetRefinement Refinement{TetRefinement::None};
     std::vector<DVec3> Holes;
 };
 
 struct FiniteCellConfig {
-    std::array<uint32_t, 3> Cells{12, 12, 12};
     uint32_t CutDepth{3};
     double FictitiousScale{1e-8};
     double PaddingCells{0.25};
@@ -120,6 +122,9 @@ struct SurfaceSolveConfig {
     SolverConfig Modal{};
     TetrahedralizationConfig Tetrahedralization{};
     FiniteCellConfig FiniteCell{};
+    // Divisions along the longest input axis. Sets finite-cell spacing and, for
+    // QualityAndResolution, Tet10 surface edge lengths and tetrahedron volume targets.
+    uint32_t Resolution{12};
     float SurfaceSimplificationRatio{1};
 };
 

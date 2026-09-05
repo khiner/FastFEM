@@ -12,7 +12,7 @@
 #include <optional>
 #include <vector>
 
-namespace finite_cell_benchmark {
+namespace modal_test {
 struct ModeShapeComparison {
     uint32_t Samples{}, Clusters{}, LargestCluster{};
     double PairedMacMinimum{}, BestMacMinimum{}, ClusterMacMinimum{};
@@ -124,4 +124,4 @@ inline ModeShapeComparison CompareSameDiscretizationModeShapes(
     }
     return result;
 }
-} // namespace finite_cell_benchmark
+} // namespace modal_test

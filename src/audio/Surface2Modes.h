@@ -16,6 +16,7 @@ struct SurfaceSolveConfig {
     SolverConfig Modal{};
     tetra::Options Tetrahedralization{};
     FiniteCellConfig FiniteCell{};
+    uint32_t Resolution{12};
     float SurfaceSimplificationRatio{1};
 };
 
