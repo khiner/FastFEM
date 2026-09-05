@@ -51,23 +51,24 @@ uint32_t Parse(std::string_view text, std::string_view description) {
     return result;
 }
 
-bool IsWatertight(std::span<const uint32_t> triangles) {
+// Multiple surface sheets may meet at an edge if their oriented boundaries cancel.
+bool IsClosed(std::span<const uint32_t> triangles) {
     if (triangles.empty() || triangles.size() % 3) return false;
-    std::map<std::pair<uint32_t, uint32_t>, uint32_t> edges;
+    std::map<std::pair<uint32_t, uint32_t>, int32_t> edges;
     for (size_t triangle = 0; triangle < triangles.size(); triangle += 3) {
         const uint32_t a = triangles[triangle], b = triangles[triangle + 1], c = triangles[triangle + 2];
         if (a == b || b == c || c == a) return false;
-        ++edges[std::minmax(a, b)];
-        ++edges[std::minmax(b, c)];
-        ++edges[std::minmax(c, a)];
+        edges[std::minmax(a, b)] += a < b ? 1 : -1;
+        edges[std::minmax(b, c)] += b < c ? 1 : -1;
+        edges[std::minmax(c, a)] += c < a ? 1 : -1;
     }
-    return std::ranges::all_of(edges, [](const auto &edge) { return edge.second == 2; });
+    return std::ranges::all_of(edges, [](const auto &edge) { return edge.second == 0; });
 }
 
 Geometry LoadGeometry(const fs::path &path) {
     const auto loaded = LoadObj(path);
-    if (!loaded || loaded->Positions.empty() || !IsWatertight(loaded->TriangleIndices))
-        throw std::invalid_argument("not a nonempty watertight triangle mesh");
+    if (!loaded || loaded->Positions.empty() || !IsClosed(loaded->TriangleIndices))
+        throw std::invalid_argument("not a nonempty closed oriented triangle mesh");
     modal_test::Surface surface;
     surface.Triangles = loaded->TriangleIndices;
     surface.Points.reserve(loaded->Positions.size());
@@ -190,6 +191,11 @@ int main(int argc, char **argv) try {
         std::println("finite-cell real-mesh corpus is absent: {} (run script/SetupTetCorpus)", root.string());
         return 77;
     }
+    for (const auto &dataset : datasets)
+        if (!fs::is_directory(root / dataset)) {
+            std::println("finite-cell corpus dataset is absent: {}", (root / dataset).string());
+            return 77;
+        }
     const auto objects = Objects(root, datasets, names);
     if (objects.empty()) throw std::invalid_argument("no matching OBJ files in " + root.string());
     std::println("finite-cell real-mesh validation: {} objects at longitudinal resolution {}", objects.size(), resolution);

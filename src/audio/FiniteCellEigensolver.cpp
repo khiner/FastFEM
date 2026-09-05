@@ -793,7 +793,8 @@ modal::FiniteCellEigenpairs modal::finite_cell::SolveAssembledEigenpairs(
         }
     );
     result.Iterations = eigensolver.Iterations;
-    if (eigensolver.Converged) {
+    // Complete candidates can still meet the requested tolerance after physical-action refinement.
+    if (eigensolver.Eigenvalues.size() == solve_count) {
         numeric::Matrix<double> space = eigensolver.Eigenvectors;
         result.Eigenvalues = numeric::Copy(eigensolver.Eigenvalues.First(count));
         result.Eigenvectors = numeric::Copy(space.FirstColumns(count));

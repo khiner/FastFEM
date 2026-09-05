@@ -139,6 +139,7 @@ The CTest suite includes:
 - plane-stress disk and Kirchhoff-Love thin-plate asymptotic checks
 - conditioned finite-cell cases varying registration, Poisson ratio, fictitious stiffness, concavity, and hollow geometry
 - a deterministic 60-object real watertight mesh gate
+- 50 RealImpact modal solves
 - 128-mode torus and 256-mode tapered-key fallback/determinism stresses
 - the 110-object tetrahedralizer snapshot corpus when installed.
 
@@ -158,6 +159,7 @@ Cross-discretization agreement is a secondary diagnostic.
 | `FastFEMAnalyticalModal` | Analytical spectra, eigenspaces, and convergence |
 | `FastFEMFiniteCellRobustness` | Conditioning, registration, and high-mode fallback |
 | `FastFEMFiniteCellRealMesh` | Finite-cell certification on a fixed surface corpus |
+| `FastFEMFiniteCellRealImpact` | Finite-cell certification on the RealImpact scans |
 | `FastFEMTetCorpus` | Tetrahedralization corpus snapshots |
 
 ## Performance benchmarks
@@ -192,10 +194,11 @@ Prefix the command with `/usr/bin/time -l` to report peak memory:
 ```sh
 ./script/SetupTetCorpus --skip-realimpact --thingi10k
 cmake -S . -B build -DFASTFEM_TET_CORPUS_DIR="$PWD/external/TetCorpus"
-ctest --test-dir build -R 'FastFEMTetCorpus|FastFEMFiniteCellRealMesh' --output-on-failure -j1
+ctest --test-dir build -R 'FastFEMTetCorpus|FastFEMFiniteCellRealMesh|FastFEMFiniteCellRealImpact' --output-on-failure -j1
 ```
 
-Set `FASTFEM_REALIMPACT_DATASET_DIR` to enable optional RealImpact cases.
+Pass `--realimpact-dir PATH` instead of `--skip-realimpact` to include the RealImpact corpus.
+Set `FASTFEM_REALIMPACT_DATASET_DIR` to enable the RealImpact surface-simplification tests.
 Tests report missing external corpora as skipped cases.
 
 ## Determinism

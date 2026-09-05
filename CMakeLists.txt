@@ -205,9 +205,14 @@ if(FASTFEM_BUILD_TESTS)
     target_link_libraries(FastFEMFiniteCellRealMeshTest PRIVATE FastFEM::FastFEM ${FASTFEM_TINYOBJLOADER_TARGET})
     add_test(
         NAME FastFEMFiniteCellRealMesh
-        COMMAND FastFEMFiniteCellRealMeshTest --expected-fallbacks 3 --expected-stagnations 3
+        COMMAND FastFEMFiniteCellRealMeshTest --dataset thingi10k --expected-fallbacks 3 --expected-stagnations 3
     )
     set_tests_properties(FastFEMFiniteCellRealMesh PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
+    add_test(
+        NAME FastFEMFiniteCellRealImpact
+        COMMAND FastFEMFiniteCellRealMeshTest --dataset realimpact
+    )
+    set_tests_properties(FastFEMFiniteCellRealImpact PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
 
     fastfem_add_internal_executable(FastFEMTetCorpusTest tests/TetCorpusTest.cpp)
     target_compile_definitions(FastFEMTetCorpusTest PRIVATE
