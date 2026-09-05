@@ -4,6 +4,7 @@
 #include "GeneralizedEigenSolver.h"
 #include "MassPropertiesAccumulator.h"
 #include "ModalResultBuilder.h"
+#include "SolveProgress.h"
 #include "Tet10Assembler.h"
 #include "Tet10Cholesky.h"
 #include "numeric/vec3.h"
@@ -235,10 +236,11 @@ modal::eigensolver::GeneralizedEigenResult SolveTet10Eigenpairs(
     const double shift_omega = 2 * std::numbers::pi * config.MinModeFreq;
     const double sigma = -shift_omega * shift_omega;
     auto *monitor = opts.Monitor;
-    if (monitor && monitor->Cancelled()) return {};
+    if (fastfem::SolveCancelled(monitor)) return {};
     const auto &reuse = opts.Reuse;
+    fastfem::SetSolveProgress(monitor, 0.25f, fastfem::SolveStage::Factorizing);
     OpType op{fem, opts.Material, profile.Factorize, profile.OpSolve, profile.SymbolicReuse, reuse.Cache};
-    if (monitor) monitor->Progress.store(0.3f, std::memory_order_relaxed);
+    fastfem::SetSolveProgress(monitor, 0.3f, fastfem::SolveStage::SolvingEigenproblem);
     const bool use_subspace = reuse.SeedBasis != nullptr && reuse.SeedBasis->rows() == n &&
         reuse.SeedBasis->cols() >= fem_n_modes;
     const auto eig_start = std::chrono::steady_clock::now();
@@ -283,19 +285,22 @@ modal::ModalResult modal::SolveTet10Modes(const TetMesh &input_tets, const Acous
     SolveProfile profile;
     auto &cache = reuse.Cache ? *reuse.Cache : DefaultSolveCache();
     const double length_to_si = (double(baked_scale.x) + baked_scale.y + baked_scale.z) / 3.0;
+    fastfem::SetSolveProgress(monitor, 0.05f, fastfem::SolveStage::ComputingMassProperties);
     auto mass_props = Timed(profile.MassProps, [&] { return ComputeTetMassProperties(tets, material.Density, baked_scale, length_to_si); });
 
-    if (monitor) monitor->Progress.store(0.1f, std::memory_order_relaxed);
+    fastfem::SetSolveProgress(monitor, 0.1f, fastfem::SolveStage::BuildingTopology);
     const auto topology = Timed(profile.QuadMesh, [&] { return AcquireTopology(cache, tets, profile.TopologyReuse); });
     const Tet10Assembler fem{topology, material};
+    fastfem::SetSolveProgress(monitor, 0.18f, fastfem::SolveStage::AssemblingOperators);
     const auto assembly = Timed(profile.Assemble, [&] { return AcquireAssembly(cache, fem, material, profile.AssemblyReuse); });
     const auto &M = assembly->Mass, &K = assembly->Stiffness;
     profile.Dofs = fem.Dofs();
     profile.StiffnessNonZeros = uint32_t(K.NonZeros());
-    if (monitor && monitor->Cancelled()) return {};
+    if (fastfem::SolveCancelled(monitor)) return {};
 
     // Sample each excitation position at its nearest tetrahedral point and convert the result to node-local coordinates.
     // Excitation positions mapped to one tetrahedral point share one shape vector and sample point.
+    fastfem::SetSolveProgress(monitor, 0.22f, fastfem::SolveStage::SamplingModes);
     auto [excite_points, positions, sample_point_of] = Timed(profile.SampleExcite, [&] {
         const dvec3 inv_scale{1.0 / baked_scale.x, 1.0 / baked_scale.y, 1.0 / baked_scale.z};
         std::vector<uint> points;
@@ -334,6 +339,7 @@ modal::ModalResult modal::SolveTet10Modes(const TetMesh &input_tets, const Acous
     );
     if (!eigenpairs.Converged) return {.MassProps = std::move(mass_props), .Profile = profile};
 
+    fastfem::SetSolveProgress(monitor, 0.95f, fastfem::SolveStage::SamplingModes);
     std::vector<std::vector<vec3>> shapes(excite_points.size(), std::vector<vec3>(eigenpairs.Eigenvalues.size()));
     for (size_t point = 0; point < excite_points.size(); ++point)
         for (size_t mode = 0; mode < eigenpairs.Eigenvalues.size(); ++mode)
@@ -341,6 +347,8 @@ modal::ModalResult modal::SolveTet10Modes(const TetMesh &input_tets, const Acous
                 shapes[point][size_t(mode)][component] = eigenpairs.Eigenvectors(3 * excite_points[point] + component, mode);
     numeric::Matrix<float> basis;
     if (reuse.KeepBasis) basis = numeric::Cast<float>(eigenpairs.Eigenvectors.View());
-    if (monitor) monitor->Progress.store(1, std::memory_order_relaxed);
-    return BuildModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config, std::move(positions), baked_scale, std::move(mass_props), profile, std::move(basis), std::move(sample_point_of));
+    fastfem::SetSolveProgress(monitor, 0.99f, fastfem::SolveStage::Finalizing);
+    auto result = BuildModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config, std::move(positions), baked_scale, std::move(mass_props), profile, std::move(basis), std::move(sample_point_of));
+    fastfem::SetSolveProgress(monitor, 1, fastfem::SolveStage::Complete);
+    return result;
 }

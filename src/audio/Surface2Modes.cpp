@@ -3,6 +3,7 @@
 #include "FiniteCellEigensolver.h"
 #include "MassPropertiesAccumulator.h"
 #include "ModalResultBuilder.h"
+#include "SolveProgress.h"
 
 #include <algorithm>
 #include <chrono>
@@ -44,15 +45,15 @@ std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const v
 
     modal::SolveProfile profile;
     const auto domain = modal::MakeTriangleSurfaceDomain(positions, triangle_indices);
-    if (monitor) monitor->Progress.store(0.1f, std::memory_order_relaxed);
+    fastfem::SetSolveProgress(monitor, 0.1f, fastfem::SolveStage::BuildingFiniteCellGrid);
     auto operation = Timed(profile.Assemble, [&] { return modal::BuildFiniteCellOperator(domain, material, config.FiniteCell); });
     profile.Dofs = operation.Dofs();
-    if (monitor && monitor->Cancelled()) return modal::ModalResult{};
+    if (fastfem::SolveCancelled(monitor)) return modal::ModalResult{};
     if (operation.Dofs() < 2) return std::unexpected("The finite-cell grid has insufficient degrees of freedom.");
 
     const uint32_t count = std::min(config.Modal.NumFemModes, operation.Dofs() - 1);
     const double alpha = std::pow(2 * std::numbers::pi * config.Modal.MinModeFreq, 2);
-    if (monitor) monitor->Progress.store(0.3f, std::memory_order_relaxed);
+    fastfem::SetSolveProgress(monitor, 0.3f, fastfem::SolveStage::SolvingEigenproblem);
     auto eigenpairs = Timed(profile.Iterate, [&] { return modal::SolveFiniteCellEigenpairs(operation, count, alpha, config.Modal.Tolerance, config.Modal.MaxRestarts); });
     profile.Factorize = eigenpairs.Profile.PreconditionerSetup;
     profile.Iterate -= profile.Factorize;
@@ -60,8 +61,8 @@ std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const v
     profile.Restarts = eigenpairs.Iterations;
     if (eigenpairs.Eigenvalues.size() != count || eigenpairs.Eigenvectors.cols() != count) return std::unexpected("The finite-cell eigensolver did not return the requested modes.");
     if (eigenpairs.RelativeResiduals.size() == count && count > 6) profile.PhysicalResidual = numeric::Maximum(eigenpairs.RelativeResiduals.Last(count - 6));
-    if (monitor) monitor->Progress.store(0.95f, std::memory_order_relaxed);
-    if (monitor && monitor->Cancelled()) return modal::ModalResult{};
+    fastfem::SetSolveProgress(monitor, 0.95f, fastfem::SolveStage::SamplingModes);
+    if (fastfem::SolveCancelled(monitor)) return modal::ModalResult{};
 
     const dvec3 inverse_scale{1.0 / baked_scale.x, 1.0 / baked_scale.y, 1.0 / baked_scale.z};
     std::vector<std::vector<vec3>> shapes;
@@ -82,15 +83,19 @@ std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const v
     profile.SampleExcite = std::chrono::duration<double>(Clock::now() - sample_start).count();
 
     const double length_to_si = (double(baked_scale.x) + baked_scale.y + baked_scale.z) / 3;
+    fastfem::SetSolveProgress(monitor, 0.98f, fastfem::SolveStage::ComputingMassProperties);
     auto mass_properties = Timed(profile.MassProps, [&] { return ComputeFiniteCellMassProperties(operation, material.Density, baked_scale, length_to_si); });
     std::vector<uint32_t> sample_point_of(excitation_positions.size());
     for (uint32_t point = 0; point < sample_point_of.size(); ++point) sample_point_of[point] = point;
-    if (monitor) monitor->Progress.store(1, std::memory_order_relaxed);
-    return modal::BuildModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config.Modal, std::move(sample_positions), baked_scale, std::move(mass_properties), profile, {}, std::move(sample_point_of));
+    fastfem::SetSolveProgress(monitor, 0.99f, fastfem::SolveStage::Finalizing);
+    auto result = modal::BuildModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config.Modal, std::move(sample_positions), baked_scale, std::move(mass_properties), profile, {}, std::move(sample_point_of));
+    fastfem::SetSolveProgress(monitor, 1, fastfem::SolveStage::Complete);
+    return result;
 }
 } // namespace
 
 std::expected<modal::ModalResult, std::string> modal::Surface2Modes(std::span<const vec3> positions, std::span<const uint32_t> triangle_indices, const AcousticMaterialProperties &material, std::span<const vec3> excitation_positions, vec3 baked_scale, Discretization discretization, SurfaceSolveConfig config, SolveReuse reuse, SolveMonitor *monitor) {
+    fastfem::SetSolveProgress(monitor, 0, fastfem::SolveStage::PreparingSurface);
     if (positions.empty() || triangle_indices.empty() || triangle_indices.size() % 3) return std::unexpected("A surface solve requires indexed triangles.");
     if (baked_scale.x <= 0 || baked_scale.y <= 0 || baked_scale.z <= 0) return std::unexpected("Baked scale components must be positive.");
     try {
@@ -99,6 +104,7 @@ std::expected<modal::ModalResult, std::string> modal::Surface2Modes(std::span<co
                 std::vector<vec3> surface_positions{positions.begin(), positions.end()};
                 std::vector<uint32_t> surface_indices{triangle_indices.begin(), triangle_indices.end()};
                 SimplifySurface(surface_positions, surface_indices, config.SurfaceSimplificationRatio);
+                fastfem::SetSolveProgress(monitor, 0.03f, fastfem::SolveStage::GeneratingTetrahedra);
                 auto tetrahedra = GenerateTets(std::move(surface_positions), std::move(surface_indices), config.Tetrahedralization);
                 if (!tetrahedra) return std::unexpected(std::move(tetrahedra.error()));
                 auto result = SolveTet10Modes(tetrahedra->Mesh, material, {excitation_positions.begin(), excitation_positions.end()}, baked_scale, config.Modal, reuse, monitor);

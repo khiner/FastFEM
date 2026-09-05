@@ -38,7 +38,8 @@ int main() {
             },
         };
         for (const auto discretization : {modal::Discretization::Tet10, modal::Discretization::FiniteCell}) {
-            const auto result = modal::Surface2Modes(positions, box.Triangles, material, positions, vec3{1}, discretization, config, {.KeepBasis = true});
+            fastfem::SolveMonitor monitor;
+            const auto result = modal::Surface2Modes(positions, box.Triangles, material, positions, vec3{1}, discretization, config, {.KeepBasis = true}, &monitor);
             expect(bool(result)) << (result ? "" : result.error());
             if (!result) continue;
             expect(!result->Modes.Freqs.empty());
@@ -54,6 +55,8 @@ int main() {
             } else expect(result->Basis.empty());
             expect(result->Modes.BakedScale == vec3{1});
             expect((discretization == modal::Discretization::Tet10) == !result->Tetrahedra.Tets.empty());
+            expect(monitor.Progress.load(std::memory_order_relaxed) == 1.f);
+            expect(monitor.Stage.load(std::memory_order_relaxed) == fastfem::SolveStage::Complete);
             const double expected_mass = material.Density * finite_cell_benchmark::BarExtent.x * finite_cell_benchmark::BarExtent.y * finite_cell_benchmark::BarExtent.z;
             expect(std::abs(result->MassProps.Mass / expected_mass - 1) < 0.01) << result->MassProps.Mass;
         }
@@ -79,5 +82,6 @@ int main() {
         expect(!result->Tetrahedra.Tets.empty());
         expect(result->SamplePointOfExcitation.size() == positions.size());
         expect(monitor.Progress.load(std::memory_order_relaxed) == 1.f);
+        expect(monitor.Stage.load(std::memory_order_relaxed) == fastfem::SolveStage::Complete);
     };
 }
