@@ -5,11 +5,12 @@ The project began with FEM code from [MeshEditor commit `b1dbf2c`](https://githu
 
 ## Build
 
-FastFEM requires macOS, C++23, and CMake 3.28 or newer.
+FastFEM requires macOS, Homebrew LLVM, and CMake 3.28 or newer.
 Tests and the surface benchmark runner require Python 3.10 or newer.
 
 ```sh
 git submodule update --init --recursive
+brew install llvm ninja
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure -j1
@@ -203,12 +204,12 @@ Tests report missing external corpora as skipped cases.
 
 ## Determinism
 
-FastFEM constrains Accelerate sparse work to one thread before the first factorization.
+FastFEM sets Accelerate's thread limit to one at startup.
 Single-threaded sparse execution produces repeatable spectra, eigenspaces, certification, and solver selection for identical inputs on one machine.
 
 ```sh
 cmake -S . -B build -DFASTFEM_PARALLEL_SPARSE=ON
 ```
 
-The C++ API fixes the factorization policy before Accelerate initializes.
+Hosts that initialize Accelerate before FastFEM loads must set `VECLIB_MAXIMUM_THREADS=1` before launch.
 Enable parallel sparse execution only when throughput takes priority over bitwise repeatability across processes.

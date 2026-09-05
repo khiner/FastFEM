@@ -654,9 +654,9 @@ using Sparse = numeric::SparseMatrix;
 using GridPoint = std::array<double, 3>;
 
 struct CpuMultigridLevel {
-    Sparse Operator, Prolongation, Restriction;
+    Sparse Operator, Prolongation{}, Restriction{};
     std::vector<GridPoint> Nodes;
-    numeric::Matrix<float> Inverse;
+    numeric::Matrix<float> Inverse{};
     double Maximum{};
 };
 

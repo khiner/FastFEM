@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <format>
 #include <future>
 #include <limits>
 #include <memory>
@@ -45,7 +46,7 @@ void RemoveLeadingEntries(numeric::Vector<double> &vector, uint32_t count) {
 
 struct Actions {
     const modal::FiniteCellOperator &Fem;
-    std::optional<modal::FiniteCellOperator::PackedCutOperators> PackedCut;
+    std::optional<modal::FiniteCellOperator::PackedCutOperators> PackedCut{};
     double Seconds{};
 
     void ApplyMass(const double *input, double *output, uint32_t width) {
@@ -530,7 +531,7 @@ modal::FiniteCellEigenpairs SolveFactorFreeMetal(
     const auto wait_previous_actions = [&] {
         if (!previous_actions.valid()) return;
         const auto wait_start = Clock::now();
-        previous_actions.get();
+        (void)previous_actions.get();
         actions.Seconds += SecondsSince(wait_start);
     };
     std::vector<double> stagnation_history;
@@ -733,7 +734,12 @@ modal::FiniteCellEigenpairs modal::SolveFiniteCellEigenpairs(
                          0;
     factor_free = {};
     auto assembled = finite_cell::SolveAssembledEigenpairs(fem, count, alpha, tolerance, max_iterations);
-    if (!converged(assembled)) throw std::runtime_error("Finite-cell default and fallback solvers did not converge within the iteration budget.");
+    if (!converged(assembled)) {
+        const double residual = assembled.RelativeResiduals.size() == count && physical_count ?
+            numeric::Maximum(assembled.RelativeResiduals.Subvector(first_physical, physical_count)) :
+            std::numeric_limits<double>::infinity();
+        throw std::runtime_error(std::format("Finite-cell solvers did not converge: fallback returned {} of {} modes, physical residual {:.3e} (tolerance {:.3e}).", assembled.Eigenvalues.size(), count, residual, tolerance));
+    }
     assembled.Profile.FailedFactorFreeSeconds = attempt_seconds;
     assembled.Profile.FailedFactorFreeIterations = attempt_iterations;
     assembled.Profile.FailedFactorFreeStagnated = attempt_stagnated;
@@ -795,65 +801,52 @@ modal::FiniteCellEigenpairs modal::finite_cell::SolveAssembledEigenpairs(
     result.Iterations = eigensolver.Iterations;
     // Complete candidates can still meet the requested tolerance after physical-action refinement.
     if (eigensolver.Eigenvalues.size() == solve_count) {
-        numeric::Matrix<double> space = eigensolver.Eigenvectors;
-        result.Eigenvalues = numeric::Copy(eigensolver.Eigenvalues.First(count));
-        result.Eigenvectors = numeric::Copy(space.FirstColumns(count));
-        result.RelativeResiduals = numeric::Copy(eigensolver.RelativeResiduals.First(count));
+        numeric::Matrix<double> vectors = eigensolver.Eigenvectors;
+        numeric::Vector<double> values = eigensolver.Eigenvalues;
+        numeric::Matrix<double> mass_vectors(fem.Dofs(), solve_count), stiffness_vectors(fem.Dofs(), solve_count);
         const uint32_t first_physical = std::min(6u, count), physical_count = count - first_physical;
-        const bool safely_converged = eigensolver.MassOrthogonalityError < 0.5e-9 &&
-            (!physical_count || numeric::Maximum(result.RelativeResiduals.Subvector(first_physical, physical_count)) < 0.5 * tolerance);
-        if (!safely_converged) {
-            numeric::Matrix<double> mass_space, vectors, mass_vectors, shifted_vectors;
-            numeric::Vector<double> shifted_values;
-            Actions actions{fem};
-            if (Ritz(
-                    actions, alpha, space, mass_space, solve_count, vectors, mass_vectors,
-                    shifted_vectors, shifted_values, result.Profile.RayleighRitz
-                )) {
-                numeric::Matrix<double> stiffness_vectors = numeric::Copy(shifted_vectors.View());
-                numeric::AddScaled(-alpha, mass_vectors.View(), stiffness_vectors.View());
-                const numeric::Matrix<double> residual = numeric::ColumnScaledDifference(shifted_vectors.View(), mass_vectors.View(), shifted_values.View());
-                std::vector<uint32_t> active;
-                for (uint32_t mode = first_physical; mode < count; ++mode) {
-                    const double scale = numeric::Norm(stiffness_vectors.Column(mode)) +
-                        std::abs(shifted_values[mode] - alpha) * numeric::Norm(mass_vectors.Column(mode));
-                    const double residual_norm = numeric::Norm(residual.Column(mode));
-                    const double relative = scale == 0 ? residual_norm : residual_norm / scale;
-                    if (relative >= 0.5 * tolerance) active.push_back(mode);
-                }
-                numeric::Matrix<double> refined_vectors;
-                numeric::Vector<double> refined_values;
-                bool refined = active.empty();
-                if (refined) {
-                    refined_vectors = numeric::Copy(vectors.FirstColumns(count));
-                    refined_values = numeric::Copy(shifted_values.First(count));
-                    for (double &value : refined_values.Values) value -= alpha;
-                } else {
-                    numeric::Matrix<double> active_residual(fem.Dofs(), active.size());
-                    for (uint32_t column = 0; column < active.size(); ++column)
-                        numeric::Copy(residual.Column(active[column]), active_residual.Column(column));
-                    numeric::Matrix<double> correction(fem.Dofs(), active.size());
-                    inverse.solve_panel(active_residual.data(), correction.data(), int(active.size()));
-                    space.Resize(fem.Dofs(), solve_count + active.size());
-                    numeric::Copy(vectors.View(), space.FirstColumns(solve_count));
-                    numeric::Copy(correction.View(), space.LastColumns(active.size()));
-                    refined = Ritz(
-                        actions, alpha, space, mass_space, count, refined_vectors, mass_vectors,
-                        shifted_vectors, shifted_values, result.Profile.RayleighRitz
-                    );
-                    if (refined) {
-                        refined_values = shifted_values;
-                        for (double &value : refined_values.Values) value -= alpha;
-                    }
-                }
-                if (refined) {
-                    result.Eigenvalues = std::move(refined_values);
-                    result.Eigenvectors = std::move(refined_vectors);
-                    SetResiduals(result, mass_vectors, shifted_vectors, alpha);
-                }
-                result.Profile.Actions += actions.Seconds;
+        double best_residual = std::numeric_limits<double>::infinity();
+        Actions actions{fem};
+        constexpr uint32_t MaxPhysicalRefinements{8};
+        for (uint32_t refinement = 0; refinement <= MaxPhysicalRefinements; ++refinement) {
+            // Reapply the physical operator to avoid cancellation in rotated Ritz actions.
+            actions.ApplyMassShifted(vectors.data(), mass_vectors.data(), stiffness_vectors.data(), solve_count, 0);
+            FiniteCellEigenpairs candidate;
+            candidate.Eigenvalues = numeric::Copy(values.First(count));
+            candidate.Eigenvectors = numeric::Copy(vectors.FirstColumns(count));
+            SetResiduals(candidate, mass_vectors, stiffness_vectors, 0);
+            const double residual_maximum = physical_count ?
+                numeric::Maximum(candidate.RelativeResiduals.Subvector(first_physical, physical_count)) :
+                0;
+            auto gram = numeric::TransposeMultiply(vectors.FirstColumns(count), mass_vectors.FirstColumns(count));
+            for (uint32_t mode = 0; mode < count; ++mode) gram(mode, mode) -= 1;
+            const double orthogonality = numeric::Norm(gram.View());
+            if (residual_maximum < best_residual && orthogonality < 1e-9) {
+                result.Eigenvalues = std::move(candidate.Eigenvalues);
+                result.Eigenvectors = std::move(candidate.Eigenvectors);
+                result.RelativeResiduals = candidate.RelativeResiduals;
+                best_residual = residual_maximum;
             }
+            if (best_residual < 0.5 * tolerance || refinement == MaxPhysicalRefinements) break;
+            const auto residual = numeric::ColumnScaledDifference(stiffness_vectors.View(), mass_vectors.View(), values.View());
+            std::vector<uint32_t> active;
+            for (uint32_t mode = first_physical; mode < count; ++mode)
+                if (candidate.RelativeResiduals[mode] >= 0.5 * tolerance) active.push_back(mode);
+            numeric::Matrix<double> active_residual(fem.Dofs(), active.size());
+            for (uint32_t column = 0; column < active.size(); ++column)
+                numeric::Copy(residual.Column(active[column]), active_residual.Column(column));
+            numeric::Matrix<double> correction(fem.Dofs(), active.size());
+            if (!active.empty()) inverse.solve_panel(active_residual.data(), correction.data(), int(active.size()));
+            numeric::Matrix<double> space(fem.Dofs(), solve_count + active.size()), mass_space;
+            numeric::Copy(vectors.View(), space.FirstColumns(solve_count));
+            numeric::Copy(correction.View(), space.LastColumns(active.size()));
+            if (!Ritz(
+                    actions, alpha, space, mass_space, solve_count, vectors, mass_vectors,
+                    stiffness_vectors, values, result.Profile.RayleighRitz
+                )) break;
+            for (double &value : values.Values) value -= alpha;
         }
+        result.Profile.Actions += actions.Seconds;
     }
     result.Profile.PreconditionerSetup = factor_seconds;
     result.Profile.Preconditioner = solve_seconds;

@@ -82,8 +82,11 @@ SparseSymbolicFactorOptions SymbolicOptions(bool use_metis) {
     return {
         .control = SparseDefaultControl,
         .orderMethod = use_metis ? SparseOrderMetis : SparseOrderDefault,
+        .order = nullptr,
+        .ignoreRowsAndColumns = nullptr,
         .malloc = std::malloc,
         .free = std::free,
+        .reportError = nullptr,
     };
 }
 
@@ -91,6 +94,7 @@ SparseNumericFactorOptions NumericOptions() {
     return {
         .control = SparseDefaultControl,
         .scalingMethod = SparseScalingDefault,
+        .scaling = nullptr,
         .pivotTolerance = 0.01,
         .zeroTolerance = 1e-4 * DBL_EPSILON,
     };

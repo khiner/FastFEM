@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
+include(cmake/Compiler.cmake)
 project(FastFEM VERSION 0.1.0 LANGUAGES CXX OBJCXX)
 
 if(NOT APPLE)
@@ -51,6 +52,7 @@ add_library(FastFEM
     src/audio/ModalResultBuilder.cpp
     src/audio/AccelerateSparseCholesky.cpp
     src/audio/Surface2Modes.cpp
+    src/audio/SparseExecution.cpp
     src/audio/Tet10Assembler.cpp
     src/audio/Tet10Modes.cpp
     src/mesh/Tetrahedralize.cpp
@@ -226,4 +228,10 @@ if(FASTFEM_BUILD_TESTS)
     )
     add_test(NAME FastFEMTetCorpus COMMAND FastFEMTetCorpusTest)
     set_tests_properties(FastFEMTetCorpus PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+    if(NOT FASTFEM_PARALLEL_SPARSE)
+        get_property(tests DIRECTORY PROPERTY TESTS)
+        set_tests_properties(${tests} PROPERTIES ENVIRONMENT "VECLIB_MAXIMUM_THREADS=1")
+        # Exercise FastFEM's startup policy without a preset thread limit.
+        set_tests_properties(FastFEMFiniteCellRobustness PROPERTIES ENVIRONMENT_MODIFICATION "VECLIB_MAXIMUM_THREADS=unset:")
+    endif()
 endif()

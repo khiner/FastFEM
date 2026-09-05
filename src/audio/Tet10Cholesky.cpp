@@ -24,8 +24,8 @@ struct BlockPencil {
     int Nodes{};
     std::vector<long> ColumnStarts;
     std::vector<int> Rows;
-    std::vector<Block> Stiffness;
-    std::vector<double> Mass;
+    std::vector<Block> Stiffness{};
+    std::vector<double> Mass{};
     std::vector<std::array<uint32_t, modal::Tet10Assembler::LowerBlocksPerElement>> ElementEntries;
 };
 

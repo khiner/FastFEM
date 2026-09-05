@@ -337,7 +337,12 @@ modal::ModalResult modal::SolveTet10Modes(const TetMesh &input_tets, const Acous
         },
         profile
     );
-    if (!eigenpairs.Converged) return {.MassProps = std::move(mass_props), .Profile = profile};
+    if (!eigenpairs.Converged) {
+        ModalResult result{};
+        result.MassProps = std::move(mass_props);
+        result.Profile = profile;
+        return result;
+    }
 
     fastfem::SetSolveProgress(monitor, 0.95f, fastfem::SolveStage::SamplingModes);
     std::vector<std::vector<vec3>> shapes(excite_points.size(), std::vector<vec3>(eigenpairs.Eigenvalues.size()));

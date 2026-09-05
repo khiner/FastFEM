@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <numbers>
 #include <print>
 #include <string_view>
@@ -37,6 +38,8 @@ double RelativeDifference(numeric::VectorView<const double> a, numeric::VectorVi
 
 suite RobustnessTests = [] {
     "wide tapered-key eigenpairs certify with the assembled fallback"_test = [] {
+        const char *thread_limit = std::getenv("VECLIB_MAXIMUM_THREADS");
+        expect(thread_limit && std::string_view{thread_limit} == "1") << "Accelerate must be configured before numerical work";
         constexpr uint32_t count{256};
         const auto geometry = modal_test::MakeGeometry("tapered-key");
         const auto domain = modal::MakeTriangleSurfaceDomain(geometry.Boundary.Points, geometry.Boundary.Triangles);
@@ -62,7 +65,7 @@ suite RobustnessTests = [] {
         modal::finite_cell::AccelerateShiftInvert repeated_inverse{p1.Stiffness, p1.Mass, repeated_factor_seconds, repeated_solve_seconds};
         repeated_inverse.set_shift(-Shift);
         repeated_inverse.solve_panel(rhs.data(), repeated_solve.data(), int(rhs.cols()));
-        expect(first_solve.Values == repeated_solve.Values);
+        expect(std::ranges::equal(first_solve.Values, repeated_solve.Values));
         const auto result = modal::SolveFiniteCellEigenpairs(operation, count, Shift, 1e-8, 100);
         const auto repeated = modal::SolveFiniteCellEigenpairs(operation, count, Shift, 1e-8, 100);
         expect(result.Eigenvalues.size() == count);
@@ -95,8 +98,8 @@ suite RobustnessTests = [] {
         expect(result_certification.MassOrthogonalityError < 1e-9);
         expect(repeated_certification.MassOrthogonalityError < 1e-9);
         expect(spectrum == 0.0);
-        expect(result.Eigenvectors.Values == repeated.Eigenvectors.Values);
-        expect(result_certification.RelativeResiduals.Values == repeated_certification.RelativeResiduals.Values);
+        expect(std::ranges::equal(result.Eigenvectors.Values, repeated.Eigenvectors.Values));
+        expect(std::ranges::equal(result_certification.RelativeResiduals.Values, repeated_certification.RelativeResiduals.Values));
         expect(result_certification.MassOrthogonalityError == repeated_certification.MassOrthogonalityError);
         expect(shapes.ClusterMacMinimum > 0.99999);
     };
@@ -140,8 +143,8 @@ suite RobustnessTests = [] {
         expect(result_certification.MassOrthogonalityError < 1e-9);
         expect(repeated_certification.MassOrthogonalityError < 1e-9);
         expect(spectrum == 0.0);
-        expect(result.Eigenvectors.Values == repeated.Eigenvectors.Values);
-        expect(result_certification.RelativeResiduals.Values == repeated_certification.RelativeResiduals.Values);
+        expect(std::ranges::equal(result.Eigenvectors.Values, repeated.Eigenvectors.Values));
+        expect(std::ranges::equal(result_certification.RelativeResiduals.Values, repeated_certification.RelativeResiduals.Values));
         expect(result_certification.MassOrthogonalityError == repeated_certification.MassOrthogonalityError);
         expect(shapes.ClusterMacMinimum > 0.99999);
     };
