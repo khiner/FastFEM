@@ -1,6 +1,7 @@
 [submodule "lib/meshoptimizer"]
 	path = lib/meshoptimizer
 	url = git@github.com:khiner/meshoptimizer.git
+	branch = mesh-editor-cluster-kernels
 [submodule "lib/tinyobjloader"]
 	path = lib/tinyobjloader
 	url = git@github.com:tinyobjloader/tinyobjloader.git
