@@ -1,3 +1,9 @@
+#include "numeric/Vector.h"
+#include "numeric/VectorOps.h"
+
+#include "numeric/dvec3.h"
+#include "numeric/uvec3.h"
+
 #include "ModalTestGeometry.h"
 #include "ModeShapeComparison.h"
 #include "RunSuites.h"
@@ -17,6 +23,8 @@
 #include <numbers>
 #include <print>
 #include <vector>
+
+using numeric::Matrix, numeric::MatrixView, numeric::uvec3;
 
 using namespace boost::ut;
 
@@ -251,7 +259,7 @@ std::vector<dvec3> SphereSamples(double inner_radius, double outer_radius) {
              std::lerp(inner_radius, outer_radius, 0.5),
              std::lerp(inner_radius, outer_radius, 0.8),
          })
-        for (const dvec3 direction : directions) result.push_back(radius * numeric::Normalize(direction));
+        for (const dvec3 direction : directions) result.push_back(radius * Normalize(direction));
     return result;
 }
 
@@ -270,10 +278,10 @@ std::vector<dvec3> CylinderSamples(double radius, double length) {
     return result;
 }
 
-numeric::Matrix<double> CylinderTorsionalSubspace(
+Matrix<double> CylinderTorsionalSubspace(
     const std::vector<dvec3> &samples, double length
 ) {
-    numeric::Matrix<double> result(3 * samples.size(), 1);
+    Matrix<double> result(3 * samples.size(), 1);
     for (uint32_t sample = 0; sample < samples.size(); ++sample) {
         const dvec3 point = samples[sample];
         const dvec3 displacement = std::sin(std::numbers::pi * point.z / length) * dvec3{-point.y, point.x, 0};
@@ -299,8 +307,8 @@ double PlateFlexuralWaveNumber() {
                      0.1, 12);
 }
 
-numeric::Matrix<double> DiskRadialSubspace(const std::vector<dvec3> &samples, double radius, double wave_number) {
-    numeric::Matrix<double> result(3 * samples.size(), 1);
+Matrix<double> DiskRadialSubspace(const std::vector<dvec3> &samples, double radius, double wave_number) {
+    Matrix<double> result(3 * samples.size(), 1);
     for (uint32_t sample = 0; sample < samples.size(); ++sample) {
         const dvec3 point = samples[sample];
         const double radial_position = std::hypot(point.x, point.y);
@@ -311,10 +319,10 @@ numeric::Matrix<double> DiskRadialSubspace(const std::vector<dvec3> &samples, do
     return result;
 }
 
-numeric::Matrix<double> PlateFlexuralSubspace(
+Matrix<double> PlateFlexuralSubspace(
     const std::vector<dvec3> &samples, double radius, double wave_number
 ) {
-    numeric::Matrix<double> result(3 * samples.size(), 1);
+    Matrix<double> result(3 * samples.size(), 1);
     const double coefficient = -CylindricalJ1(wave_number) / ModifiedI1(wave_number);
     for (uint32_t sample = 0; sample < samples.size(); ++sample) {
         const dvec3 point = samples[sample];
@@ -332,10 +340,10 @@ numeric::Matrix<double> PlateFlexuralSubspace(
     return result;
 }
 
-numeric::Matrix<double> SphereRadialSubspace(
+Matrix<double> SphereRadialSubspace(
     const std::vector<dvec3> &samples, double inner_radius, double outer_radius, double wave_number
 ) {
-    numeric::Matrix<double> result(3 * samples.size(), 1);
+    Matrix<double> result(3 * samples.size(), 1);
     double j_coefficient{1}, y_coefficient{};
     if (inner_radius > 0) {
         j_coefficient = RadialTractionY(wave_number * inner_radius / outer_radius);
@@ -343,7 +351,7 @@ numeric::Matrix<double> SphereRadialSubspace(
     }
     for (uint32_t sample = 0; sample < samples.size(); ++sample) {
         const dvec3 point = samples[sample];
-        const double radius = numeric::Length(point), x = wave_number * radius / outer_radius;
+        const double radius = Length(point), x = wave_number * radius / outer_radius;
         const double radial = j_coefficient * SphericalJ(1, x) + y_coefficient * SphericalY(1, x);
         const dvec3 displacement = radial * point / radius;
         for (uint32_t component = 0; component < 3; ++component) result(3 * sample + component, 0) = displacement[component];
@@ -351,10 +359,10 @@ numeric::Matrix<double> SphereRadialSubspace(
     return result;
 }
 
-numeric::Matrix<double> SphereTorsionalSubspace(
+Matrix<double> SphereTorsionalSubspace(
     const std::vector<dvec3> &samples, double inner_radius, double outer_radius, double wave_number
 ) {
-    numeric::Matrix<double> result(3 * samples.size(), 5);
+    Matrix<double> result(3 * samples.size(), 5);
     double j_coefficient{1}, y_coefficient{};
     if (inner_radius > 0) {
         j_coefficient = TorsionalTractionY(2, wave_number * inner_radius / outer_radius);
@@ -362,7 +370,7 @@ numeric::Matrix<double> SphereTorsionalSubspace(
     }
     for (uint32_t sample = 0; sample < samples.size(); ++sample) {
         const dvec3 point = samples[sample];
-        const double radius = numeric::Length(point), x = wave_number * radius / outer_radius;
+        const double radius = Length(point), x = wave_number * radius / outer_radius;
         const double radial = j_coefficient * SphericalJ(2, x) + y_coefficient * SphericalY(2, x);
         const std::array gradients{
             dvec3{point.y, point.x, 0},
@@ -372,7 +380,7 @@ numeric::Matrix<double> SphereTorsionalSubspace(
             dvec3{-2 * point.x, -2 * point.y, 4 * point.z},
         };
         for (uint32_t basis = 0; basis < gradients.size(); ++basis) {
-            const dvec3 displacement = radial * numeric::Cross(point, gradients[basis]) / (radius * radius);
+            const dvec3 displacement = radial * Cross(point, gradients[basis]) / (radius * radius);
             for (uint32_t component = 0; component < 3; ++component)
                 result(3 * sample + component, basis) = displacement[component];
         }
@@ -381,8 +389,8 @@ numeric::Matrix<double> SphereTorsionalSubspace(
 }
 
 struct SampledFinite {
-    numeric::Vector<double> Values;
-    numeric::Matrix<double> Modes;
+    Vector<double> Values;
+    Matrix<double> Modes;
     double Residual{}, Volume{};
     uint32_t Dofs{}, Iterations{};
     uint64_t QuadraturePoints{};
@@ -410,7 +418,7 @@ SampledFinite SolveFiniteAndSample(
     return {
         .Values = modes.Eigenvalues,
         .Modes = modal_test::SampleModes(stencils, modes.Eigenvectors, 6),
-        .Residual = numeric::Maximum(modes_certification.RelativeResiduals.Last(count - 6)),
+        .Residual = Maximum(modes_certification.RelativeResiduals.Last(count - 6)),
         .Volume = finite.Profile.PhysicalVolume,
         .Dofs = finite.Dofs(),
         .Iterations = modes.Iterations,
@@ -420,8 +428,8 @@ SampledFinite SolveFiniteAndSample(
 
 struct SampledPair {
     SampledFinite Finite;
-    numeric::Vector<double> TetValues;
-    numeric::Matrix<double> TetModes;
+    Vector<double> TetValues;
+    Matrix<double> TetModes;
     double TetResidual{};
     uint32_t TetDofs{};
 };
@@ -460,37 +468,37 @@ struct ModeMatch {
 };
 
 ModeMatch MatchModes(
-    const numeric::Vector<double> &eigenvalues, const numeric::Matrix<double> &sampled,
-    const numeric::Matrix<double> &analytical,
+    const Vector<double> &eigenvalues, const Matrix<double> &sampled,
+    const Matrix<double> &analytical,
     double exact_frequency
 ) {
     auto analytical_q = analytical;
-    expect(numeric::ThinQr(analytical_q));
+    expect(ThinQr(analytical_q));
     std::vector<std::pair<double, size_t>> scores;
     for (size_t mode = 0; mode < sampled.cols(); ++mode) {
-        auto normalized = numeric::Copy(sampled.Column(mode));
-        numeric::Scale(1 / numeric::Norm(normalized.View()), normalized.View());
+        auto normalized = Copy(sampled.Column(mode));
+        Scale(1 / Norm(normalized.View()), normalized.View());
         const double frequency = std::sqrt(std::max(0.0, eigenvalues[mode + 6])) / (2 * std::numbers::pi);
         const double relative_frequency = (frequency - exact_frequency) / exact_frequency;
         const double frequency_weight = std::exp(-0.5 * std::pow(relative_frequency / 0.1, 2));
-        const auto projection = numeric::TransposeMultiply(analytical_q.View(), numeric::MatrixView<const double>{normalized.data(), normalized.size(), 1, normalized.size()});
-        scores.emplace_back(frequency_weight * std::pow(numeric::Norm(projection.View()), 2), mode);
+        const auto projection = TransposeMultiply(analytical_q.View(), MatrixView<const double>{normalized.data(), normalized.size(), 1, normalized.size()});
+        scores.emplace_back(frequency_weight * std::pow(Norm(projection.View()), 2), mode);
     }
     std::ranges::sort(scores, std::greater{}, &std::pair<double, size_t>::first);
-    numeric::Matrix<double> selected(sampled.rows(), analytical.cols());
+    Matrix<double> selected(sampled.rows(), analytical.cols());
     ModeMatch result;
     for (size_t column = 0; column < analytical.cols(); ++column) {
-        numeric::Copy(sampled.Column(scores[column].second), selected.Column(column));
-        numeric::Scale(1 / numeric::Norm(selected.Column(column)), selected.Column(column));
+        Copy(sampled.Column(scores[column].second), selected.Column(column));
+        Scale(1 / Norm(selected.Column(column)), selected.Column(column));
         const double frequency = std::sqrt(std::max(0.0, eigenvalues[scores[column].second + 6])) /
             (2 * std::numbers::pi);
         result.Frequency += frequency / analytical.cols();
         result.MaximumFrequencyError = std::max(result.MaximumFrequencyError, std::abs(frequency / exact_frequency - 1));
     }
-    expect(numeric::ThinQr(selected));
-    const auto overlap = numeric::TransposeMultiply(analytical_q.View(), selected.View());
-    numeric::Vector<double> singular_values;
-    expect(numeric::SingularValues(overlap.View(), singular_values));
+    expect(ThinQr(selected));
+    const auto overlap = TransposeMultiply(analytical_q.View(), selected.View());
+    Vector<double> singular_values;
+    expect(SingularValues(overlap.View(), singular_values));
     result.MinimumSubspaceMac = std::pow(*std::ranges::min_element(singular_values), 2);
     return result;
 }

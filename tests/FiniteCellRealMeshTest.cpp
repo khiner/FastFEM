@@ -1,3 +1,6 @@
+#include "numeric/VectorOps.h"
+#include "numeric/dvec3.h"
+
 #include "LoadObj.h"
 #include "ModalTestGeometry.h"
 #include "ModeShapeComparison.h"
@@ -75,8 +78,8 @@ Geometry LoadGeometry(const fs::path &path) {
     dvec3 minimum{std::numeric_limits<double>::max()}, maximum{std::numeric_limits<double>::lowest()};
     for (const vec3 &point : loaded->Positions) {
         const dvec3 value{point};
-        minimum = numeric::Min(minimum, value);
-        maximum = numeric::Max(maximum, value);
+        minimum = Min(minimum, value);
+        maximum = Max(maximum, value);
     }
     const dvec3 original_extent = maximum - minimum;
     const double longest = std::max({original_extent.x, original_extent.y, original_extent.z});
@@ -135,12 +138,12 @@ RunResult Run(const fs::path &path, uint32_t resolution, uint32_t max_iterations
         throw std::runtime_error("assembled or production solve did not converge");
     const auto assembled_certification = modal::finite_cell::CertifyEigenpairs(operation, assembled.Eigenvalues, assembled.Eigenvectors);
     const auto production_certification = modal::finite_cell::CertifyEigenpairs(operation, production.Eigenvalues, production.Eigenvectors);
-    auto spectrum_difference = numeric::Copy(production.Eigenvalues.Subvector(6, AcceptedModeCount - 6));
-    numeric::AddScaled(-1, assembled.Eigenvalues.Subvector(6, AcceptedModeCount - 6), spectrum_difference.View());
-    const double spectrum = numeric::Norm(spectrum_difference.View()) /
-        numeric::Norm(assembled.Eigenvalues.Subvector(6, AcceptedModeCount - 6));
-    const double residual = numeric::Maximum(production_certification.RelativeResiduals.Subvector(6, AcceptedModeCount - 6));
-    const double assembled_residual = numeric::Maximum(assembled_certification.RelativeResiduals.Subvector(6, AcceptedModeCount - 6));
+    auto spectrum_difference = Copy(production.Eigenvalues.Subvector(6, AcceptedModeCount - 6));
+    AddScaled(-1, assembled.Eigenvalues.Subvector(6, AcceptedModeCount - 6), spectrum_difference.View());
+    const double spectrum = Norm(spectrum_difference.View()) /
+        Norm(assembled.Eigenvalues.Subvector(6, AcceptedModeCount - 6));
+    const double residual = Maximum(production_certification.RelativeResiduals.Subvector(6, AcceptedModeCount - 6));
+    const double assembled_residual = Maximum(assembled_certification.RelativeResiduals.Subvector(6, AcceptedModeCount - 6));
     const auto shapes = modal_test::CompareSameDiscretizationModeShapes(
         operation, assembled.Eigenvalues, assembled.Eigenvectors, production.Eigenvectors, 6, AcceptedModeCount
     );

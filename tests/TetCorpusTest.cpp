@@ -1,3 +1,5 @@
+#include "numeric/dvec3.h"
+
 #include "LoadObj.h"
 #include "ValidateTetMesh.h"
 #include "mesh/Tets.h"

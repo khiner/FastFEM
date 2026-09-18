@@ -1,11 +1,15 @@
 #pragma once
 
+#include "numeric/dvec3.h"
+
 #include "MassProperties.h"
 
 #include <array>
 #include <span>
 
 namespace modal {
+using numeric::dvec3;
+
 struct MassPropertiesAccumulator {
     double Volume{};
     dvec3 Origin{}, FirstMoment{};

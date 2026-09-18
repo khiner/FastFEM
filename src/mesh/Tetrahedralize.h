@@ -1,5 +1,7 @@
 #pragma once
 
+#include "numeric/dvec3.h"
+
 #include "mesh/TetMesh.h"
 
 #include <expected>
@@ -7,6 +9,8 @@
 #include <string>
 
 namespace tetra {
+using numeric::dvec3;
+
 struct Options {
     // Inserts interior points until tetrahedra meet a circumradius-to-shortest-edge ratio of 2 where the fixed surface permits refinement.
     // Quality and QualityAndResolution enable this refinement; sliver repair and vertex optimization always run.

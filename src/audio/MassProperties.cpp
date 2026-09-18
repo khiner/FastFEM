@@ -1,3 +1,6 @@
+#include "numeric/VectorOps.h"
+#include "numeric/dvec3.h"
+
 #include "MassPropertiesAccumulator.h"
 #include "numeric/Accelerate.h"
 
@@ -5,8 +8,10 @@
 #include <array>
 #include <cmath>
 
+using numeric::SelfAdjointEigenSolve, numeric::dvec3, numeric::quat, numeric::vec3;
+
 namespace {
-fastfem::Quat QuaternionFromRotation(const std::array<float, 9> &rotation) {
+quat QuaternionFromRotation(const std::array<float, 9> &rotation) {
     const auto m = [&](int column, int row) { return rotation[row + 3 * column]; };
     const std::array candidates{
         m(0, 0) + m(1, 1) + m(2, 2),
@@ -26,7 +31,7 @@ fastfem::Quat QuaternionFromRotation(const std::array<float, 9> &rotation) {
     }
     const float norm = std::sqrt(result[0] * result[0] + result[1] * result[1] + result[2] * result[2] + result[3] * result[3]);
     for (float &component : result) component /= norm;
-    return fastfem::Quat{result[3], result[0], result[1], result[2]};
+    return quat{result[3], result[0], result[1], result[2]};
 }
 } // namespace
 
@@ -61,14 +66,14 @@ MassProperties modal::MassPropertiesAccumulator::Finish(double density, double l
         Inertia[2],
     };
     const std::array c{local_center.x, local_center.y, local_center.z};
-    const double squared_norm = numeric::Dot(local_center, local_center);
+    const double squared_norm = Dot(local_center, local_center);
     for (size_t column = 0; column < 3; ++column)
         for (size_t row = 0; row < 3; ++row)
             inertia[row + 3 * column] -= Volume * ((row == column ? squared_norm : 0) - c[row] * c[column]);
     for (double &value : inertia) value *= density * std::pow(length_to_si, 5);
 
     std::array<double, 3> values{};
-    if (!numeric::SelfAdjointEigenSolve(inertia.data(), values.data(), 3)) return {};
+    if (!SelfAdjointEigenSolve(inertia.data(), values.data(), 3)) return {};
     std::array<float, 9> axes;
     std::ranges::transform(inertia, axes.begin(), [](double value) { return float(value); });
     const float determinant =
@@ -79,8 +84,8 @@ MassProperties modal::MassPropertiesAccumulator::Finish(double density, double l
         for (size_t row = 0; row < 3; ++row) axes[row] = -axes[row];
     return {
         density * Volume * std::pow(length_to_si, 3),
-        fastfem::Vec3{center},
-        fastfem::Vec3{float(values[0]), float(values[1]), float(values[2])},
+        vec3{center},
+        vec3{float(values[0]), float(values[1]), float(values[2])},
         QuaternionFromRotation(axes),
     };
 }

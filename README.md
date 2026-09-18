@@ -25,6 +25,10 @@ xcodebuild -downloadComponent MetalToolchain
 
 ## Usage
 
+Numeric types and operations live in `src/numeric/`, with independent headers such as `<numeric/vec3.h>` and `<numeric/mat4.h>`.
+Small types use lowercase names in the `numeric` namespace, including `numeric::vec3`, `numeric::dvec3`, and `numeric::quat`.
+Storage headers define scalar C++ types without math or SIMD dependencies. `VectorOps.h` provides FastFEM's vector operations; `dvec3` and the owning containers are host-only.
+
 `fastfem::Surface2Modes` converts a watertight surface mesh into a modal model:
 
 ```cpp

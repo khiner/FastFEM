@@ -12,6 +12,8 @@
 #include <vector>
 
 // Triangle surface mesh with exact-duplicate vertices welded (scan exports repeat vertices per face).
+using numeric::vec3;
+
 struct SurfaceMesh {
     std::vector<vec3> Positions;
     std::vector<uint32_t> TriangleIndices;

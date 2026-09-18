@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <vector>
 
+using numeric::SparseMatrix;
+
 namespace {
 constexpr int BlockCrossover{8192};
 
@@ -19,7 +21,7 @@ struct BlockSparseLower {
     std::vector<double> Data;
 };
 
-void GatherBlockRows(const numeric::SparseMatrix &matrix, int block_column, std::vector<int> &rows) {
+void GatherBlockRows(const SparseMatrix &matrix, int block_column, std::vector<int> &rows) {
     rows.clear();
     for (int column = 0; column < 3; ++column)
         for (long entry = matrix.ColumnStarts[3 * block_column + column]; entry < matrix.ColumnStarts[3 * block_column + column + 1]; ++entry)
@@ -28,7 +30,7 @@ void GatherBlockRows(const numeric::SparseMatrix &matrix, int block_column, std:
     rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
 }
 
-BlockSparseLower ToBlock3(const numeric::SparseMatrix &matrix) {
+BlockSparseLower ToBlock3(const SparseMatrix &matrix) {
     if (matrix.rows() != matrix.cols() || matrix.rows() % 3 != 0) throw std::invalid_argument("Block3 sparse matrix dimensions must be square and divisible by three.");
     const int block_count = int(matrix.rows() / 3);
     BlockSparseLower result;
@@ -61,7 +63,7 @@ struct SparseMatrixView {
     BlockSparseLower Block;
     SparseMatrix_Double Matrix{};
 
-    SparseMatrixView(const numeric::SparseMatrix &matrix, bool blocked) {
+    SparseMatrixView(const SparseMatrix &matrix, bool blocked) {
         if (matrix.rows() != matrix.cols()) throw std::invalid_argument("Sparse Cholesky requires a square compressed matrix.");
         if (blocked) Block = ToBlock3(matrix);
         Matrix = {
@@ -100,7 +102,7 @@ SparseNumericFactorOptions NumericOptions() {
     };
 }
 
-bool UseBlock3(const numeric::SparseMatrix &matrix) {
+bool UseBlock3(const SparseMatrix &matrix) {
     return matrix.rows() >= BlockCrossover && matrix.rows() % 3 == 0;
 }
 } // namespace
@@ -111,7 +113,7 @@ struct modal::AccelerateSparseCholesky::Factorization {
     ~Factorization() { SparseCleanup(Opaque); }
 };
 
-modal::AccelerateSparseCholesky::AccelerateSparseCholesky(const numeric::SparseMatrix &matrix) {
+modal::AccelerateSparseCholesky::AccelerateSparseCholesky(const SparseMatrix &matrix) {
     ConfigureAccelerateSparseExecution();
     const bool large = matrix.rows() >= BlockCrossover;
     const bool blocked = UseBlock3(matrix);

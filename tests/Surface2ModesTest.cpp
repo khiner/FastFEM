@@ -1,11 +1,14 @@
 #include "FastFEM/Surface2Modes.h"
 #include "FastFEM/SolveMonitor.h"
 #include "ModalTestGeometry.h"
+#include "numeric/VectorOps.h"
 
 #include <boost/ut.hpp>
 
 #include <cmath>
 #include <vector>
+
+using numeric::vec3;
 
 using namespace boost::ut;
 
@@ -58,7 +61,7 @@ int main() {
 
     "tetrahedral refinement modes control size explicitly"_test = [] {
         const auto box = modal_test::AxisBarSurface();
-        std::vector<fastfem::Vec3> positions(box.Points.begin(), box.Points.end());
+        std::vector<vec3> positions(box.Points.begin(), box.Points.end());
         fastfem::SurfaceSolveConfig config{
             .Modal = {.MinModeFreq = 1, .MaxModeFreq = 100'000, .NumModes = 4, .NumFemModes = 12, .MaxRestarts = 150},
             .Tetrahedralization = {.Refinement = fastfem::TetRefinement::QualityAndResolution},
@@ -78,7 +81,7 @@ int main() {
             double volume{};
             for (const auto &tet : refined->Tetrahedra.Tets) {
                 const auto &points = refined->Tetrahedra.Points;
-                const double tet_volume = std::abs(numeric::Dot(points[tet[1]] - points[tet[0]], numeric::Cross(points[tet[2]] - points[tet[0]], points[tet[3]] - points[tet[0]]))) / 6;
+                const double tet_volume = std::abs(Dot(points[tet[1]] - points[tet[0]], Cross(points[tet[2]] - points[tet[0]], points[tet[3]] - points[tet[0]]))) / 6;
                 volume += tet_volume;
             }
             expect(std::abs(volume / modal_test::Volume(box) - 1) < 1e-6);

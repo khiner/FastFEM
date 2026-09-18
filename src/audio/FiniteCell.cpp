@@ -1,3 +1,9 @@
+#include "numeric/Vector.h"
+#include "numeric/VectorOps.h"
+
+#include "numeric/dvec3.h"
+#include "numeric/uvec3.h"
+
 #include "FiniteCell.h"
 
 #include "finite_cell/OctreeQuadrature.h"
@@ -18,6 +24,8 @@
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+
+using numeric::Matrix, numeric::SparseMatrix, numeric::Triplet, numeric::Vector, numeric::VectorView, numeric::dvec3, numeric::uvec3;
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -48,12 +56,12 @@ double Component(const dvec3 &v, uint32_t axis) {
 }
 
 std::pair<double, double> BoxDistanceBounds(const dvec3 &center, const dvec3 &half, const dvec3 &point) {
-    const dvec3 distance = numeric::Abs(center - point);
-    return {numeric::Length(numeric::Max(distance - half, dvec3{0})), numeric::Length(distance + half)};
+    const dvec3 distance = Abs(center - point);
+    return {Length(Max(distance - half, dvec3{0})), Length(distance + half)};
 }
 
 std::pair<double, double> BoxRadialDistanceBounds(const dvec3 &center, const dvec3 &half, const dvec3 &axis) {
-    const dvec3 distance = numeric::Abs(center - axis);
+    const dvec3 distance = Abs(center - axis);
     return {
         std::hypot(std::max(distance.x - half.x, 0.0), std::max(distance.y - half.y, 0.0)),
         std::hypot(distance.x + half.x, distance.y + half.y),
@@ -66,62 +74,62 @@ dvec3 CellCenter(const modal::FiniteCellOperator &operation, const modal::Finite
 
 double PointTriangleDistanceSquared(const dvec3 &p, const dvec3 &a, const dvec3 &b, const dvec3 &c) {
     const dvec3 ab = b - a, ac = c - a, ap = p - a;
-    const double d1 = numeric::Dot(ab, ap), d2 = numeric::Dot(ac, ap);
-    if (d1 <= 0 && d2 <= 0) return numeric::Length2(ap);
+    const double d1 = Dot(ab, ap), d2 = Dot(ac, ap);
+    if (d1 <= 0 && d2 <= 0) return Length2(ap);
 
     const dvec3 bp = p - b;
-    const double d3 = numeric::Dot(ab, bp), d4 = numeric::Dot(ac, bp);
-    if (d3 >= 0 && d4 <= d3) return numeric::Length2(bp);
+    const double d3 = Dot(ab, bp), d4 = Dot(ac, bp);
+    if (d3 >= 0 && d4 <= d3) return Length2(bp);
     const double vc = d1 * d4 - d3 * d2;
     if (vc <= 0 && d1 >= 0 && d3 <= 0) {
         const dvec3 nearest = a + (d1 / (d1 - d3)) * ab;
-        return numeric::Length2(p - nearest);
+        return Length2(p - nearest);
     }
 
     const dvec3 cp = p - c;
-    const double d5 = numeric::Dot(ab, cp), d6 = numeric::Dot(ac, cp);
-    if (d6 >= 0 && d5 <= d6) return numeric::Length2(cp);
+    const double d5 = Dot(ab, cp), d6 = Dot(ac, cp);
+    if (d6 >= 0 && d5 <= d6) return Length2(cp);
     const double vb = d5 * d2 - d1 * d6;
     if (vb <= 0 && d2 >= 0 && d6 <= 0) {
         const dvec3 nearest = a + (d2 / (d2 - d6)) * ac;
-        return numeric::Length2(p - nearest);
+        return Length2(p - nearest);
     }
     const double va = d3 * d6 - d5 * d4;
     if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
         const dvec3 nearest = b + ((d4 - d3) / ((d4 - d3) + (d5 - d6))) * (c - b);
-        return numeric::Length2(p - nearest);
+        return Length2(p - nearest);
     }
-    const dvec3 normal = numeric::Cross(ab, ac);
-    const double projection = numeric::Dot(ap, normal);
-    return projection * projection / numeric::Length2(normal);
+    const dvec3 normal = Cross(ab, ac);
+    const double projection = Dot(ap, normal);
+    return projection * projection / Length2(normal);
 }
 
 bool RayHitsTriangle(const dvec3 &origin, const dvec3 &direction, const std::array<dvec3, 3> &triangle) {
     const dvec3 edge1 = triangle[1] - triangle[0], edge2 = triangle[2] - triangle[0];
-    const dvec3 p = numeric::Cross(direction, edge2);
-    const double det = numeric::Dot(edge1, p);
-    const double scale = std::max({numeric::Length(edge1), numeric::Length(edge2), 1.0});
+    const dvec3 p = Cross(direction, edge2);
+    const double det = Dot(edge1, p);
+    const double scale = std::max({Length(edge1), Length(edge2), 1.0});
     if (std::abs(det) <= 1e-14 * scale * scale) return false;
     const double inverse = 1 / det;
     const dvec3 t = origin - triangle[0];
-    const double u = numeric::Dot(t, p) * inverse;
+    const double u = Dot(t, p) * inverse;
     if (u < 0 || u > 1) return false;
-    const dvec3 q = numeric::Cross(t, edge1);
-    const double v = numeric::Dot(direction, q) * inverse;
-    return v >= 0 && u + v <= 1 && numeric::Dot(edge2, q) * inverse > 1e-13 * scale;
+    const dvec3 q = Cross(t, edge1);
+    const double v = Dot(direction, q) * inverse;
+    return v >= 0 && u + v <= 1 && Dot(edge2, q) * inverse > 1e-13 * scale;
 }
 
 bool TriangleIntersectsBox(const std::array<dvec3, 3> &triangle, const dvec3 &center, const dvec3 &half) {
     const std::array vertices{triangle[0] - center, triangle[1] - center, triangle[2] - center};
     const std::array edges{vertices[1] - vertices[0], vertices[2] - vertices[1], vertices[0] - vertices[2]};
     const auto Separates = [&](const dvec3 &axis) {
-        if (numeric::Length2(axis) <= 1e-30) return false;
+        if (Length2(axis) <= 1e-30) return false;
         const std::array projection{
-            numeric::Dot(vertices[0], axis),
-            numeric::Dot(vertices[1], axis),
-            numeric::Dot(vertices[2], axis),
+            Dot(vertices[0], axis),
+            Dot(vertices[1], axis),
+            Dot(vertices[2], axis),
         };
-        const double radius = numeric::Dot(half, numeric::Abs(axis));
+        const double radius = Dot(half, Abs(axis));
         return std::ranges::min(projection) > radius || std::ranges::max(projection) < -radius;
     };
     for (uint32_t axis = 0; axis < 3; ++axis) {
@@ -132,19 +140,19 @@ bool TriangleIntersectsBox(const std::array<dvec3, 3> &triangle, const dvec3 &ce
         }
         if (min > Component(half, axis) || max < -Component(half, axis)) return false;
     }
-    if (Separates(numeric::Cross(edges[0], edges[1]))) return false;
+    if (Separates(Cross(edges[0], edges[1]))) return false;
     constexpr std::array<dvec3, 3> axes{dvec3{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
     for (const auto &edge : edges)
         for (const auto &axis : axes)
-            if (Separates(numeric::Cross(edge, axis))) return false;
+            if (Separates(Cross(edge, axis))) return false;
     return true;
 }
 
 // Three non-axis-aligned ray directions provide independent parity classifications for a closed surface.
 const std::array<dvec3, 3> InsideTestDirections{
-    numeric::Normalize(dvec3{1, 0.3713906763541037, 0.6947465906068658}),
-    numeric::Normalize(dvec3{0.217347184, 1, 0.513938221}),
-    numeric::Normalize(dvec3{0.623741391, 0.281731491, 1}),
+    Normalize(dvec3{1, 0.3713906763541037, 0.6947465906068658}),
+    Normalize(dvec3{0.217347184, 1, 0.513938221}),
+    Normalize(dvec3{0.623741391, 0.281731491, 1}),
 };
 
 struct TriangleSurface {
@@ -158,8 +166,8 @@ struct TriangleSurface {
     std::vector<Node> Nodes;
     static std::pair<dvec3, dvec3> TriangleBounds(const std::array<dvec3, 3> &triangle) {
         return {
-            numeric::Min(triangle[0], numeric::Min(triangle[1], triangle[2])),
-            numeric::Max(triangle[0], numeric::Max(triangle[1], triangle[2])),
+            Min(triangle[0], Min(triangle[1], triangle[2])),
+            Max(triangle[0], Max(triangle[1], triangle[2])),
         };
     }
 
@@ -170,10 +178,10 @@ struct TriangleSurface {
         dvec3 centroid_min{std::numeric_limits<double>::infinity()}, centroid_max{-std::numeric_limits<double>::infinity()};
         for (uint32_t entry = begin; entry < begin + count; ++entry) {
             const auto [min, max] = TriangleBounds(Triangles[Indices[entry]]);
-            node.Min = numeric::Min(node.Min, min);
-            node.Max = numeric::Max(node.Max, max);
-            centroid_min = numeric::Min(centroid_min, 0.5 * (min + max));
-            centroid_max = numeric::Max(centroid_max, 0.5 * (min + max));
+            node.Min = Min(node.Min, min);
+            node.Max = Max(node.Max, max);
+            centroid_min = Min(centroid_min, 0.5 * (min + max));
+            centroid_max = Max(centroid_max, 0.5 * (min + max));
         }
         if (count > 8) {
             const dvec3 extent = centroid_max - centroid_min;
@@ -202,8 +210,8 @@ struct TriangleSurface {
     }
 
     static double BoxDistanceSquared(const Node &node, const dvec3 &point) {
-        const dvec3 outside = numeric::Max(numeric::Max(node.Min - point, point - node.Max), dvec3{0});
-        return numeric::Length2(outside);
+        const dvec3 outside = Max(Max(node.Min - point, point - node.Max), dvec3{0});
+        return Length2(outside);
     }
 
     static bool RayIntersectsBox(const Node &node, const dvec3 &origin, const dvec3 &direction) {
@@ -292,7 +300,7 @@ struct TriangleSurface {
 
 modal::DomainRegion Classify(const modal::ImplicitDomain &domain, const dvec3 &center, const dvec3 &half) {
     if (domain.ClassifyBox) return domain.ClassifyBox(center, half);
-    const double distance = domain.SignedDistance(center), radius = numeric::Length(half);
+    const double distance = domain.SignedDistance(center), radius = Length(half);
     if (distance < -radius) return modal::DomainRegion::Inside;
     if (distance > radius) return modal::DomainRegion::Outside;
     return modal::DomainRegion::Cut;
@@ -430,7 +438,7 @@ std::optional<MomentFitResult> FitCutCellMoments(
     };
     std::vector<double> uncompressed_weights(uncompressed.size());
     double maximum_residual{};
-    numeric::Matrix<double> basis;
+    Matrix<double> basis;
     if (candidates.size() >= MomentCount && (measures[0] > 0 || measures[1] > 0)) {
         basis.Resize(MomentCount, candidates.size());
         for (uint32_t candidate = 0; candidate < candidates.size(); ++candidate) {
@@ -441,9 +449,9 @@ std::optional<MomentFitResult> FitCutCellMoments(
     for (uint32_t region = 0; region < 2; ++region) {
         bool fitted_region{};
         if (!basis.empty() && measures[region] > 0) {
-            numeric::Vector<double> fitted;
-            const numeric::VectorView<const double> target{moments[region].data(), MomentCount, 1};
-            const bool solved = numeric::LeastSquaresMinimumNorm(basis.View(), target, fitted);
+            Vector<double> fitted;
+            const VectorView<const double> target{moments[region].data(), MomentCount, 1};
+            const bool solved = LeastSquaresMinimumNorm(basis.View(), target, fitted);
             double residual_squared{}, target_squared{};
             for (uint32_t row = 0; row < MomentCount; ++row) {
                 double reconstructed{};
@@ -452,7 +460,7 @@ std::optional<MomentFitResult> FitCutCellMoments(
                 target_squared += std::pow(moments[region][row], 2);
             }
             const double residual = std::sqrt(residual_squared / target_squared);
-            fitted_region = solved && numeric::AllFinite(fitted.View()) && residual <= 1e-10;
+            fitted_region = solved && AllFinite(fitted.View()) && residual <= 1e-10;
             if (fitted_region) {
                 maximum_residual = std::max(maximum_residual, residual);
                 for (uint32_t candidate = 0; candidate < candidates.size(); ++candidate)
@@ -997,7 +1005,7 @@ void CellOperators(
         if (!shifted) continue;
         for (uint32_t a = 0; a < NodeCount; ++a) {
             for (uint32_t c = 0; c < (Packed ? a + 1 : NodeCount); ++c) {
-                const double dot = numeric::Dot(gradient[a], gradient[c]);
+                const double dot = Dot(gradient[a], gradient[c]);
                 for (uint32_t p = 0; p < 3; ++p) {
                     for (uint32_t q = 0; q < (Packed && c == a ? p + 1 : 3u); ++q) {
                         const uint32_t row = 3 * a + p, column = 3 * c + q;
@@ -1019,11 +1027,11 @@ template<bool P1>
 modal::AssembledPencil Assemble(const modal::FiniteCellOperator &operation) {
     constexpr uint32_t Basis{P1 ? 1 : BasisOrder}, Nodes{(Basis + 1) * (Basis + 1) * (Basis + 1)}, Dofs{3 * Nodes};
     constexpr uint32_t MassEntries{3 * Nodes * (Nodes + 1) / 2}, StiffnessEntries{Dofs * (Dofs + 1) / 2};
-    std::vector<numeric::Triplet> mass_triplets(operation.Cells.size() * MassEntries);
-    std::vector<numeric::Triplet> stiffness_triplets(operation.Cells.size() * StiffnessEntries);
+    std::vector<Triplet> mass_triplets(operation.Cells.size() * MassEntries);
+    std::vector<Triplet> stiffness_triplets(operation.Cells.size() * StiffnessEntries);
     struct Context {
         const modal::FiniteCellOperator &Operation;
-        numeric::Triplet *Mass, *Stiffness;
+        Triplet *Mass, *Stiffness;
     } context{operation, mass_triplets.data(), stiffness_triplets.data()};
     dispatch_apply_f(
         operation.Cells.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &context,
@@ -1063,13 +1071,13 @@ modal::AssembledPencil Assemble(const modal::FiniteCellOperator &operation) {
     );
     const uint32_t dofs = P1 ? 3 * operation.NumP1Nodes : operation.Dofs();
     return {
-        numeric::SparseMatrix::FromTriplets(int(dofs), int(dofs), std::move(mass_triplets)),
-        numeric::SparseMatrix::FromTriplets(int(dofs), int(dofs), std::move(stiffness_triplets)),
+        SparseMatrix::FromTriplets(int(dofs), int(dofs), std::move(mass_triplets)),
+        SparseMatrix::FromTriplets(int(dofs), int(dofs), std::move(stiffness_triplets)),
     };
 }
 
-numeric::Vector<double> ShiftedDiagonal(const modal::FiniteCellOperator &operation, double alpha) {
-    numeric::Vector<double> result(operation.Dofs());
+Vector<double> ShiftedDiagonal(const modal::FiniteCellOperator &operation, double alpha) {
+    Vector<double> result(operation.Dofs());
     for (const auto &cell : operation.Cells) {
         for (uint32_t quadrature = cell.QuadratureOffset; quadrature < cell.QuadratureOffset + cell.QuadratureCount; ++quadrature) {
             const auto &point = operation.Quadrature[quadrature];
@@ -1077,7 +1085,7 @@ numeric::Vector<double> ShiftedDiagonal(const modal::FiniteCellOperator &operati
             std::array<dvec3, NodeCount> gradient;
             EvaluateBasis<BasisOrder>(point.Reference, cell.InverseHalf, shape, gradient);
             for (uint32_t a = 0; a < NodeCount; ++a) {
-                const double dot = numeric::Dot(gradient[a], gradient[a]);
+                const double dot = Dot(gradient[a], gradient[a]);
                 for (uint32_t component = 0; component < 3; ++component)
                     result[3 * cell.Nodes[a] + component] += point.Weight *
                         (alpha * operation.Density * shape[a] * shape[a] +
@@ -1294,7 +1302,7 @@ void modal::FiniteCellOperator::ProlongP1(const double *input, double *output, u
             }
 }
 
-numeric::Vector<double> modal::finite_cell::ShiftedDiagonal(const FiniteCellOperator &operation, double alpha) {
+Vector<double> modal::finite_cell::ShiftedDiagonal(const FiniteCellOperator &operation, double alpha) {
     return ::ShiftedDiagonal(operation, alpha);
 }
 
@@ -1338,20 +1346,20 @@ modal::AssembledPencil modal::FiniteCellOperator::AssembleP1Lower() const {
     return Assemble<true>(*this);
 }
 
-numeric::SparseMatrix modal::finite_cell::AssembleP1ShiftedLower(
+SparseMatrix modal::finite_cell::AssembleP1ShiftedLower(
     const FiniteCellOperator &operation, double alpha
 ) {
     auto assembled = operation.AssembleP1Lower();
-    return numeric::Add(assembled.Stiffness, alpha, assembled.Mass);
+    return Add(assembled.Stiffness, alpha, assembled.Mass);
 }
 
 modal::ImplicitDomain modal::MakeBoxDomain(dvec3 min, dvec3 max) {
     if (max.x <= min.x || max.y <= min.y || max.z <= min.z)
         throw std::invalid_argument("Finite-cell box bounds must have positive extent.");
     return {min, max, [center = 0.5 * (min + max), half = 0.5 * (max - min)](const dvec3 &point) {
-                const dvec3 q = numeric::Abs(point - center) - half;
-                const dvec3 outside = numeric::Max(q, dvec3{0});
-                return numeric::Length(outside) + std::min(std::max({q.x, q.y, q.z}), 0.0); }, [min, max](const dvec3 &center, const dvec3 &half) {
+                const dvec3 q = Abs(point - center) - half;
+                const dvec3 outside = Max(q, dvec3{0});
+                return Length(outside) + std::min(std::max({q.x, q.y, q.z}), 0.0); }, [min, max](const dvec3 &center, const dvec3 &half) {
                 const dvec3 cell_min = center - half, cell_max = center + half;
                 if (cell_min.x >= min.x && cell_min.y >= min.y && cell_min.z >= min.z && cell_max.x <= max.x && cell_max.y <= max.y && cell_max.z <= max.z)
                     return modal::DomainRegion::Inside;
@@ -1365,7 +1373,7 @@ modal::ImplicitDomain modal::MakeSphereDomain(dvec3 center, double radius) {
     return {
         center - radius,
         center + radius,
-        [=](const dvec3 &point) { return numeric::Length(point - center) - radius; },
+        [=](const dvec3 &point) { return Length(point - center) - radius; },
         [=](const dvec3 &cell_center, const dvec3 &half) {
             const auto [nearest, farthest] = BoxDistanceBounds(cell_center, half, center);
             if (farthest <= radius) return modal::DomainRegion::Inside;
@@ -1382,7 +1390,7 @@ modal::ImplicitDomain modal::MakeSphericalShellDomain(dvec3 center, double inner
         center - outer_radius,
         center + outer_radius,
         [=](const dvec3 &point) {
-            const double radius = numeric::Length(point - center);
+            const double radius = Length(point - center);
             return std::max(inner_radius - radius, radius - outer_radius);
         },
         [=](const dvec3 &cell_center, const dvec3 &half) {
@@ -1431,8 +1439,8 @@ modal::ImplicitDomain modal::MakeTriangleSurfaceDomain(std::span<const dvec3> po
     surface->Triangles.reserve(triangle_indices.size() / 3);
     dvec3 min{std::numeric_limits<double>::infinity()}, max{-std::numeric_limits<double>::infinity()};
     for (const auto &point : points) {
-        min = numeric::Min(min, point);
-        max = numeric::Max(max, point);
+        min = Min(min, point);
+        max = Max(max, point);
     }
     for (size_t triangle = 0; triangle < triangle_indices.size(); triangle += 3) {
         std::array<dvec3, 3> vertices;
@@ -1441,7 +1449,7 @@ modal::ImplicitDomain modal::MakeTriangleSurfaceDomain(std::span<const dvec3> po
             if (index >= points.size()) throw std::invalid_argument("Finite-cell surface index is out of range.");
             vertices[corner] = points[index];
         }
-        if (numeric::Length2(numeric::Cross(vertices[1] - vertices[0], vertices[2] - vertices[0])) > 0)
+        if (Length2(Cross(vertices[1] - vertices[0], vertices[2] - vertices[0])) > 0)
             surface->Triangles.push_back(vertices);
     }
     if (surface->Triangles.empty()) throw std::invalid_argument("Finite-cell surface has no nondegenerate triangles.");
@@ -1493,7 +1501,7 @@ std::optional<modal::FiniteCellOperator::InterpolationStencil> modal::FiniteCell
                 const dvec3 half = 1.0 / cell.InverseHalf;
                 const dvec3 center = Nodes[cell.Nodes[0]] + half;
                 const dvec3 reference = (point - center) / half;
-                const dvec3 absolute = numeric::Abs(reference);
+                const dvec3 absolute = Abs(reference);
                 if (absolute.x > 1 + 1e-10 || absolute.y > 1 + 1e-10 || absolute.z > 1 + 1e-10) continue;
                 double basis[3][3];
                 for (uint32_t axis = 0; axis < 3; ++axis) {

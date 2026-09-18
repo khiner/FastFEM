@@ -5,6 +5,8 @@
 // Simplifies the surface in place to `ratio` of its triangles with quadric edge collapse and removes unreferenced vertices.
 // A ratio greater than or equal to one preserves the input.
 // The function retries folds with their neighborhoods fixed and preserves resolution where every collapse causes an intersection.
+using numeric::vec3;
+
 void SimplifySurface(std::vector<vec3> &positions, std::vector<uint32_t> &triangle_indices, float ratio);
 
 // Conforming midpoint subdivision preserves the piecewise-planar surface and winding.

@@ -1,9 +1,12 @@
 #include "ModalResultBuilder.h"
+#include "numeric/VectorOps.h"
 
 #include <algorithm>
 #include <cmath>
 #include <numbers>
 #include <span>
+
+using numeric::vec3;
 
 namespace {
 using uint = uint32_t;
@@ -104,7 +107,7 @@ modal::ModalResult modal::BuildModalResult(
     std::vector<double> eigenvalues, std::vector<std::vector<vec3>> shapes,
     const AcousticMaterialProperties &material, const SolverConfig &config,
     std::vector<vec3> positions, vec3 baked_scale, MassProperties mass_properties,
-    SolveProfile profile, numeric::Matrix<float> basis, std::vector<uint32_t> sample_point_of
+    SolveProfile profile, Matrix<float> basis, std::vector<uint32_t> sample_point_of
 ) {
     ModalEigenSummary summary{
         .Eigenvalues = std::move(eigenvalues),

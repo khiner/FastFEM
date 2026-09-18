@@ -1,3 +1,6 @@
+#include "numeric/VectorOps.h"
+#include "numeric/dvec3.h"
+
 #include "mesh/Tets.h"
 
 #include "numeric/Predicates.h"
@@ -8,6 +11,8 @@
 #include <cmath>
 #include <numbers>
 #include <unordered_map>
+
+using numeric::dvec3;
 
 namespace {
 constexpr int Stages{4}; // Limits the resolution restored after a failed collapse.
@@ -60,7 +65,7 @@ struct Grid {
     static int64_t Key(int64_t x, int64_t y, int64_t z) { return (x * 73856093) ^ (y * 19349663) ^ (z * 83492791); }
 
     void ForCellsIn(const dvec3 &lo, const dvec3 &hi, auto &&visit) {
-        const dvec3 c0 = numeric::Floor((lo - Min) / Cell), c1 = numeric::Floor((hi - Min) / Cell);
+        const dvec3 c0 = Floor((lo - Min) / Cell), c1 = Floor((hi - Min) / Cell);
         for (auto x = int64_t(c0.x); x <= int64_t(c1.x); ++x) {
             for (auto y = int64_t(c0.y); y <= int64_t(c1.y); ++y) {
                 for (auto z = int64_t(c0.z); z <= int64_t(c1.z); ++z) visit(Cells[Key(x, y, z)]);
@@ -77,7 +82,7 @@ struct Defect {
 
 // Returns a triangle neighborhood centered at its centroid and scaled by its longest edge.
 Defect TriangleDefect(const dvec3 &v0, const dvec3 &v1, const dvec3 &v2) {
-    return {(v0 + v1 + v2) / 3.0, std::max({numeric::Length(v1 - v0), numeric::Length(v2 - v1), numeric::Length(v0 - v2)})};
+    return {(v0 + v1 + v2) / 3.0, std::max({Length(v1 - v0), Length(v2 - v1), Length(v0 - v2)})};
 }
 
 void FindFolds(const std::vector<dvec3> &points, const std::vector<uint32_t> &tris, std::vector<Defect> &out) {
@@ -90,14 +95,14 @@ void FindFolds(const std::vector<dvec3> &points, const std::vector<uint32_t> &tr
     for (uint32_t t = 0; t < n; ++t) {
         dvec3 lo = points[tris[t * 3]], hi = lo;
         for (uint32_t k = 1; k < 3; ++k) {
-            lo = numeric::Min(lo, points[tris[t * 3 + k]]);
-            hi = numeric::Max(hi, points[tris[t * 3 + k]]);
+            lo = Min(lo, points[tris[t * 3 + k]]);
+            hi = Max(hi, points[tris[t * 3 + k]]);
         }
         tri_min[t] = vec3{lo};
         tri_max[t] = vec3{hi};
-        min = numeric::Min(min, lo);
-        max = numeric::Max(max, hi);
-        diagonal_sum += numeric::Length(hi - lo);
+        min = Min(min, lo);
+        max = Max(max, hi);
+        diagonal_sum += Length(hi - lo);
     }
     // Average-triangle cell size bounds the expected candidate count per bucket.
     Grid grid{std::max(diagonal_sum / n, 1e-12), min, {}};
@@ -141,8 +146,8 @@ void FindVerticesInsideEdges(const std::vector<dvec3> &points, const std::vector
     double edge_sum = 0;
     for (const uint64_t e : edges) {
         const dvec3 &a = points[uint32_t(e >> 32)], &b = points[uint32_t(e)];
-        min = numeric::Min(min, numeric::Min(a, b));
-        edge_sum += numeric::Length(b - a);
+        min = Min(min, Min(a, b));
+        edge_sum += Length(b - a);
     }
     // Average-edge cell size bounds the expected candidate count per bucket.
     Grid grid{std::max(edge_sum / double(edges.size()), 1e-12), min, {}};
@@ -156,16 +161,16 @@ void FindVerticesInsideEdges(const std::vector<dvec3> &points, const std::vector
     for (const uint64_t e : edges) {
         const uint32_t a = uint32_t(e >> 32), b = uint32_t(e);
         const dvec3 &pa = points[a], &pb = points[b];
-        grid.ForCellsIn(numeric::Min(pa, pb), numeric::Max(pa, pb), [&](std::vector<uint32_t> &bucket) {
+        grid.ForCellsIn(Min(pa, pb), Max(pa, pb), [&](std::vector<uint32_t> &bucket) {
             for (const uint32_t v : bucket) {
                 if (v == a || v == b) continue;
                 // A negative dot places the vertex between the endpoints.
                 // The normalized cross-product magnitude approaches zero as the endpoint angle approaches 180 degrees.
                 const dvec3 u = pa - points[v], w = pb - points[v];
-                if (numeric::Dot(u, w) >= 0) continue;
-                if (numeric::Length(numeric::Cross(u, w)) <= numeric::Length(u) * numeric::Length(w) * SinStraightTol) {
+                if (Dot(u, w) >= 0) continue;
+                if (Length(Cross(u, w)) <= Length(u) * Length(w) * SinStraightTol) {
                     // The edge length defines a neighborhood containing every vertex collapsed across the edge.
-                    out.emplace_back(0.5 * (pa + pb), numeric::Length(pb - pa));
+                    out.emplace_back(0.5 * (pa + pb), Length(pb - pa));
                 }
             }
         });
@@ -184,11 +189,11 @@ std::vector<Defect> FindDefects(const std::vector<dvec3> &points, const std::vec
 std::vector<uint32_t> SimplifyWithoutDefects(const std::vector<dvec3> &points, const std::vector<vec3> &positions, const std::vector<uint32_t> &triangle_indices, float ratio) {
     dvec3 min = points[0], max = points[0];
     for (const auto &p : points) {
-        min = numeric::Min(min, p);
-        max = numeric::Max(max, p);
+        min = Min(min, p);
+        max = Max(max, p);
     }
     double edge_sum = 0;
-    for (size_t i = 0; i < triangle_indices.size(); i += 3) edge_sum += numeric::Length(points[triangle_indices[i]] - points[triangle_indices[i + 1]]);
+    for (size_t i = 0; i < triangle_indices.size(); i += 3) edge_sum += Length(points[triangle_indices[i]] - points[triangle_indices[i + 1]]);
     Grid vertex_grid{std::max(edge_sum * 3 / double(triangle_indices.size()), 1e-12), min, {}};
     for (uint32_t v = 0; v < points.size(); ++v) {
         vertex_grid.ForCellsIn(points[v], points[v], [&](std::vector<uint32_t> &bucket) { bucket.push_back(v); });
@@ -218,7 +223,7 @@ std::vector<uint32_t> SimplifyWithoutDefects(const std::vector<dvec3> &points, c
                 const double r = radius * scale;
                 vertex_grid.ForCellsIn(center - dvec3{r}, center + dvec3{r}, [&](std::vector<uint32_t> &bucket) {
                     for (const uint32_t v : bucket) {
-                        if (numeric::Length(points[v] - center) <= r) locks[v] = 1;
+                        if (Length(points[v] - center) <= r) locks[v] = 1;
                     }
                 });
             }
@@ -263,7 +268,7 @@ void RefineSurface(std::vector<vec3> &positions, std::vector<uint32_t> &triangle
             for (uint32_t edge = 0; edge < 3; ++edge) {
                 const auto a = v[edge], b = v[(edge + 1) % 3];
                 const dvec3 delta = dvec3{positions[a]} - dvec3{positions[b]};
-                if (numeric::Dot(delta, delta) <= limit_squared) continue;
+                if (Dot(delta, delta) <= limit_squared) continue;
                 split[edge] = true;
                 ++count;
                 const uint64_t key = uint64_t(std::min(a, b)) << 32 | std::max(a, b);

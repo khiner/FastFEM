@@ -1,5 +1,8 @@
 #pragma once
 
+#include "numeric/dvec3.h"
+#include "numeric/uvec3.h"
+
 #include "AcousticMaterialProperties.h"
 #include "AssembledPencil.h"
 #include "numeric/vec3.h"
@@ -12,6 +15,8 @@
 #include <vector>
 
 namespace modal {
+using numeric::dvec3, numeric::uvec3;
+
 enum struct DomainRegion { Inside,
                            Outside,
                            Cut };

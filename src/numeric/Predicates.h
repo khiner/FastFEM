@@ -1,11 +1,13 @@
 #pragma once
 
-#include "numeric/vec3.h"
+#include "dvec3.h"
 
 #include <cmath>
 #include <cstdint>
 
 namespace geom {
+using numeric::dvec3;
+
 // Sign of det[a-d, b-d, c-d].
 // Positive when d lies on the negative side of the plane through a, b, c (a, b, c appear counterclockwise seen from the positive side).
 double Orient3D(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d);

@@ -8,6 +8,8 @@
 // Implements adaptive robust predicates from Jonathan Richard Shewchuk, Discrete & Computational Geometry 18(3), 1997.
 // Exact evaluation stores nonoverlapping doubles in increasing magnitude, with the highest-magnitude component determining the sign.
 // Conservative machine-epsilon bounds restrict expansion evaluation to near-degenerate inputs.
+using numeric::dvec3;
+
 namespace {
 constexpr double Eps = 0x1p-53;
 

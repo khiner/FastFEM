@@ -11,6 +11,8 @@
 #include <stdexcept>
 #include <string_view>
 
+using numeric::vec3;
+
 namespace {
 const char *ArgValue(int argc, char **argv, std::string_view name, const char *fallback) {
     for (int i = 1; i + 1 < argc; ++i)
@@ -103,7 +105,7 @@ int main(int argc, char **argv) try {
         .Resolution = Count(argc, argv, "--resolution", 12),
     };
 
-    std::vector<fastfem::Vec3> samples;
+    std::vector<vec3> samples;
     if (benchmark) {
         const size_t count = std::min(size_t{64}, mesh->Positions.size());
         for (size_t i = 0; i < count; ++i) samples.push_back(mesh->Positions[count == 1 ? 0 : i * (mesh->Positions.size() - 1) / (count - 1)]);

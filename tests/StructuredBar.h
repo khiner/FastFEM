@@ -1,6 +1,10 @@
 #pragma once
 
+#include "numeric/dvec3.h"
+
 #include "mesh/TetMesh.h"
+
+using numeric::dvec3;
 
 inline constexpr uint32_t HexTets[6][4]{
     {0, 1, 3, 7}, {0, 3, 2, 7}, {0, 2, 6, 7}, {0, 6, 4, 7}, {0, 4, 5, 7}, {0, 5, 1, 7}

@@ -1,3 +1,6 @@
+#include "numeric/VectorOps.h"
+#include "numeric/dvec3.h"
+
 #include "Tet10Modes.h"
 
 #include "AcousticMaterialProperties.h"
@@ -18,6 +21,8 @@
 #include <numbers>
 #include <optional>
 #include <unordered_map>
+
+using numeric::SparseMatrix, numeric::dvec3, numeric::vec3;
 
 using uint = uint32_t;
 
@@ -119,12 +124,12 @@ TetMesh FilterDegenerate(const TetMesh &tets) {
     for (const auto &t : tets.Tets) {
         const dvec3 &a = tets.Points[t[0]];
         const dvec3 r0 = tets.Points[t[1]] - a, r1 = tets.Points[t[2]] - a, r2 = tets.Points[t[3]] - a;
-        const double det = std::abs(numeric::Dot(r0, numeric::Cross(r1, r2)));
+        const double det = std::abs(Dot(r0, Cross(r1, r2)));
         double lmax_sq = 0;
         for (uint i = 0; i < 4; ++i) {
             for (uint j = i + 1; j < 4; ++j) {
                 const dvec3 d = tets.Points[t[i]] - tets.Points[t[j]];
-                lmax_sq = std::max(lmax_sq, numeric::Dot(d, d));
+                lmax_sq = std::max(lmax_sq, Dot(d, d));
             }
         }
         if (det > 1e-12 * lmax_sq * std::sqrt(lmax_sq)) clean.Tets.push_back(t);
@@ -133,7 +138,7 @@ TetMesh FilterDegenerate(const TetMesh &tets) {
 }
 
 double GetTetDeterminant(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d) {
-    return numeric::Dot(d - a, numeric::Cross(b - a, c - a));
+    return Dot(d - a, Cross(b - a, c - a));
 }
 double GetTetVolume(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d) {
     return std::abs(GetTetDeterminant(a, b, c, d)) / 6.0;
@@ -222,8 +227,8 @@ struct Tet10ShiftInvert {
 
 modal::eigensolver::GeneralizedEigenResult SolveTet10Eigenpairs(
     const modal::Tet10Assembler &fem,
-    const numeric::SparseMatrix &M,
-    const numeric::SparseMatrix &K,
+    const SparseMatrix &M,
+    const SparseMatrix &K,
     Tet10SolveOptions opts,
     modal::SolveProfile &profile
 ) {
@@ -271,7 +276,7 @@ modal::eigensolver::GeneralizedEigenResult SolveTet10Eigenpairs(
     if (subspace.RelativeResiduals.size()) {
         const uint32_t first_physical = std::min(6u, fem_n_modes);
         if (first_physical < fem_n_modes)
-            profile.PhysicalResidual = numeric::Maximum(subspace.RelativeResiduals.Last(fem_n_modes - first_physical));
+            profile.PhysicalResidual = Maximum(subspace.RelativeResiduals.Last(fem_n_modes - first_physical));
         profile.MassOrthogonality = subspace.MassOrthogonalityError;
     }
     if (!subspace.Converged) return subspace;
@@ -313,7 +318,7 @@ modal::ModalResult modal::SolveTet10Modes(const TetMesh &input_tets, const Acous
             uint nearest = 0;
             for (uint v = 0; v < uint(tets.Points.size()); ++v) {
                 const auto &q = tets.Points[v];
-                if (const double d = numeric::Distance2(p, q); d < best) {
+                if (const double d = Distance2(p, q); d < best) {
                     best = d;
                     nearest = v;
                 }
@@ -350,8 +355,8 @@ modal::ModalResult modal::SolveTet10Modes(const TetMesh &input_tets, const Acous
         for (size_t mode = 0; mode < eigenpairs.Eigenvalues.size(); ++mode)
             for (uint component = 0; component < 3; ++component)
                 shapes[point][size_t(mode)][component] = eigenpairs.Eigenvectors(3 * excite_points[point] + component, mode);
-    numeric::Matrix<float> basis;
-    if (reuse.KeepBasis) basis = numeric::Cast<float>(eigenpairs.Eigenvectors.View());
+    Matrix<float> basis;
+    if (reuse.KeepBasis) basis = Cast<float>(eigenpairs.Eigenvectors.View());
     fastfem::SetSolveProgress(monitor, 0.99f, fastfem::SolveStage::Finalizing);
     auto result = BuildModalResult({eigenpairs.Eigenvalues.begin(), eigenpairs.Eigenvalues.end()}, std::move(shapes), material, config, std::move(positions), baked_scale, std::move(mass_props), profile, std::move(basis), std::move(sample_point_of));
     fastfem::SetSolveProgress(monitor, 1, fastfem::SolveStage::Complete);

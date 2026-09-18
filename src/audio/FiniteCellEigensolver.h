@@ -1,8 +1,12 @@
 #pragma once
 
+#include "numeric/Vector.h"
+
 #include "FiniteCell.h"
 
 namespace modal {
+using numeric::Matrix, numeric::Vector;
+
 // Records wall-clock seconds and convergence diagnostics for each solve phase.
 // Other measures time outside actions, preconditioning, and Rayleigh-Ritz.
 // A failed factor-free solve is recorded when assembled Cholesky runs.
@@ -14,8 +18,8 @@ struct FiniteCellSolveProfile {
 };
 
 struct FiniteCellEigenpairs {
-    numeric::Vector<double> Eigenvalues, RelativeResiduals;
-    numeric::Matrix<double> Eigenvectors;
+    Vector<double> Eigenvalues, RelativeResiduals;
+    Matrix<double> Eigenvectors;
     FiniteCellSolveProfile Profile;
     uint32_t Iterations{};
 };

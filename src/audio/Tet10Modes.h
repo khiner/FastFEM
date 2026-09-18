@@ -13,6 +13,8 @@
 #include <vector>
 
 namespace modal {
+using numeric::Matrix, numeric::vec3;
+
 using SolveMonitor = fastfem::SolveMonitor;
 
 // MinModeFreq also sets the eigensolver shift to -(2*pi*MinModeFreq)^2.
@@ -41,7 +43,7 @@ struct ModalResult {
     MassProperties MassProps;
     SolveProfile Profile;
     ModalEigenSummary Summary; // Raw eigenpairs sampled at the excitation positions
-    numeric::Matrix<float> Basis; // Full eigenvector basis, filled when SolveReuse::KeepBasis
+    Matrix<float> Basis; // Full eigenvector basis, filled when SolveReuse::KeepBasis
     // Maps each requested excitation position to Modes.Positions in request order.
     // Excitation positions mapped to one tetrahedral point share one entry.
     std::vector<uint32_t> SamplePointOfExcitation;
@@ -61,7 +63,7 @@ struct SolveCache {
 };
 
 struct SolveReuse {
-    const numeric::Matrix<float> *SeedBasis{};
+    const Matrix<float> *SeedBasis{};
     SolveCache *Cache{}; // Optional lifetime override for the bounded default cache
     bool KeepBasis{}; // Fill ModalResult::Basis
 };

@@ -128,6 +128,7 @@ target_compile_features(FastFEM PUBLIC cxx_std_23)
 target_compile_definitions(FastFEM PRIVATE FASTFEM_PARALLEL_SPARSE=$<BOOL:${FASTFEM_PARALLEL_SPARSE}>)
 target_include_directories(FastFEM
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_link_libraries(FastFEM

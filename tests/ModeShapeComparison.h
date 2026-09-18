@@ -1,5 +1,10 @@
 #pragma once
 
+#include "numeric/Vector.h"
+#include "numeric/VectorOps.h"
+
+#include "numeric/dvec3.h"
+
 #include "audio/FiniteCell.h"
 #include "audio/Tet10Assembler.h"
 #include "mesh/TetMesh.h"
@@ -13,6 +18,8 @@
 #include <vector>
 
 namespace modal_test {
+using numeric::Matrix, numeric::Vector;
+
 struct ModeShapeComparison {
     uint32_t Samples{}, Clusters{}, LargestCluster{};
     double PairedMacMinimum{}, BestMacMinimum{}, ClusterMacMinimum{};
@@ -55,10 +62,10 @@ inline std::optional<InterpolationStencil> Tet10Stencil(
     return std::nullopt;
 }
 
-inline numeric::Matrix<double> SampleModes(
-    const std::vector<InterpolationStencil> &stencils, const numeric::Matrix<double> &modes, uint32_t first_mode
+inline Matrix<double> SampleModes(
+    const std::vector<InterpolationStencil> &stencils, const Matrix<double> &modes, uint32_t first_mode
 ) {
-    numeric::Matrix<double> result(3 * stencils.size(), modes.cols() - first_mode);
+    Matrix<double> result(3 * stencils.size(), modes.cols() - first_mode);
     for (uint32_t sample = 0; sample < stencils.size(); ++sample)
         for (uint32_t node = 0; node < stencils[sample].Count; ++node)
             for (uint32_t component = 0; component < 3; ++component)
@@ -69,31 +76,31 @@ inline numeric::Matrix<double> SampleModes(
 }
 
 inline ModeShapeComparison CompareSameDiscretizationModeShapes(
-    const modal::FiniteCellOperator &operation, const numeric::Vector<double> &reference_values,
-    const numeric::Matrix<double> &reference_modes, const numeric::Matrix<double> &candidate_modes, uint32_t first_mode = 6,
+    const modal::FiniteCellOperator &operation, const Vector<double> &reference_values,
+    const Matrix<double> &reference_modes, const Matrix<double> &candidate_modes, uint32_t first_mode = 6,
     uint32_t accepted_modes = 0
 ) {
     ModeShapeComparison result{.Samples = uint32_t(operation.Nodes.size())};
     if (reference_modes.rows() != candidate_modes.rows() || reference_modes.cols() != candidate_modes.cols() ||
         reference_modes.cols() <= first_mode || reference_values.size() != reference_modes.cols())
         return result;
-    numeric::Matrix<double> reference_mass(reference_modes.rows(), reference_modes.cols());
-    numeric::Matrix<double> candidate_mass(candidate_modes.rows(), candidate_modes.cols());
+    Matrix<double> reference_mass(reference_modes.rows(), reference_modes.cols());
+    Matrix<double> candidate_mass(candidate_modes.rows(), candidate_modes.cols());
     operation.ApplyMass(reference_modes.data(), reference_mass.data(), uint32_t(reference_modes.cols()));
     operation.ApplyMass(candidate_modes.data(), candidate_mass.data(), uint32_t(candidate_modes.cols()));
-    numeric::Matrix<double> reference = numeric::Copy(reference_modes.LastColumns(reference_modes.cols() - first_mode));
-    numeric::Matrix<double> candidate = numeric::Copy(candidate_modes.LastColumns(candidate_modes.cols() - first_mode));
-    numeric::Matrix<double> reference_action = numeric::Copy(reference_mass.LastColumns(reference_mass.cols() - first_mode));
-    numeric::Matrix<double> candidate_action = numeric::Copy(candidate_mass.LastColumns(candidate_mass.cols() - first_mode));
+    Matrix<double> reference = Copy(reference_modes.LastColumns(reference_modes.cols() - first_mode));
+    Matrix<double> candidate = Copy(candidate_modes.LastColumns(candidate_modes.cols() - first_mode));
+    Matrix<double> reference_action = Copy(reference_mass.LastColumns(reference_mass.cols() - first_mode));
+    Matrix<double> candidate_action = Copy(candidate_mass.LastColumns(candidate_mass.cols() - first_mode));
     for (size_t mode = 0; mode < reference.cols(); ++mode) {
-        const double reference_norm = std::sqrt(std::abs(numeric::Dot(reference.Column(mode), reference_action.Column(mode))));
-        const double candidate_norm = std::sqrt(std::abs(numeric::Dot(candidate.Column(mode), candidate_action.Column(mode))));
-        numeric::Scale(1 / reference_norm, reference.Column(mode));
-        numeric::Scale(1 / candidate_norm, candidate.Column(mode));
-        numeric::Scale(1 / reference_norm, reference_action.Column(mode));
-        numeric::Scale(1 / candidate_norm, candidate_action.Column(mode));
+        const double reference_norm = std::sqrt(std::abs(Dot(reference.Column(mode), reference_action.Column(mode))));
+        const double candidate_norm = std::sqrt(std::abs(Dot(candidate.Column(mode), candidate_action.Column(mode))));
+        Scale(1 / reference_norm, reference.Column(mode));
+        Scale(1 / candidate_norm, candidate.Column(mode));
+        Scale(1 / reference_norm, reference_action.Column(mode));
+        Scale(1 / candidate_norm, candidate_action.Column(mode));
     }
-    const numeric::Matrix<double> overlap = numeric::TransposeMultiply(reference.View(), candidate_action.View());
+    const Matrix<double> overlap = TransposeMultiply(reference.View(), candidate_action.View());
     const size_t accepted_end = accepted_modes ? std::min<size_t>(accepted_modes, reference_values.size()) : reference_values.size();
     const size_t accepted_count = accepted_end - first_mode;
     if (accepted_count <= 0) return result;
@@ -115,8 +122,8 @@ inline ModeShapeComparison CompareSameDiscretizationModeShapes(
             ++end;
         }
         const size_t width = end - first, offset = first - first_mode;
-        numeric::Vector<double> singular_values;
-        if (!numeric::SingularValues(overlap.Block(offset, offset, width, width), singular_values)) return {};
+        Vector<double> singular_values;
+        if (!SingularValues(overlap.Block(offset, offset, width, width), singular_values)) return {};
         result.ClusterMacMinimum = std::min(result.ClusterMacMinimum, std::pow(*std::ranges::min_element(singular_values), 2));
         ++result.Clusters;
         result.LargestCluster = std::max(result.LargestCluster, uint32_t(width));

@@ -1,5 +1,9 @@
 #pragma once
 
+#include "numeric/VectorOps.h"
+#include "numeric/dvec3.h"
+#include "numeric/uvec3.h"
+
 #include "StructuredBar.h"
 #include "mesh/Tetrahedralize.h"
 
@@ -15,6 +19,8 @@
 #include <vector>
 
 namespace modal_test {
+using numeric::dvec3, numeric::uvec3;
+
 struct Surface {
     std::vector<dvec3> Points;
     std::vector<uint32_t> Triangles;
@@ -157,13 +163,13 @@ inline Surface Icosphere(uint32_t subdivisions) {
         {8, 6, 7},
         {9, 8, 1},
     };
-    for (auto &point : points) point = numeric::Normalize(point);
+    for (auto &point : points) point = Normalize(point);
     for (uint32_t subdivision = 0; subdivision < subdivisions; ++subdivision) {
         std::map<uint64_t, uint32_t> midpoints;
         const auto Midpoint = [&](uint32_t a, uint32_t b) {
             const uint64_t key = uint64_t(std::min(a, b)) << 32 | std::max(a, b);
             const auto [entry, inserted] = midpoints.try_emplace(key, uint32_t(points.size()));
-            if (inserted) points.push_back(numeric::Normalize(0.5 * (points[a] + points[b])));
+            if (inserted) points.push_back(Normalize(0.5 * (points[a] + points[b])));
             return entry->second;
         };
         std::vector<std::array<uint32_t, 3>> refined;
@@ -366,8 +372,8 @@ inline Surface CupSurface() {
 inline std::pair<dvec3, dvec3> Bounds(const Surface &surface) {
     dvec3 min{std::numeric_limits<double>::infinity()}, max{-std::numeric_limits<double>::infinity()};
     for (const auto &point : surface.Points) {
-        min = numeric::Min(min, point);
-        max = numeric::Max(max, point);
+        min = Min(min, point);
+        max = Max(max, point);
     }
     return {min, max};
 }
@@ -378,7 +384,7 @@ inline double Volume(const Surface &surface) {
         const auto &a = surface.Points[surface.Triangles[triangle]];
         const auto &b = surface.Points[surface.Triangles[triangle + 1]];
         const auto &c = surface.Points[surface.Triangles[triangle + 2]];
-        volume += numeric::Dot(a, numeric::Cross(b, c)) / 6;
+        volume += Dot(a, Cross(b, c)) / 6;
     }
     return std::abs(volume);
 }

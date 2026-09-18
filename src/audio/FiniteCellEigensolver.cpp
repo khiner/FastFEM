@@ -1,3 +1,6 @@
+#include "numeric/Vector.h"
+#include "numeric/VectorOps.h"
+
 #include "FiniteCellEigensolver.h"
 
 #include "GeneralizedEigenSolver.h"
@@ -23,6 +26,8 @@
 #include <stdexcept>
 #include <vector>
 
+using numeric::CholeskyInverse, numeric::GeneralizedSelfAdjointEigenSolve, numeric::Matrix, numeric::MatrixView, numeric::Vector, numeric::VectorView;
+
 namespace {
 using Clock = std::chrono::steady_clock;
 constexpr uint32_t LocalDofs{3 * modal::FiniteCellOperator::NodesPerCell};
@@ -32,13 +37,13 @@ double SecondsSince(Clock::time_point start) {
     return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
-void RemoveLeadingColumns(numeric::Matrix<double> &matrix, uint32_t count) {
+void RemoveLeadingColumns(Matrix<double> &matrix, uint32_t count) {
     const size_t remaining = matrix.cols() - count;
     std::memmove(matrix.data(), matrix.data() + matrix.rows() * count, matrix.rows() * remaining * sizeof(double));
     matrix.Resize(matrix.rows(), remaining);
 }
 
-void RemoveLeadingEntries(numeric::Vector<double> &vector, uint32_t count) {
+void RemoveLeadingEntries(Vector<double> &vector, uint32_t count) {
     const size_t remaining = vector.size() - count;
     std::memmove(vector.data(), vector.data() + count, remaining * sizeof(double));
     vector.Resize(remaining);
@@ -85,158 +90,158 @@ struct Actions {
     }
 };
 
-numeric::Matrix<double> SymmetricCrossGram(const numeric::Matrix<double> &a, const numeric::Matrix<double> &b) {
+Matrix<double> SymmetricCrossGram(const Matrix<double> &a, const Matrix<double> &b) {
     if (a.rows() != b.rows() || a.cols() != b.cols())
         throw std::invalid_argument("Symmetric cross-Gram operands must have equal dimensions.");
-    numeric::Matrix<double> result(a.cols(), a.cols());
+    Matrix<double> result(a.cols(), a.cols());
     numeric::SymmetricCrossGram(a.data(), b.data(), result.data(), uint32_t(a.rows()), uint32_t(a.cols()));
     return result;
 }
 
-void SetResiduals(modal::FiniteCellEigenpairs &result, const numeric::Matrix<double> &mass_vectors, const numeric::Matrix<double> &shifted_vectors, double alpha) {
+void SetResiduals(modal::FiniteCellEigenpairs &result, const Matrix<double> &mass_vectors, const Matrix<double> &shifted_vectors, double alpha) {
     const size_t count = result.Eigenvalues.size();
     const auto mass = mass_vectors.FirstColumns(count);
-    numeric::Matrix<double> stiffness = numeric::Copy(shifted_vectors.FirstColumns(count));
-    numeric::AddScaled(-alpha, mass, stiffness.View());
-    const numeric::Matrix<double> residual = numeric::ColumnScaledDifference(stiffness.View(), mass, result.Eigenvalues.View());
+    Matrix<double> stiffness = Copy(shifted_vectors.FirstColumns(count));
+    AddScaled(-alpha, mass, stiffness.View());
+    const Matrix<double> residual = ColumnScaledDifference(stiffness.View(), mass, result.Eigenvalues.View());
     result.RelativeResiduals.Resize(count);
     for (size_t mode = 0; mode < count; ++mode) {
-        const double scale = numeric::Norm(stiffness.Column(mode)) + std::abs(result.Eigenvalues[mode]) * numeric::Norm(mass.Column(mode));
-        const double residual_norm = numeric::Norm(residual.Column(mode));
+        const double scale = Norm(stiffness.Column(mode)) + std::abs(result.Eigenvalues[mode]) * Norm(mass.Column(mode));
+        const double residual_norm = Norm(residual.Column(mode));
         result.RelativeResiduals[mode] = scale == 0 ? residual_norm : residual_norm / scale;
     }
 }
 
 void RotateTallTriple(
-    const numeric::Matrix<double> &a, const numeric::Matrix<double> &b, const numeric::Matrix<double> &c,
-    const numeric::Matrix<double> &rotation, numeric::Matrix<double> &a_rotated, numeric::Matrix<double> &b_rotated,
-    numeric::Matrix<double> &c_rotated
+    const Matrix<double> &a, const Matrix<double> &b, const Matrix<double> &c,
+    const Matrix<double> &rotation, Matrix<double> &a_rotated, Matrix<double> &b_rotated,
+    Matrix<double> &c_rotated
 ) {
     a_rotated.Resize(a.rows(), rotation.cols());
     b_rotated.Resize(b.rows(), rotation.cols());
     c_rotated.Resize(c.rows(), rotation.cols());
-    auto b_future = std::async(std::launch::async, [&] { numeric::Multiply(b.View(), rotation.View(), b_rotated.View()); });
-    auto c_future = std::async(std::launch::async, [&] { numeric::Multiply(c.View(), rotation.View(), c_rotated.View()); });
-    numeric::Multiply(a.View(), rotation.View(), a_rotated.View());
+    auto b_future = std::async(std::launch::async, [&] { Multiply(b.View(), rotation.View(), b_rotated.View()); });
+    auto c_future = std::async(std::launch::async, [&] { Multiply(c.View(), rotation.View(), c_rotated.View()); });
+    Multiply(a.View(), rotation.View(), a_rotated.View());
     b_future.get();
     c_future.get();
 }
 
 // Replaces `vectors` with an M-orthonormal basis and returns false when fewer than `required` independent directions remain.
-bool MOrthonormalize(Actions &actions, numeric::Matrix<double> &vectors, numeric::Matrix<double> &mass_vectors, uint32_t required) {
+bool MOrthonormalize(Actions &actions, Matrix<double> &vectors, Matrix<double> &mass_vectors, uint32_t required) {
     mass_vectors.Resize(actions.Fem.Dofs(), vectors.cols());
     actions.ApplyMass(vectors.data(), mass_vectors.data(), uint32_t(vectors.cols()));
-    numeric::Vector<double> inverse_norm(vectors.cols());
+    Vector<double> inverse_norm(vectors.cols());
     for (size_t column = 0; column < vectors.cols(); ++column)
-        inverse_norm[column] = 1 / std::sqrt(numeric::Dot(vectors.Column(column), mass_vectors.Column(column)));
-    if (!numeric::AllFinite(inverse_norm.View())) return false;
-    auto mass_scale = std::async(std::launch::async, [&] { numeric::ScaleColumns(mass_vectors.View(), inverse_norm.View()); });
-    numeric::ScaleColumns(vectors.View(), inverse_norm.View());
+        inverse_norm[column] = 1 / std::sqrt(Dot(vectors.Column(column), mass_vectors.Column(column)));
+    if (!AllFinite(inverse_norm.View())) return false;
+    auto mass_scale = std::async(std::launch::async, [&] { ScaleColumns(mass_vectors.View(), inverse_norm.View()); });
+    ScaleColumns(vectors.View(), inverse_norm.View());
     mass_scale.get();
-    numeric::Matrix<double> gram = numeric::TransposeMultiply(vectors.View(), mass_vectors.View());
-    numeric::Symmetrize(gram.View());
-    numeric::Vector<double> values;
+    Matrix<double> gram = TransposeMultiply(vectors.View(), mass_vectors.View());
+    Symmetrize(gram.View());
+    Vector<double> values;
     if (!modal::eigensolver::SelfAdjointEigenvectors(gram, values)) return false;
-    const double threshold = numeric::MaximumAbsolute(values.View()) * 1e-12;
+    const double threshold = MaximumAbsolute(values.View()) * 1e-12;
     size_t first{};
     while (first < values.size() && values[first] <= threshold) ++first;
     const size_t retained = values.size() - first;
     if (retained < required) return false;
-    numeric::Matrix<double> transform = numeric::Copy(gram.LastColumns(retained));
-    numeric::Vector<double> inverse_sqrt(retained);
+    Matrix<double> transform = Copy(gram.LastColumns(retained));
+    Vector<double> inverse_sqrt(retained);
     for (size_t column = 0; column < retained; ++column) inverse_sqrt[column] = 1 / std::sqrt(values[first + column]);
-    numeric::ScaleColumns(transform.View(), inverse_sqrt.View());
-    numeric::Matrix<double> rotated_mass;
-    auto mass_rotation = std::async(std::launch::async, [&] { rotated_mass = numeric::Multiply(mass_vectors.View(), transform.View()); });
-    vectors = numeric::Multiply(vectors.View(), transform.View());
+    ScaleColumns(transform.View(), inverse_sqrt.View());
+    Matrix<double> rotated_mass;
+    auto mass_rotation = std::async(std::launch::async, [&] { rotated_mass = Multiply(mass_vectors.View(), transform.View()); });
+    vectors = Multiply(vectors.View(), transform.View());
     mass_rotation.get();
     mass_vectors = std::move(rotated_mass);
     return true;
 }
 
 bool Ritz(
-    Actions &actions, double alpha, numeric::Matrix<double> &space, numeric::Matrix<double> &mass_space, uint32_t count,
-    numeric::Matrix<double> &vectors, numeric::Matrix<double> &mass_vectors, numeric::Matrix<double> &shifted_vectors,
-    numeric::Vector<double> &values, double &seconds
+    Actions &actions, double alpha, Matrix<double> &space, Matrix<double> &mass_space, uint32_t count,
+    Matrix<double> &vectors, Matrix<double> &mass_vectors, Matrix<double> &shifted_vectors,
+    Vector<double> &values, double &seconds
 ) {
     const auto start = Clock::now();
     const double action_start = actions.Seconds;
     if (!MOrthonormalize(actions, space, mass_space, count)) return false;
-    numeric::Matrix<double> shifted_space(actions.Fem.Dofs(), space.cols());
+    Matrix<double> shifted_space(actions.Fem.Dofs(), space.cols());
     actions.ApplyShifted(space.data(), shifted_space.data(), uint32_t(space.cols()), alpha);
-    numeric::Matrix<double> projected = numeric::TransposeMultiply(space.View(), shifted_space.View());
-    numeric::Symmetrize(projected.View());
-    numeric::Vector<double> projected_values;
+    Matrix<double> projected = TransposeMultiply(space.View(), shifted_space.View());
+    Symmetrize(projected.View());
+    Vector<double> projected_values;
     if (!modal::eigensolver::SelfAdjointEigenvectors(projected, projected_values)) return false;
-    numeric::Matrix<double> rotation = numeric::Copy(projected.FirstColumns(count));
+    Matrix<double> rotation = Copy(projected.FirstColumns(count));
     RotateTallTriple(space, mass_space, shifted_space, rotation, vectors, mass_vectors, shifted_vectors);
-    values = numeric::Copy(projected_values.First(count));
+    values = Copy(projected_values.First(count));
     seconds += SecondsSince(start) - (actions.Seconds - action_start);
     return true;
 }
 
 // Returns Rayleigh-Ritz pairs from a subspace and its precomputed mass and shifted actions.
 bool RitzFromActions(
-    numeric::Matrix<double> &space, numeric::Matrix<double> &mass_space, numeric::Matrix<double> &shifted_space,
-    uint32_t count, numeric::Matrix<double> &vectors, numeric::Matrix<double> &mass_vectors,
-    numeric::Matrix<double> &shifted_vectors, numeric::Vector<double> &values, double &seconds,
-    const numeric::Matrix<double> &locked_vectors, const numeric::Matrix<double> &locked_mass_vectors,
-    const numeric::Vector<double> &locked_values, uint32_t locked_count
+    Matrix<double> &space, Matrix<double> &mass_space, Matrix<double> &shifted_space,
+    uint32_t count, Matrix<double> &vectors, Matrix<double> &mass_vectors,
+    Matrix<double> &shifted_vectors, Vector<double> &values, double &seconds,
+    const Matrix<double> &locked_vectors, const Matrix<double> &locked_mass_vectors,
+    const Vector<double> &locked_values, uint32_t locked_count
 ) {
     const auto start = Clock::now();
     if (locked_count) {
-        const numeric::Matrix<double> overlap = numeric::TransposeMultiply(locked_vectors.FirstColumns(locked_count), mass_space.View());
+        const Matrix<double> overlap = TransposeMultiply(locked_vectors.FirstColumns(locked_count), mass_space.View());
         auto mass_projection = std::async(std::launch::async, [&] {
-            numeric::SubtractProduct(mass_space.View(), locked_mass_vectors.FirstColumns(locked_count), overlap.View());
+            SubtractProduct(mass_space.View(), locked_mass_vectors.FirstColumns(locked_count), overlap.View());
         });
         auto shifted_projection = std::async(std::launch::async, [&] {
-            numeric::Matrix<double> weighted = numeric::Copy(overlap.View());
+            Matrix<double> weighted = Copy(overlap.View());
             modal::eigensolver::ScaleRows(weighted.View(), locked_values.First(locked_count));
-            numeric::SubtractProduct(shifted_space.View(), locked_mass_vectors.FirstColumns(locked_count), weighted.View());
+            SubtractProduct(shifted_space.View(), locked_mass_vectors.FirstColumns(locked_count), weighted.View());
         });
-        numeric::SubtractProduct(space.View(), locked_vectors.FirstColumns(locked_count), overlap.View());
+        SubtractProduct(space.View(), locked_vectors.FirstColumns(locked_count), overlap.View());
         mass_projection.get();
         shifted_projection.get();
     }
     auto mass_gram = std::async(std::launch::async, [&] { return SymmetricCrossGram(space, mass_space); });
-    numeric::Matrix<double> projected = SymmetricCrossGram(space, shifted_space);
-    numeric::Matrix<double> gram = mass_gram.get();
-    numeric::Vector<double> inverse_norm(space.cols());
+    Matrix<double> projected = SymmetricCrossGram(space, shifted_space);
+    Matrix<double> gram = mass_gram.get();
+    Vector<double> inverse_norm(space.cols());
     for (size_t column = 0; column < space.cols(); ++column)
-        inverse_norm[column] = 1 / std::sqrt(numeric::Dot(space.Column(column), mass_space.Column(column)));
-    if (!numeric::AllFinite(inverse_norm.View())) return false;
-    numeric::ScaleRowsAndColumns(gram.View(), inverse_norm.View());
-    numeric::Symmetrize(gram.View());
-    numeric::Vector<double> mass_values;
+        inverse_norm[column] = 1 / std::sqrt(Dot(space.Column(column), mass_space.Column(column)));
+    if (!AllFinite(inverse_norm.View())) return false;
+    ScaleRowsAndColumns(gram.View(), inverse_norm.View());
+    Symmetrize(gram.View());
+    Vector<double> mass_values;
     if (!modal::eigensolver::SelfAdjointEigenvectors(gram, mass_values)) return false;
-    const double threshold = numeric::MaximumAbsolute(mass_values.View()) * 1e-12;
+    const double threshold = MaximumAbsolute(mass_values.View()) * 1e-12;
     size_t first{};
     while (first < mass_values.size() && mass_values[first] <= threshold) ++first;
     const size_t retained = mass_values.size() - first;
     if (retained < count) return false;
-    numeric::Matrix<double> transform = numeric::Copy(gram.LastColumns(retained));
+    Matrix<double> transform = Copy(gram.LastColumns(retained));
     modal::eigensolver::ScaleRows(transform.View(), inverse_norm.View());
-    numeric::Vector<double> inverse_sqrt(retained);
+    Vector<double> inverse_sqrt(retained);
     for (size_t column = 0; column < retained; ++column) inverse_sqrt[column] = 1 / std::sqrt(mass_values[first + column]);
-    numeric::ScaleColumns(transform.View(), inverse_sqrt.View());
-    projected = numeric::TransposeMultiply(transform.View(), numeric::Multiply(projected.View(), transform.View()).View());
-    numeric::Symmetrize(projected.View());
-    numeric::Vector<double> projected_values;
+    ScaleColumns(transform.View(), inverse_sqrt.View());
+    projected = TransposeMultiply(transform.View(), Multiply(projected.View(), transform.View()).View());
+    Symmetrize(projected.View());
+    Vector<double> projected_values;
     if (!modal::eigensolver::SelfAdjointEigenvectors(projected, projected_values)) return false;
     // Combining mass orthonormalization with Ritz rotation applies one transform to each tall matrix.
-    const numeric::Matrix<double> rotation = numeric::Multiply(transform.View(), projected.FirstColumns(count));
+    const Matrix<double> rotation = Multiply(transform.View(), projected.FirstColumns(count));
     RotateTallTriple(space, mass_space, shifted_space, rotation, vectors, mass_vectors, shifted_vectors);
-    values = numeric::Copy(projected_values.First(count));
+    values = Copy(projected_values.First(count));
     seconds += SecondsSince(start);
     return true;
 }
 
 // Returns a Gaussian basis whose leading columns contain the prolonged P1 eigenbasis and four guard vectors.
-numeric::Matrix<double> InitialSpace(
+Matrix<double> InitialSpace(
     const modal::FiniteCellOperator &fem, uint32_t width, double alpha,
     const modal::AssembledPencil &p1
 ) {
-    numeric::Matrix<double> result(fem.Dofs(), width);
+    Matrix<double> result(fem.Dofs(), width);
     std::mt19937_64 random{20260828};
     std::normal_distribution<double> gaussian;
     const auto fill_random = [&](uint32_t first) {
@@ -332,7 +337,7 @@ MetalPatchData BuildMetalPatchData(const modal::FiniteCellOperator &fem, double 
                     neighbors[neighbor_count++] = neighbor;
                 }
             }
-            numeric::Matrix<double> principal(LocalDofs, LocalDofs);
+            Matrix<double> principal(LocalDofs, LocalDofs);
             for (const uint32_t neighbor : std::span{neighbors}.first(neighbor_count)) {
                 const auto &source = context.Fem.Cells[neighbor];
                 std::array<int32_t, modal::FiniteCellOperator::NodesPerCell> target_local;
@@ -358,7 +363,7 @@ MetalPatchData BuildMetalPatchData(const modal::FiniteCellOperator &fem, double 
                     }
                 }
             }
-            if (!numeric::CholeskyInverse(principal.data(), LocalDofs)) {
+            if (!CholeskyInverse(principal.data(), LocalDofs)) {
                 context.Failed = true;
                 return;
             }
@@ -466,36 +471,36 @@ modal::FiniteCellEigenpairs SolveFactorFreeMetal(
     });
     const uint32_t requested_count = count;
     uint32_t width = std::min<uint32_t>(fem.Dofs(), count + std::min(guard_vectors, count));
-    numeric::Matrix<double> space = InitialSpace(fem, width, alpha, *p1_assembly);
+    Matrix<double> space = InitialSpace(fem, width, alpha, *p1_assembly);
     initialization_seconds += SecondsSince(initialization_start);
-    numeric::Matrix<double> mass_space, vectors, mass_vectors, shifted_vectors;
-    numeric::Vector<double> shifted_values;
+    Matrix<double> mass_space, vectors, mass_vectors, shifted_vectors;
+    Vector<double> shifted_values;
     if (!Ritz(actions, alpha, space, mass_space, width, vectors, mass_vectors, shifted_vectors, shifted_values, ritz_seconds)) {
         result.Iterations = std::numeric_limits<uint32_t>::max();
         return finish();
     }
-    const auto relative_residual = [alpha](numeric::VectorView<const double> mass, numeric::VectorView<const double> shifted, numeric::VectorView<const double> residual, double shifted_value) {
+    const auto relative_residual = [alpha](VectorView<const double> mass, VectorView<const double> shifted, VectorView<const double> residual, double shifted_value) {
         double stiffness_squared{};
         for (size_t row = 0; row < mass.size(); ++row) stiffness_squared += std::pow(shifted[row] - alpha * mass[row], 2);
-        const double scale = std::sqrt(stiffness_squared) + std::abs(shifted_value - alpha) * numeric::Norm(mass);
-        const double residual_norm = numeric::Norm(residual);
+        const double scale = std::sqrt(stiffness_squared) + std::abs(shifted_value - alpha) * Norm(mass);
+        const double residual_norm = Norm(residual);
         return scale == 0 ? residual_norm : residual_norm / scale;
     };
     uint32_t locked_count = count > 6 ? 6 : 0;
-    numeric::Matrix<double> locked_vectors, locked_mass_vectors;
-    numeric::Vector<double> locked_values, locked_relative;
+    Matrix<double> locked_vectors, locked_mass_vectors;
+    Vector<double> locked_values, locked_relative;
     if (locked_count) {
         locked_vectors.Resize(fem.Dofs(), requested_count);
         locked_mass_vectors.Resize(fem.Dofs(), requested_count);
         locked_values.Resize(requested_count);
         locked_relative.Resize(requested_count);
-        numeric::Copy(vectors.FirstColumns(locked_count), locked_vectors.FirstColumns(locked_count));
-        numeric::Copy(mass_vectors.FirstColumns(locked_count), locked_mass_vectors.FirstColumns(locked_count));
-        numeric::Copy(shifted_values.First(locked_count), locked_values.First(locked_count));
+        Copy(vectors.FirstColumns(locked_count), locked_vectors.FirstColumns(locked_count));
+        Copy(mass_vectors.FirstColumns(locked_count), locked_mass_vectors.FirstColumns(locked_count));
+        Copy(shifted_values.First(locked_count), locked_values.First(locked_count));
         for (uint32_t mode = 0; mode < locked_count; ++mode) {
-            numeric::Vector<double> residual(fem.Dofs());
-            numeric::Copy(shifted_vectors.Column(mode), residual.View());
-            numeric::AddScaled(-shifted_values[mode], mass_vectors.Column(mode), residual.View());
+            Vector<double> residual(fem.Dofs());
+            Copy(shifted_vectors.Column(mode), residual.View());
+            AddScaled(-shifted_values[mode], mass_vectors.Column(mode), residual.View());
             locked_relative[mode] = relative_residual(mass_vectors.Column(mode), shifted_vectors.Column(mode), residual.View(), shifted_values[mode]);
         }
         RemoveLeadingColumns(vectors, locked_count);
@@ -507,26 +512,26 @@ modal::FiniteCellEigenpairs SolveFactorFreeMetal(
     }
     // The six rigid-body eigenvalues equal the shift within the configured relative threshold.
     const auto rigid = [&](uint32_t mode) { return std::abs(shifted_values[mode] - alpha) <= alpha * 1e-4; };
-    const auto accept = [&](const numeric::Vector<double> &active_relative) {
+    const auto accept = [&](const Vector<double> &active_relative) {
         result.Eigenvalues.Resize(requested_count);
         result.Eigenvectors.Resize(fem.Dofs(), requested_count);
         result.RelativeResiduals.Resize(requested_count);
         if (locked_count) {
             for (uint32_t mode = 0; mode < locked_count; ++mode) result.Eigenvalues[mode] = locked_values[mode] - alpha;
-            numeric::Copy(locked_vectors.FirstColumns(locked_count), result.Eigenvectors.FirstColumns(locked_count));
-            numeric::Copy(locked_relative.First(locked_count), result.RelativeResiduals.First(locked_count));
+            Copy(locked_vectors.FirstColumns(locked_count), result.Eigenvectors.FirstColumns(locked_count));
+            Copy(locked_relative.First(locked_count), result.RelativeResiduals.First(locked_count));
         }
         for (uint32_t mode = 0; mode < count; ++mode) result.Eigenvalues[locked_count + mode] = shifted_values[mode] - alpha;
-        numeric::Copy(vectors.FirstColumns(count), result.Eigenvectors.LastColumns(count));
-        numeric::Copy(active_relative.First(count), result.RelativeResiduals.Last(count));
+        Copy(vectors.FirstColumns(count), result.Eigenvectors.LastColumns(count));
+        Copy(active_relative.First(count), result.RelativeResiduals.Last(count));
     };
     const auto wait_start = Clock::now();
     auto preconditioner = preconditioner_setup_future.get();
     preconditioner_setup_seconds = SecondsSince(wait_start);
     p1_assembly.reset();
     actions.PackedCut = std::move(preconditioner.CutActions);
-    numeric::Matrix<float> compact_previous_direction;
-    numeric::Matrix<double> previous_mass_direction, previous_shifted_direction;
+    Matrix<float> compact_previous_direction;
+    Matrix<double> previous_mass_direction, previous_shifted_direction;
     std::future<double> previous_actions;
     const auto wait_previous_actions = [&] {
         if (!previous_actions.valid()) return;
@@ -539,8 +544,8 @@ modal::FiniteCellEigenpairs SolveFactorFreeMetal(
     for (uint32_t iteration = 0; iteration < max_iterations; ++iteration) {
         const auto residual_start = Clock::now();
         const double residual_action_start = actions.Seconds;
-        numeric::Matrix<double> residual = numeric::ColumnScaledDifference(shifted_vectors.View(), mass_vectors.View(), shifted_values.View());
-        numeric::Vector<double> relative(width);
+        Matrix<double> residual = ColumnScaledDifference(shifted_vectors.View(), mass_vectors.View(), shifted_values.View());
+        Vector<double> relative(width);
         const auto update_relative = [&] {
             for (uint32_t i = 0; i < width; ++i)
                 relative[i] = relative_residual(
@@ -560,7 +565,7 @@ modal::FiniteCellEigenpairs SolveFactorFreeMetal(
             wait_previous_actions();
             // Recompute the residual from exact actions before accepting a recurrence-driven convergence.
             actions.ApplyMassShifted(vectors.data(), mass_vectors.data(), shifted_vectors.data(), width, alpha);
-            residual = numeric::ColumnScaledDifference(shifted_vectors.View(), mass_vectors.View(), shifted_values.View());
+            residual = ColumnScaledDifference(shifted_vectors.View(), mass_vectors.View(), shifted_values.View());
             update_relative();
             converged = is_converged();
         }
@@ -574,11 +579,11 @@ modal::FiniteCellEigenpairs SolveFactorFreeMetal(
         while (newly_locked < count && relative[newly_locked] < tolerance) ++newly_locked;
         if (newly_locked) {
             wait_previous_actions();
-            numeric::Matrix<double> exact_mass(fem.Dofs(), newly_locked), exact_shifted(fem.Dofs(), newly_locked);
+            Matrix<double> exact_mass(fem.Dofs(), newly_locked), exact_shifted(fem.Dofs(), newly_locked);
             actions.ApplyMassShifted(vectors.data(), exact_mass.data(), exact_shifted.data(), newly_locked, alpha);
-            numeric::Copy(exact_mass.View(), mass_vectors.FirstColumns(newly_locked));
-            numeric::Copy(exact_shifted.View(), shifted_vectors.FirstColumns(newly_locked));
-            residual = numeric::ColumnScaledDifference(shifted_vectors.View(), mass_vectors.View(), shifted_values.View());
+            Copy(exact_mass.View(), mass_vectors.FirstColumns(newly_locked));
+            Copy(exact_shifted.View(), shifted_vectors.FirstColumns(newly_locked));
+            residual = ColumnScaledDifference(shifted_vectors.View(), mass_vectors.View(), shifted_values.View());
             update_relative();
             newly_locked = 0;
             while (newly_locked < count && relative[newly_locked] < tolerance) ++newly_locked;
@@ -618,10 +623,10 @@ modal::FiniteCellEigenpairs SolveFactorFreeMetal(
             wait_previous_actions();
             const uint32_t old_locked = locked_count;
             locked_count += newly_locked;
-            numeric::Copy(vectors.FirstColumns(newly_locked), locked_vectors.ColumnsAt(old_locked, newly_locked));
-            numeric::Copy(mass_vectors.FirstColumns(newly_locked), locked_mass_vectors.ColumnsAt(old_locked, newly_locked));
-            numeric::Copy(shifted_values.First(newly_locked), locked_values.Subvector(old_locked, newly_locked));
-            numeric::Copy(relative.First(newly_locked), locked_relative.Subvector(old_locked, newly_locked));
+            Copy(vectors.FirstColumns(newly_locked), locked_vectors.ColumnsAt(old_locked, newly_locked));
+            Copy(mass_vectors.FirstColumns(newly_locked), locked_mass_vectors.ColumnsAt(old_locked, newly_locked));
+            Copy(shifted_values.First(newly_locked), locked_values.Subvector(old_locked, newly_locked));
+            Copy(relative.First(newly_locked), locked_relative.Subvector(old_locked, newly_locked));
             RemoveLeadingColumns(vectors, newly_locked);
             RemoveLeadingColumns(mass_vectors, newly_locked);
             RemoveLeadingColumns(shifted_vectors, newly_locked);
@@ -639,18 +644,18 @@ modal::FiniteCellEigenpairs SolveFactorFreeMetal(
         active.reserve(width);
         for (uint32_t i = 0; i < width; ++i)
             if (i >= count || (!rigid(i) && relative[i] >= tolerance)) active.push_back(i);
-        numeric::Matrix<double> active_residual(fem.Dofs(), active.size());
-        for (uint32_t i = 0; i < active.size(); ++i) numeric::Copy(residual.Column(active[i]), active_residual.Column(i));
+        Matrix<double> active_residual(fem.Dofs(), active.size());
+        for (uint32_t i = 0; i < active.size(); ++i) Copy(residual.Column(active[i]), active_residual.Column(i));
         residual.Clear();
 
         const size_t correction_columns = active.size();
         const size_t history_columns = compact_previous_direction.cols();
         space.Resize(fem.Dofs(), width + correction_columns + history_columns);
         mass_space.Resize(space.rows(), space.cols());
-        numeric::Matrix<double> shifted_space(fem.Dofs(), space.cols());
-        numeric::Copy(vectors.View(), space.FirstColumns(width));
-        numeric::Copy(mass_vectors.View(), mass_space.FirstColumns(width));
-        numeric::Copy(shifted_vectors.View(), shifted_space.FirstColumns(width));
+        Matrix<double> shifted_space(fem.Dofs(), space.cols());
+        Copy(vectors.View(), space.FirstColumns(width));
+        Copy(mass_vectors.View(), mass_space.FirstColumns(width));
+        Copy(shifted_vectors.View(), shifted_space.FirstColumns(width));
         const auto preconditioner_start = Clock::now();
         preconditioner.Apply(
             active_residual.data(), space.ColumnsAt(width, correction_columns).data(), uint32_t(active.size())
@@ -663,10 +668,10 @@ modal::FiniteCellEigenpairs SolveFactorFreeMetal(
         );
         active_residual.Clear();
         if (history_columns) {
-            const auto history = numeric::Cast<double>(compact_previous_direction.View());
-            numeric::Copy(history.View(), space.LastColumns(history_columns));
-            numeric::Copy(previous_mass_direction.View(), mass_space.LastColumns(history_columns));
-            numeric::Copy(previous_shifted_direction.View(), shifted_space.LastColumns(history_columns));
+            const auto history = Cast<double>(compact_previous_direction.View());
+            Copy(history.View(), space.LastColumns(history_columns));
+            Copy(previous_mass_direction.View(), mass_space.LastColumns(history_columns));
+            Copy(previous_shifted_direction.View(), shifted_space.LastColumns(history_columns));
         }
         if (!RitzFromActions(
                 space, mass_space, shifted_space, width, vectors, mass_vectors, shifted_vectors,
@@ -680,13 +685,13 @@ modal::FiniteCellEigenpairs SolveFactorFreeMetal(
         previous_shifted_direction.Resize(fem.Dofs(), active.size());
         for (uint32_t i = 0; i < active.size(); ++i) {
             const auto vector = vectors.Column(active[i]);
-            const numeric::MatrixView<const double> vector_matrix{vector.Values, vector.Count, 1, vector.Count};
-            const numeric::Matrix<double> coefficients = numeric::TransposeMultiply(mass_space.FirstColumns(width), vector_matrix);
-            const numeric::Matrix<double> projection = numeric::Multiply(space.FirstColumns(width), coefficients.View());
+            const MatrixView<const double> vector_matrix{vector.Values, vector.Count, 1, vector.Count};
+            const Matrix<double> coefficients = TransposeMultiply(mass_space.FirstColumns(width), vector_matrix);
+            const Matrix<double> projection = Multiply(space.FirstColumns(width), coefficients.View());
             for (size_t row = 0; row < vector.Count; ++row) compact_previous_direction(row, i) = float(vector[row] - projection(row, 0));
         }
         previous_actions = std::async(std::launch::async, [&] {
-            const numeric::Matrix<double> direction = numeric::Cast<double>(compact_previous_direction.View());
+            const Matrix<double> direction = Cast<double>(compact_previous_direction.View());
             return actions.ApplyMassShiftedTimed(
                 direction.data(), previous_mass_direction.data(), previous_shifted_direction.data(),
                 uint32_t(direction.cols()), alpha
@@ -700,8 +705,8 @@ modal::FiniteCellEigenpairs SolveFactorFreeMetal(
 
     wait_previous_actions();
     const auto residual_start = Clock::now();
-    const numeric::Matrix<double> residual = numeric::ColumnScaledDifference(shifted_vectors.FirstColumns(count), mass_vectors.FirstColumns(count), shifted_values.First(count));
-    numeric::Vector<double> relative(count);
+    const Matrix<double> residual = ColumnScaledDifference(shifted_vectors.FirstColumns(count), mass_vectors.FirstColumns(count), shifted_values.First(count));
+    Vector<double> relative(count);
     for (uint32_t i = 0; i < count; ++i)
         relative[i] = relative_residual(
             mass_vectors.Column(i), shifted_vectors.Column(i), residual.Column(i), shifted_values[i]
@@ -720,8 +725,8 @@ modal::FiniteCellEigenpairs modal::SolveFiniteCellEigenpairs(
     auto factor_free = SolveFactorFreeMetal(fem, count, alpha, tolerance, max_iterations);
     const uint32_t first_physical = std::min(6u, count), physical_count = count - first_physical;
     const auto converged = [&](const FiniteCellEigenpairs &result) {
-        return result.Eigenvalues.size() == count && result.RelativeResiduals.size() == count && numeric::AllFinite(result.Eigenvalues.View()) && numeric::AllFinite(result.RelativeResiduals.View()) &&
-            (!physical_count || numeric::Maximum(result.RelativeResiduals.Subvector(first_physical, physical_count)) < tolerance);
+        return result.Eigenvalues.size() == count && result.RelativeResiduals.size() == count && AllFinite(result.Eigenvalues.View()) && AllFinite(result.RelativeResiduals.View()) &&
+            (!physical_count || Maximum(result.RelativeResiduals.Subvector(first_physical, physical_count)) < tolerance);
     };
     if (converged(factor_free)) return factor_free;
     const double attempt_seconds = SecondsSince(start);
@@ -729,14 +734,14 @@ modal::FiniteCellEigenpairs modal::SolveFiniteCellEigenpairs(
     const bool attempt_stagnated = factor_free.Profile.Stagnated;
     const bool attempt_converged = factor_free.RelativeResiduals.size() == count;
     const double attempt_residual = attempt_converged && physical_count ?
-        numeric::Maximum(factor_free.RelativeResiduals.Subvector(first_physical, physical_count)) :
+        Maximum(factor_free.RelativeResiduals.Subvector(first_physical, physical_count)) :
         physical_count ? std::numeric_limits<double>::infinity() :
                          0;
     factor_free = {};
     auto assembled = finite_cell::SolveAssembledEigenpairs(fem, count, alpha, tolerance, max_iterations);
     if (!converged(assembled)) {
         const double residual = assembled.RelativeResiduals.size() == count && physical_count ?
-            numeric::Maximum(assembled.RelativeResiduals.Subvector(first_physical, physical_count)) :
+            Maximum(assembled.RelativeResiduals.Subvector(first_physical, physical_count)) :
             std::numeric_limits<double>::infinity();
         throw std::runtime_error(std::format("Finite-cell solvers did not converge: fallback returned {} of {} modes, physical residual {:.3e} (tolerance {:.3e}).", assembled.Eigenvalues.size(), count, residual, tolerance));
     }
@@ -760,18 +765,18 @@ modal::FiniteCellEigenpairs modal::finite_cell::SolveAssembledEigenpairs(
     result.Profile.Actions = SecondsSince(assembly_start);
     if (fem.Dofs() <= 2048 && count * 8 >= fem.Dofs()) {
         const auto dense_start = Clock::now();
-        numeric::Matrix<double> dense_stiffness = assembled.Stiffness.DenseSymmetric();
-        numeric::Matrix<double> dense_mass = assembled.Mass.DenseSymmetric();
-        numeric::Vector<double> eigenvalues(fem.Dofs());
-        if (numeric::GeneralizedSelfAdjointEigenSolve(
+        Matrix<double> dense_stiffness = assembled.Stiffness.DenseSymmetric();
+        Matrix<double> dense_mass = assembled.Mass.DenseSymmetric();
+        Vector<double> eigenvalues(fem.Dofs());
+        if (GeneralizedSelfAdjointEigenSolve(
                 dense_stiffness.data(), dense_mass.data(), eigenvalues.data(), fem.Dofs()
             )) {
             result.Profile.RayleighRitz = SecondsSince(dense_start);
-            result.Eigenvalues = numeric::Copy(eigenvalues.First(count));
-            result.Eigenvectors = numeric::Copy(dense_stiffness.FirstColumns(count));
+            result.Eigenvalues = Copy(eigenvalues.First(count));
+            result.Eigenvectors = Copy(dense_stiffness.FirstColumns(count));
             const auto residual_start = Clock::now();
-            const numeric::Matrix<double> mass_vectors = numeric::SymmetricMultiply(assembled.Mass, result.Eigenvectors.View());
-            const numeric::Matrix<double> stiffness_vectors = numeric::SymmetricMultiply(assembled.Stiffness, result.Eigenvectors.View());
+            const Matrix<double> mass_vectors = SymmetricMultiply(assembled.Mass, result.Eigenvectors.View());
+            const Matrix<double> stiffness_vectors = SymmetricMultiply(assembled.Stiffness, result.Eigenvectors.View());
             SetResiduals(result, mass_vectors, stiffness_vectors, 0);
             result.Profile.Residuals = SecondsSince(residual_start);
             result.Iterations = 1;
@@ -801,9 +806,9 @@ modal::FiniteCellEigenpairs modal::finite_cell::SolveAssembledEigenpairs(
     result.Iterations = eigensolver.Iterations;
     // Complete candidates can still meet the requested tolerance after physical-action refinement.
     if (eigensolver.Eigenvalues.size() == solve_count) {
-        numeric::Matrix<double> vectors = eigensolver.Eigenvectors;
-        numeric::Vector<double> values = eigensolver.Eigenvalues;
-        numeric::Matrix<double> mass_vectors(fem.Dofs(), solve_count), stiffness_vectors(fem.Dofs(), solve_count);
+        Matrix<double> vectors = eigensolver.Eigenvectors;
+        Vector<double> values = eigensolver.Eigenvalues;
+        Matrix<double> mass_vectors(fem.Dofs(), solve_count), stiffness_vectors(fem.Dofs(), solve_count);
         const uint32_t first_physical = std::min(6u, count), physical_count = count - first_physical;
         double best_residual = std::numeric_limits<double>::infinity();
         Actions actions{fem};
@@ -812,15 +817,15 @@ modal::FiniteCellEigenpairs modal::finite_cell::SolveAssembledEigenpairs(
             // Reapply the physical operator to avoid cancellation in rotated Ritz actions.
             actions.ApplyMassShifted(vectors.data(), mass_vectors.data(), stiffness_vectors.data(), solve_count, 0);
             FiniteCellEigenpairs candidate;
-            candidate.Eigenvalues = numeric::Copy(values.First(count));
-            candidate.Eigenvectors = numeric::Copy(vectors.FirstColumns(count));
+            candidate.Eigenvalues = Copy(values.First(count));
+            candidate.Eigenvectors = Copy(vectors.FirstColumns(count));
             SetResiduals(candidate, mass_vectors, stiffness_vectors, 0);
             const double residual_maximum = physical_count ?
-                numeric::Maximum(candidate.RelativeResiduals.Subvector(first_physical, physical_count)) :
+                Maximum(candidate.RelativeResiduals.Subvector(first_physical, physical_count)) :
                 0;
-            auto gram = numeric::TransposeMultiply(vectors.FirstColumns(count), mass_vectors.FirstColumns(count));
+            auto gram = TransposeMultiply(vectors.FirstColumns(count), mass_vectors.FirstColumns(count));
             for (uint32_t mode = 0; mode < count; ++mode) gram(mode, mode) -= 1;
-            const double orthogonality = numeric::Norm(gram.View());
+            const double orthogonality = Norm(gram.View());
             if (residual_maximum < best_residual && orthogonality < 1e-9) {
                 result.Eigenvalues = std::move(candidate.Eigenvalues);
                 result.Eigenvectors = std::move(candidate.Eigenvectors);
@@ -828,18 +833,18 @@ modal::FiniteCellEigenpairs modal::finite_cell::SolveAssembledEigenpairs(
                 best_residual = residual_maximum;
             }
             if (best_residual < 0.5 * tolerance || refinement == MaxPhysicalRefinements) break;
-            const auto residual = numeric::ColumnScaledDifference(stiffness_vectors.View(), mass_vectors.View(), values.View());
+            const auto residual = ColumnScaledDifference(stiffness_vectors.View(), mass_vectors.View(), values.View());
             std::vector<uint32_t> active;
             for (uint32_t mode = first_physical; mode < count; ++mode)
                 if (candidate.RelativeResiduals[mode] >= 0.5 * tolerance) active.push_back(mode);
-            numeric::Matrix<double> active_residual(fem.Dofs(), active.size());
+            Matrix<double> active_residual(fem.Dofs(), active.size());
             for (uint32_t column = 0; column < active.size(); ++column)
-                numeric::Copy(residual.Column(active[column]), active_residual.Column(column));
-            numeric::Matrix<double> correction(fem.Dofs(), active.size());
+                Copy(residual.Column(active[column]), active_residual.Column(column));
+            Matrix<double> correction(fem.Dofs(), active.size());
             if (!active.empty()) inverse.solve_panel(active_residual.data(), correction.data(), int(active.size()));
-            numeric::Matrix<double> space(fem.Dofs(), solve_count + active.size()), mass_space;
-            numeric::Copy(vectors.View(), space.FirstColumns(solve_count));
-            numeric::Copy(correction.View(), space.LastColumns(active.size()));
+            Matrix<double> space(fem.Dofs(), solve_count + active.size()), mass_space;
+            Copy(vectors.View(), space.FirstColumns(solve_count));
+            Copy(correction.View(), space.LastColumns(active.size()));
             if (!Ritz(
                     actions, alpha, space, mass_space, solve_count, vectors, mass_vectors,
                     stiffness_vectors, values, result.Profile.RayleighRitz

@@ -3,9 +3,11 @@
 #include "numeric/SparseMatrix.h"
 
 namespace modal {
+using numeric::SparseMatrix;
+
 // Stores the lower triangles of assembled mass and stiffness matrices.
 struct AssembledPencil {
-    numeric::SparseMatrix Mass;
-    numeric::SparseMatrix Stiffness;
+    SparseMatrix Mass;
+    SparseMatrix Stiffness;
 };
 } // namespace modal

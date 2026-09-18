@@ -8,9 +8,11 @@
 // A negative sigma makes K - sigma*M positive definite when K is positive semidefinite and M is positive definite.
 // The constructor stores references that accumulate factorization and solve wall-clock time.
 namespace modal::finite_cell {
+using numeric::SparseMatrix;
+
 struct AccelerateShiftInvert {
     AccelerateShiftInvert(
-        const numeric::SparseMatrix &k, const numeric::SparseMatrix &m,
+        const SparseMatrix &k, const SparseMatrix &m,
         double &factorize_seconds, double &solve_seconds
     );
     ~AccelerateShiftInvert();
@@ -19,7 +21,7 @@ struct AccelerateShiftInvert {
     // Solves a column-major panel of `width` right-hand sides in one factor traversal.
     void solve_panel(const double *input, double *output, int width) const;
 
-    const numeric::SparseMatrix &K, &M;
+    const SparseMatrix &K, &M;
     double &FactorizeSeconds, &SolveSeconds;
     std::unique_ptr<AccelerateSparseCholesky> Factor;
 };

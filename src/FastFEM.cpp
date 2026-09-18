@@ -4,8 +4,10 @@
 
 #include <utility>
 
+using numeric::Matrix;
+
 struct fastfem::ModeBasis::Storage {
-    numeric::Matrix<float> Matrix;
+    Matrix<float> Matrix;
 };
 
 namespace {
@@ -33,9 +35,9 @@ modal::SurfaceSolveConfig Import(const fastfem::SurfaceSolveConfig &config) {
 } // namespace
 
 std::expected<fastfem::ModalResult, std::string> fastfem::Surface2Modes(
-    std::span<const Vec3> positions, std::span<const uint32_t> triangle_indices,
-    const AcousticMaterialProperties &material, std::span<const Vec3> excitation_positions,
-    Vec3 baked_scale, Discretization discretization, SurfaceSolveConfig config,
+    std::span<const vec3> positions, std::span<const uint32_t> triangle_indices,
+    const AcousticMaterialProperties &material, std::span<const vec3> excitation_positions,
+    vec3 baked_scale, Discretization discretization, SurfaceSolveConfig config,
     SolveReuse reuse, SolveMonitor *monitor
 ) {
     const modal::SolveReuse imported_reuse{

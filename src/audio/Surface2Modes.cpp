@@ -1,3 +1,6 @@
+#include "numeric/VectorOps.h"
+#include "numeric/dvec3.h"
+
 #include "Surface2Modes.h"
 
 #include "FiniteCellEigensolver.h"
@@ -11,6 +14,8 @@
 #include <exception>
 #include <numbers>
 #include <vector>
+
+using numeric::dvec3;
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -60,7 +65,7 @@ std::expected<modal::ModalResult, std::string> SolveFiniteCell(std::span<const v
     profile.OpSolve = eigenpairs.Profile.Preconditioner;
     profile.Restarts = eigenpairs.Iterations;
     if (eigenpairs.Eigenvalues.size() != count || eigenpairs.Eigenvectors.cols() != count) return std::unexpected("The finite-cell eigensolver did not return the requested modes.");
-    if (eigenpairs.RelativeResiduals.size() == count && count > 6) profile.PhysicalResidual = numeric::Maximum(eigenpairs.RelativeResiduals.Last(count - 6));
+    if (eigenpairs.RelativeResiduals.size() == count && count > 6) profile.PhysicalResidual = Maximum(eigenpairs.RelativeResiduals.Last(count - 6));
     fastfem::SetSolveProgress(monitor, 0.95f, fastfem::SolveStage::SamplingModes);
     if (fastfem::SolveCancelled(monitor)) return modal::ModalResult{};
 
@@ -102,8 +107,8 @@ std::expected<modal::ModalResult, std::string> modal::Surface2Modes(std::span<co
     dvec3 min{std::numeric_limits<double>::infinity()}, max{-std::numeric_limits<double>::infinity()};
     for (const auto point : positions) {
         if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) return std::unexpected("Surface positions must be finite.");
-        min = numeric::Min(min, dvec3{point});
-        max = numeric::Max(max, dvec3{point});
+        min = Min(min, dvec3{point});
+        max = Max(max, dvec3{point});
     }
     for (const auto index : triangle_indices)
         if (index >= positions.size()) return std::unexpected("Surface triangle index is out of range.");

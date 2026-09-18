@@ -1,5 +1,8 @@
 #pragma once
 
+#include "numeric/VectorOps.h"
+#include "numeric/dvec3.h"
+
 // Validates vertex preservation, tetrahedron orientation, face incidence, boundary coverage, input-triangle coverage, and enclosed volume.
 // Returns the first structural defect or an empty string for a valid mesh.
 
@@ -14,18 +17,20 @@
 #include <string>
 
 // Returns true when p lies inside triangle (a, b, c) within a scaled coplanarity tolerance.
+using numeric::dvec3;
+
 inline bool OnTriangle(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &p) {
-    const dvec3 n = numeric::Cross(b - a, c - a);
-    const double n2 = numeric::Dot(n, n);
+    const dvec3 n = Cross(b - a, c - a);
+    const double n2 = Dot(n, n);
     if (n2 == 0) return false;
-    const double scale = std::sqrt(numeric::Dot(b - a, b - a) * numeric::Dot(c - a, c - a));
-    const double dist = numeric::Dot(n, p - a) / std::sqrt(n2);
+    const double scale = std::sqrt(Dot(b - a, b - a) * Dot(c - a, c - a));
+    const double dist = Dot(n, p - a) / std::sqrt(n2);
     if (std::abs(dist) > 1e-9 * std::sqrt(scale)) return false;
     const dvec3 corners[3]{a, b, c};
     for (int e = 0; e < 3; ++e) {
         const dvec3 &u = corners[e], &v = corners[(e + 1) % 3], &w = corners[(e + 2) % 3];
-        const dvec3 inward = numeric::Cross(n, v - u);
-        const double side_p = numeric::Dot(inward, p - u), side_w = numeric::Dot(inward, w - u);
+        const dvec3 inward = Cross(n, v - u);
+        const double side_p = Dot(inward, p - u), side_w = Dot(inward, w - u);
         if (side_w == 0 || side_p / side_w < -1e-9) return false;
     }
     return true;
@@ -112,11 +117,11 @@ inline std::string ValidateTetMesh(std::span<const dvec3> in_points, std::span<c
         double mesh_vol = 0;
         for (const auto &t : mesh.Tets) {
             const dvec3 &a = mesh.Points[t[0]];
-            mesh_vol += numeric::Dot(mesh.Points[t[1]] - a, numeric::Cross(mesh.Points[t[2]] - a, mesh.Points[t[3]] - a));
+            mesh_vol += Dot(mesh.Points[t[1]] - a, Cross(mesh.Points[t[2]] - a, mesh.Points[t[3]] - a));
         }
         double surf_vol = 0;
         for (size_t i = 0; i < in_tris.size(); i += 3)
-            surf_vol += numeric::Dot(in_points[in_tris[i]], numeric::Cross(in_points[in_tris[i + 1]], in_points[in_tris[i + 2]]));
+            surf_vol += Dot(in_points[in_tris[i]], Cross(in_points[in_tris[i + 1]], in_points[in_tris[i + 2]]));
         if (std::abs(std::abs(mesh_vol) - std::abs(surf_vol)) > 1e-6 * std::abs(surf_vol)) return "mesh volume does not match the surface";
     }
     return {};

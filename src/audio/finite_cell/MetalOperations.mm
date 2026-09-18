@@ -1,3 +1,5 @@
+#include "numeric/Vector.h"
+
 #include "MetalOperations.h"
 #include "numeric/Accelerate.h"
 
@@ -19,6 +21,8 @@
 #if FASTFEM_HAS_EMBEDDED_FINITE_CELL_METALLIB
 #include "FiniteCellMetallib.h"
 #endif
+
+using numeric::CholeskyInverse, numeric::Matrix, numeric::MatrixView, numeric::SparseMatrix, numeric::Triplet, numeric::Vector;
 
 namespace {
 constexpr const char *Source = R"metal(
@@ -650,32 +654,32 @@ void RequireTransfer(
         throw std::invalid_argument(std::string{"Finite-cell Metal "} + what);
 }
 
-using Sparse = numeric::SparseMatrix;
+using Sparse = SparseMatrix;
 using GridPoint = std::array<double, 3>;
 
 struct CpuMultigridLevel {
     Sparse Operator, Prolongation{}, Restriction{};
     std::vector<GridPoint> Nodes;
-    numeric::Matrix<float> Inverse{};
+    Matrix<float> Inverse{};
     double Maximum{};
 };
 
 double JacobiMaximum(const Sparse &matrix) {
-    const numeric::Vector<double> diagonal = matrix.Diagonal();
-    numeric::Vector<double> vector(size_t(matrix.rows())), action(size_t(matrix.rows()));
+    const Vector<double> diagonal = matrix.Diagonal();
+    Vector<double> vector(size_t(matrix.rows())), action(size_t(matrix.rows()));
     for (size_t row = 0; row < vector.size(); ++row) vector[row] = std::sin(0.37 * double(row + 1));
     const auto weighted_norm = [&] {
         double sum{};
         for (size_t row = 0; row < vector.size(); ++row) sum += vector[row] * diagonal[row] * vector[row];
         return std::sqrt(sum);
     };
-    numeric::Scale(1 / weighted_norm(), vector.View());
+    Scale(1 / weighted_norm(), vector.View());
     for (uint32_t iteration = 0; iteration < 16; ++iteration) {
-        numeric::Multiply(matrix, numeric::MatrixView<const double>{vector.data(), vector.size(), 1, vector.size()}, numeric::MatrixView<double>{action.data(), action.size(), 1, action.size()});
+        Multiply(matrix, MatrixView<const double>{vector.data(), vector.size(), 1, vector.size()}, MatrixView<double>{action.data(), action.size(), 1, action.size()});
         for (size_t row = 0; row < vector.size(); ++row) vector[row] = action[row] / diagonal[row];
-        numeric::Scale(1 / weighted_norm(), vector.View());
+        Scale(1 / weighted_norm(), vector.View());
     }
-    numeric::Multiply(matrix, numeric::MatrixView<const double>{vector.data(), vector.size(), 1, vector.size()}, numeric::MatrixView<double>{action.data(), action.size(), 1, action.size()});
+    Multiply(matrix, MatrixView<const double>{vector.data(), vector.size(), 1, vector.size()}, MatrixView<double>{action.data(), action.size(), 1, action.size()});
     double numerator{}, denominator{};
     for (size_t row = 0; row < vector.size(); ++row) {
         numerator += vector[row] * action[row];
@@ -715,7 +719,7 @@ std::pair<Sparse, std::vector<GridPoint>> Coarsen(const std::vector<GridPoint> &
 
     std::map<GridPoint, uint32_t> coarse_map;
     std::vector<GridPoint> coarse_nodes;
-    std::vector<numeric::Triplet> scalar_triplets;
+    std::vector<Triplet> scalar_triplets;
     for (uint32_t fine = 0; fine < fine_nodes.size(); ++fine) {
         std::array<std::array<double, 2>, 3> coordinates{}, weights{};
         std::array<uint32_t, 3> counts{};
@@ -745,7 +749,7 @@ std::pair<Sparse, std::vector<GridPoint>> Coarsen(const std::vector<GridPoint> &
                 }
     }
 
-    std::vector<numeric::Triplet> triplets;
+    std::vector<Triplet> triplets;
     triplets.reserve(3 * scalar_triplets.size());
     for (const auto &entry : scalar_triplets)
         for (uint32_t component = 0; component < 3; ++component)
@@ -760,22 +764,22 @@ std::vector<CpuMultigridLevel> BuildP1Hierarchy(
     const modal::FiniteCellOperator &operation, double alpha,
     const modal::AssembledPencil &prepared
 ) {
-    const Sparse stiffness = numeric::ExpandSymmetric(prepared.Stiffness);
-    const Sparse mass = numeric::ExpandSymmetric(prepared.Mass);
-    std::vector<CpuMultigridLevel> result{{.Operator = numeric::Add(stiffness, alpha, mass), .Nodes = P1Nodes(operation)}};
+    const Sparse stiffness = ExpandSymmetric(prepared.Stiffness);
+    const Sparse mass = ExpandSymmetric(prepared.Mass);
+    std::vector<CpuMultigridLevel> result{{.Operator = Add(stiffness, alpha, mass), .Nodes = P1Nodes(operation)}};
     while (result.back().Operator.rows() > 96 && result.size() < 8) {
         auto [prolongation, coarse_nodes] = Coarsen(result.back().Nodes);
         if (prolongation.cols() >= prolongation.rows()) break;
         result.back().Prolongation = std::move(prolongation);
-        result.back().Restriction = numeric::Transpose(result.back().Prolongation);
-        Sparse coarse = numeric::Multiply(numeric::Multiply(result.back().Restriction, result.back().Operator), result.back().Prolongation);
+        result.back().Restriction = Transpose(result.back().Prolongation);
+        Sparse coarse = Multiply(Multiply(result.back().Restriction, result.back().Operator), result.back().Prolongation);
         result.push_back({.Operator = std::move(coarse), .Nodes = std::move(coarse_nodes)});
     }
     for (auto &level : result) level.Maximum = JacobiMaximum(level.Operator);
-    numeric::Matrix<double> coarsest = result.back().Operator.Dense();
-    if (!numeric::CholeskyInverse(coarsest.data(), uint32_t(coarsest.rows())))
+    Matrix<double> coarsest = result.back().Operator.Dense();
+    if (!CholeskyInverse(coarsest.data(), uint32_t(coarsest.rows())))
         throw std::runtime_error("Finite-cell P1 multigrid coarse operator is not positive definite.");
-    result.back().Inverse = numeric::Cast<float>(coarsest.View());
+    result.back().Inverse = Cast<float>(coarsest.View());
     return result;
 }
 
@@ -817,7 +821,7 @@ void modal::finite_cell::MetalOperations::ConfigureP1Multigrid(P1Multigrid &&pre
         };
         const auto sparse = [&](const Sparse &matrix, id<MTLBuffer> __strong &offsets,
                                 id<MTLBuffer> __strong &columns, id<MTLBuffer> __strong &values) {
-            const Sparse transposed = numeric::Transpose(matrix);
+            const Sparse transposed = Transpose(matrix);
             std::vector<uint32_t> row_offsets(size_t(matrix.rows()) + 1), column_indices(matrix.NonZeros());
             std::vector<float> entries(matrix.NonZeros());
             for (int row = 0; row <= matrix.rows(); ++row) row_offsets[row] = uint32_t(transposed.ColumnStarts[row]);
@@ -835,7 +839,7 @@ void modal::finite_cell::MetalOperations::ConfigureP1Multigrid(P1Multigrid &&pre
             level.Rows = uint32_t(source.Operator.rows());
             level.Maximum = float(source.Maximum);
             sparse(source.Operator, level.Offsets, level.Columns, level.Values);
-            const numeric::Vector<double> diagonal = source.Operator.Diagonal();
+            const Vector<double> diagonal = source.Operator.Diagonal();
             std::vector<float> compact_diagonal(diagonal.size());
             std::ranges::transform(diagonal, compact_diagonal.begin(), [](double value) { return float(value); });
             level.Diagonal = buffer(compact_diagonal.data(), compact_diagonal.size() * sizeof(float));

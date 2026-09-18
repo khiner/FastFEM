@@ -1,3 +1,6 @@
+#include "numeric/VectorOps.h"
+#include "numeric/dvec3.h"
+
 #include "Tet10Assembler.h"
 
 #include "mesh/TetMesh.h"
@@ -7,6 +10,8 @@
 #include <cmath>
 #include <stdexcept>
 #include <unordered_map>
+
+using numeric::dvec3;
 
 namespace {
 using uint = uint32_t;
@@ -78,7 +83,7 @@ const Tet10ReferenceBasis &ReferenceBasis() {
 }
 
 double Determinant(const dvec3 &a, const dvec3 &b, const dvec3 &c, const dvec3 &d) {
-    return numeric::Dot(d - a, numeric::Cross(b - a, c - a));
+    return Dot(d - a, Cross(b - a, c - a));
 }
 
 std::array<std::array<double, 3>, 4> ShapeGradients(const TetMesh &mesh, const std::array<uint, 4> &tet, double det) {
@@ -96,7 +101,7 @@ std::array<std::array<double, 3>, 4> ShapeGradients(const TetMesh &mesh, const s
                 ++ni;
             }
             const int sign = (i + j) % 2 == 0 ? -1 : 1;
-            gradients[i][j] = sign * numeric::Dot(dvec3{1}, numeric::Cross(columns[0], columns[1])) / det;
+            gradients[i][j] = sign * Dot(dvec3{1}, Cross(columns[0], columns[1])) / det;
         }
     }
     return gradients;
@@ -212,7 +217,7 @@ modal::AssembledPencil modal::Tet10Assembler::AssembleLower() const {
         }
     }
 
-    numeric::SparseMatrix mass{int(Dofs()), int(Dofs())}, stiffness{int(Dofs()), int(Dofs())};
+    SparseMatrix mass{int(Dofs()), int(Dofs())}, stiffness{int(Dofs()), int(Dofs())};
     mass.RowIndices.reserve(3 * State->BlockRows.size());
     mass.Values.reserve(3 * State->BlockRows.size());
     stiffness.RowIndices.reserve(9 * State->BlockRows.size());

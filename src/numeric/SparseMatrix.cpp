@@ -1,3 +1,5 @@
+#include "Vector.h"
+
 #include "SparseMatrix.h"
 
 #include "audio/SparseExecution.h"
@@ -9,7 +11,9 @@
 #include <numeric>
 #include <stdexcept>
 
-numeric::SparseMatrix numeric::SparseMatrix::FromTriplets(int rows, int columns, std::vector<Triplet> triplets) {
+namespace numeric {
+
+SparseMatrix SparseMatrix::FromTriplets(int rows, int columns, std::vector<Triplet> triplets) {
     if (rows < 0 || columns < 0) throw std::invalid_argument("Sparse matrix dimensions must be nonnegative.");
     std::vector<size_t> offsets(size_t(columns) + 1);
     for (const Triplet &entry : triplets) {
@@ -45,7 +49,7 @@ numeric::SparseMatrix numeric::SparseMatrix::FromTriplets(int rows, int columns,
     return result;
 }
 
-numeric::Vector<double> numeric::SparseMatrix::Diagonal() const {
+Vector<double> SparseMatrix::Diagonal() const {
     Vector<double> result(size_t(std::min(Rows, Columns)));
     for (int column = 0; column < Columns && column < Rows; ++column)
         for (long entry = ColumnStarts[column]; entry < ColumnStarts[column + 1]; ++entry)
@@ -56,7 +60,7 @@ numeric::Vector<double> numeric::SparseMatrix::Diagonal() const {
     return result;
 }
 
-numeric::Matrix<double> numeric::SparseMatrix::DenseSymmetric() const {
+Matrix<double> SparseMatrix::DenseSymmetric() const {
     if (Rows != Columns) throw std::invalid_argument("A symmetric dense conversion requires a square matrix.");
     Matrix<double> result{size_t(Rows), size_t(Columns)};
     for (int column = 0; column < Columns; ++column)
@@ -68,7 +72,7 @@ numeric::Matrix<double> numeric::SparseMatrix::DenseSymmetric() const {
     return result;
 }
 
-numeric::Matrix<double> numeric::SparseMatrix::Dense() const {
+Matrix<double> SparseMatrix::Dense() const {
     Matrix<double> result{size_t(Rows), size_t(Columns)};
     for (int column = 0; column < Columns; ++column)
         for (long entry = ColumnStarts[column]; entry < ColumnStarts[column + 1]; ++entry)
@@ -76,7 +80,7 @@ numeric::Matrix<double> numeric::SparseMatrix::Dense() const {
     return result;
 }
 
-numeric::SparseMatrix numeric::Add(const SparseMatrix &a, double scale, const SparseMatrix &b) {
+SparseMatrix Add(const SparseMatrix &a, double scale, const SparseMatrix &b) {
     if (a.Rows != b.Rows || a.Columns != b.Columns) throw std::invalid_argument("Sparse matrix dimensions differ.");
     SparseMatrix result(a.Rows, a.Columns);
     result.RowIndices.reserve(a.NonZeros() + b.NonZeros());
@@ -101,7 +105,7 @@ numeric::SparseMatrix numeric::Add(const SparseMatrix &a, double scale, const Sp
     return result;
 }
 
-numeric::SparseMatrix numeric::Transpose(const SparseMatrix &matrix) {
+SparseMatrix Transpose(const SparseMatrix &matrix) {
     std::vector<Triplet> entries;
     entries.reserve(matrix.NonZeros());
     for (int column = 0; column < matrix.Columns; ++column)
@@ -110,7 +114,7 @@ numeric::SparseMatrix numeric::Transpose(const SparseMatrix &matrix) {
     return SparseMatrix::FromTriplets(matrix.Columns, matrix.Rows, std::move(entries));
 }
 
-numeric::SparseMatrix numeric::ExpandSymmetric(const SparseMatrix &matrix) {
+SparseMatrix ExpandSymmetric(const SparseMatrix &matrix) {
     if (matrix.Rows != matrix.Columns) throw std::invalid_argument("Symmetric expansion requires a square matrix.");
     std::vector<Triplet> entries;
     entries.reserve(2 * matrix.NonZeros());
@@ -123,7 +127,7 @@ numeric::SparseMatrix numeric::ExpandSymmetric(const SparseMatrix &matrix) {
     return SparseMatrix::FromTriplets(matrix.Rows, matrix.Columns, std::move(entries));
 }
 
-numeric::SparseMatrix numeric::Multiply(const SparseMatrix &a, const SparseMatrix &b) {
+SparseMatrix Multiply(const SparseMatrix &a, const SparseMatrix &b) {
     if (a.Columns != b.Rows) throw std::invalid_argument("Sparse matrix-product dimensions differ.");
     std::vector<Triplet> entries;
     std::vector<double> accumulator(size_t(a.Rows));
@@ -152,7 +156,7 @@ numeric::SparseMatrix numeric::Multiply(const SparseMatrix &a, const SparseMatri
     return SparseMatrix::FromTriplets(a.Rows, b.Columns, std::move(entries));
 }
 
-void numeric::Multiply(const SparseMatrix &matrix, MatrixView<const double> input, MatrixView<double> output) {
+void Multiply(const SparseMatrix &matrix, MatrixView<const double> input, MatrixView<double> output) {
     if (size_t(matrix.Columns) != input.Rows || size_t(matrix.Rows) != output.Rows || output.Columns != input.Columns)
         throw std::invalid_argument("Sparse matrix-product dimensions differ.");
     ConfigureAccelerateSparseExecution();
@@ -172,13 +176,13 @@ void numeric::Multiply(const SparseMatrix &matrix, MatrixView<const double> inpu
     SparseMultiply(sparse, source, destination);
 }
 
-numeric::Matrix<double> numeric::Multiply(const SparseMatrix &matrix, MatrixView<const double> input) {
+Matrix<double> Multiply(const SparseMatrix &matrix, MatrixView<const double> input) {
     Matrix<double> result(size_t(matrix.Rows), input.Columns);
     Multiply(matrix, input, result.View());
     return result;
 }
 
-void numeric::SymmetricMultiply(const SparseMatrix &matrix, MatrixView<const double> input, MatrixView<double> output) {
+void SymmetricMultiply(const SparseMatrix &matrix, MatrixView<const double> input, MatrixView<double> output) {
     if (matrix.Rows != matrix.Columns || size_t(matrix.Columns) != input.Rows || output.Rows != input.Rows || output.Columns != input.Columns)
         throw std::invalid_argument("Symmetric sparse matrix-product dimensions differ.");
     for (size_t panel = 0; panel < input.Columns; ++panel) {
@@ -202,8 +206,10 @@ void numeric::SymmetricMultiply(const SparseMatrix &matrix, MatrixView<const dou
     }
 }
 
-numeric::Matrix<double> numeric::SymmetricMultiply(const SparseMatrix &matrix, MatrixView<const double> input) {
+Matrix<double> SymmetricMultiply(const SparseMatrix &matrix, MatrixView<const double> input) {
     Matrix<double> result(size_t(matrix.Rows), input.Columns);
     SymmetricMultiply(matrix, input, result.View());
     return result;
 }
+
+} // namespace numeric

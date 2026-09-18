@@ -1,5 +1,7 @@
 #pragma once
 
+#include "numeric/Vector.h"
+
 #include "audio/Tet10Modes.h"
 #include "mesh/TetMesh.h"
 
@@ -8,9 +10,11 @@
 #include <limits>
 #include <numbers>
 
+using numeric::Matrix, numeric::Vector, numeric::vec3;
+
 struct Tet10Eigenpairs {
-    numeric::Vector<double> Eigenvalues;
-    numeric::Matrix<double> Eigenvectors;
+    Vector<double> Eigenvalues;
+    Matrix<double> Eigenvectors;
     double RelativeResidual{};
 };
 
@@ -31,11 +35,11 @@ inline Tet10Eigenpairs SolveTet10Eigenpairs(
         },
         {.Cache = &cache, .KeepBasis = true}
     );
-    numeric::Vector<double> eigenvalues(result.Summary.Eigenvalues.size());
+    Vector<double> eigenvalues(result.Summary.Eigenvalues.size());
     std::ranges::copy(result.Summary.Eigenvalues, eigenvalues.begin());
     return {
         .Eigenvalues = std::move(eigenvalues),
-        .Eigenvectors = numeric::Cast<double>(result.Basis.View()),
+        .Eigenvectors = Cast<double>(result.Basis.View()),
         .RelativeResidual = result.Profile.PhysicalResidual,
     };
 }

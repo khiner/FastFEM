@@ -17,6 +17,8 @@
 #include <utility>
 #include <vector>
 
+using numeric::Matrix, numeric::SparseMatrix;
+
 namespace {
 using Clock = std::chrono::steady_clock;
 
@@ -28,7 +30,7 @@ double Median(std::vector<double> values) {
     return values.size() % 2 ? values[middle] : 0.5 * (values[middle - 1] + values[middle]);
 }
 
-uint64_t Hash(const numeric::Matrix<double> &matrix) {
+uint64_t Hash(const Matrix<double> &matrix) {
     uint64_t hash{1469598103934665603ull};
     for (const double value : std::span{matrix.data(), size_t(matrix.size())}) {
         hash ^= std::bit_cast<uint64_t>(value);
@@ -52,15 +54,15 @@ struct Result {
 template<class Setup>
 Result Measure(
     int repetitions, Setup &&setup,
-    const std::array<double, 2> &shifts, const std::array<numeric::SparseMatrix, 2> &shifted,
-    const numeric::Matrix<double> &rhs
+    const std::array<double, 2> &shifts, const std::array<SparseMatrix, 2> &shifted,
+    const Matrix<double> &rhs
 ) {
     const auto setup_start = Clock::now();
     auto factor = std::forward<Setup>(setup)();
     Result result{.Setup = Seconds(setup_start)};
     std::vector<double> numeric_seconds, solve_seconds;
-    numeric::Matrix<double> solution(rhs.rows(), rhs.cols());
-    std::array<numeric::Matrix<double>, 2> first;
+    Matrix<double> solution(rhs.rows(), rhs.cols());
+    std::array<Matrix<double>, 2> first;
     std::array<bool, 2> seen{};
     numeric_seconds.reserve(repetitions);
     solve_seconds.reserve(repetitions);
@@ -83,9 +85,9 @@ Result Measure(
     result.Numeric = Median(std::move(numeric_seconds));
     result.Solve = Median(std::move(solve_seconds));
     const auto &final_shifted = shifted[size_t(repetitions - 1) % shifted.size()];
-    numeric::Matrix<double> residual = numeric::SymmetricMultiply(final_shifted, solution.View());
-    numeric::AddScaled(-1, rhs.View(), residual.View());
-    result.Residual = numeric::Norm(residual.View()) / numeric::Norm(rhs.View());
+    Matrix<double> residual = SymmetricMultiply(final_shifted, solution.View());
+    AddScaled(-1, rhs.View(), residual.View());
+    result.Residual = Norm(residual.View()) / Norm(rhs.View());
     result.SolutionHash = Hash(solution);
     return result;
 }
@@ -96,16 +98,16 @@ void Print(const Result &result) {
 
 template<class NativeSetup>
 void BenchmarkPencil(
-    std::string_view name, const numeric::SparseMatrix &mass, const numeric::SparseMatrix &stiffness,
+    std::string_view name, const SparseMatrix &mass, const SparseMatrix &stiffness,
     int repetitions, int width, NativeSetup &&native_setup
 ) {
     const double shift = std::pow(2 * std::numbers::pi * 20, 2);
     const std::array shifts{shift, 1.001 * shift};
-    const std::array<numeric::SparseMatrix, 2> shifted{
-        numeric::Add(stiffness, shifts[0], mass),
-        numeric::Add(stiffness, shifts[1], mass),
+    const std::array<SparseMatrix, 2> shifted{
+        Add(stiffness, shifts[0], mass),
+        Add(stiffness, shifts[1], mass),
     };
-    numeric::Matrix<double> rhs{size_t(stiffness.rows()), size_t(width)};
+    Matrix<double> rhs{size_t(stiffness.rows()), size_t(width)};
     for (size_t column = 0; column < rhs.cols(); ++column)
         for (size_t row = 0; row < rhs.rows(); ++row)
             rhs(row, column) = std::sin(0.013 * double(row + 1) + 0.17 * double(column + 1));

@@ -1,3 +1,5 @@
+#include "Vector.h"
+
 #define ACCELERATE_NEW_LAPACK
 
 #include "numeric/Accelerate.h"
@@ -7,7 +9,9 @@
 #include <limits>
 #include <vector>
 
-void numeric::SymmetricCrossGram(
+namespace numeric {
+
+void SymmetricCrossGram(
     const double *a, const double *b, double *result, uint32_t rows, uint32_t columns
 ) {
     cblas_dsyr2k(CblasColMajor, CblasLower, CblasTrans, columns, rows, 0.5, a, rows, b, rows, 0, result, columns);
@@ -15,7 +19,7 @@ void numeric::SymmetricCrossGram(
         for (uint32_t row = 0; row < column; ++row) result[row + column * columns] = result[column + row * columns];
 }
 
-bool numeric::GeneralizedSelfAdjointEigenSolve(
+bool GeneralizedSelfAdjointEigenSolve(
     double *stiffness, double *mass, double *eigenvalues, uint32_t size
 ) {
     if (!size || size > uint32_t(std::numeric_limits<__LAPACK_int>::max())) return false;
@@ -40,7 +44,7 @@ bool numeric::GeneralizedSelfAdjointEigenSolve(
     return info == 0;
 }
 
-bool numeric::SelfAdjointEigenSolve(double *matrix, double *eigenvalues, uint32_t size) {
+bool SelfAdjointEigenSolve(double *matrix, double *eigenvalues, uint32_t size) {
     if (!size || size > uint32_t(std::numeric_limits<__LAPACK_int>::max())) return false;
     const __LAPACK_int n = __LAPACK_int(size);
     constexpr char Eigenvectors{'V'}, Lower{'L'};
@@ -54,7 +58,7 @@ bool numeric::SelfAdjointEigenSolve(double *matrix, double *eigenvalues, uint32_
     return info == 0;
 }
 
-bool numeric::CholeskyInverse(double *matrix, uint32_t size) {
+bool CholeskyInverse(double *matrix, uint32_t size) {
     if (!size || size > uint32_t(std::numeric_limits<__LAPACK_int>::max())) return false;
     const __LAPACK_int n = __LAPACK_int(size);
     constexpr char Lower{'L'};
@@ -68,7 +72,7 @@ bool numeric::CholeskyInverse(double *matrix, uint32_t size) {
     return true;
 }
 
-bool numeric::LeastSquaresMinimumNorm(
+bool LeastSquaresMinimumNorm(
     MatrixView<const double> matrix, VectorView<const double> right_hand_side, Vector<double> &solution
 ) {
     if (!matrix.Rows || !matrix.Columns || matrix.Rows != right_hand_side.Count ||
@@ -94,7 +98,7 @@ bool numeric::LeastSquaresMinimumNorm(
     return true;
 }
 
-bool numeric::ThinQr(Matrix<double> &matrix) {
+bool ThinQr(Matrix<double> &matrix) {
     if (!matrix.Rows || !matrix.Columns || matrix.Rows < matrix.Columns ||
         matrix.Rows > size_t(std::numeric_limits<__LAPACK_int>::max()) ||
         matrix.Columns > size_t(std::numeric_limits<__LAPACK_int>::max())) return false;
@@ -117,7 +121,7 @@ bool numeric::ThinQr(Matrix<double> &matrix) {
     return info == 0;
 }
 
-bool numeric::SingularValues(MatrixView<const double> matrix, Vector<double> &values) {
+bool SingularValues(MatrixView<const double> matrix, Vector<double> &values) {
     if (!matrix.Rows || !matrix.Columns || matrix.Rows > size_t(std::numeric_limits<__LAPACK_int>::max()) ||
         matrix.Columns > size_t(std::numeric_limits<__LAPACK_int>::max())) return false;
     Matrix<double> copy = Copy(matrix);
@@ -135,3 +139,5 @@ bool numeric::SingularValues(MatrixView<const double> matrix, Vector<double> &va
     dgesvd_(&None, &None, &rows, &columns, copy.data(), &rows, values.data(), &unused, &unused_dimension, &unused, &unused_dimension, work.data(), &work_size, &info);
     return info == 0;
 }
+
+} // namespace numeric
