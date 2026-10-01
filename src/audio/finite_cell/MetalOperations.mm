@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <dispatch/dispatch.h>
+#include <exception>
 #include <map>
 #include <numbers>
 #include <numeric>
@@ -25,6 +26,33 @@
 using numeric::CholeskyInverse, numeric::Matrix, numeric::MatrixView, numeric::SparseMatrix, numeric::Triplet, numeric::Vector;
 
 namespace {
+// @autoreleasepool does not drain during exception unwinding.
+// Leave it normally before propagating a C++ failure, after the operation's locals have unwound.
+template<typename Operation> void WithAutoreleasePool(Operation &&operation) {
+    std::exception_ptr failure;
+    @autoreleasepool {
+        try {
+            operation();
+        } catch (...) {
+            failure = std::current_exception();
+        }
+    }
+    if (failure) std::rethrow_exception(failure);
+}
+
+// Owns an active command encoder and ends encoding when the scope exits.
+struct EncodingScope {
+    id<MTLCommandEncoder> Encoder;
+    explicit EncodingScope(id<MTLCommandEncoder> encoder) : Encoder(encoder) {}
+    EncodingScope(const EncodingScope &) = delete;
+    EncodingScope &operator=(const EncodingScope &) = delete;
+    ~EncodingScope() { End(); }
+    void End() {
+        if (Encoder) [Encoder endEncoding];
+        Encoder = nil;
+    }
+};
+
 constexpr const char *Source = R"metal(
 #include <metal_stdlib>
 using namespace metal;
@@ -352,6 +380,7 @@ void EncodeCooperative(
 
 struct modal::finite_cell::MetalOperations::Block::Implementation {
     id<MTLBuffer> Buffer;
+    ~Implementation() { WithAutoreleasePool([&] { Buffer = nil; }); }
 };
 
 struct modal::finite_cell::MetalOperations::Implementation {
@@ -375,6 +404,7 @@ struct modal::finite_cell::MetalOperations::Implementation {
     mutable id<MTLBuffer> PackedPatchInverses, PackedElementMatrices, Scratch;
     mutable id<MTLBuffer> PatchDelta, PatchAction;
     mutable size_t ScratchCapacity{}, MultigridScratchCursor{};
+    // ARC owns this command across operation-local pools.
     // Upload and download delimit one command buffer, amortizing submission across a preconditioner application.
     mutable id<MTLCommandBuffer> PendingCommand;
     std::array<uint32_t, 9> ColorOffsets{};
@@ -388,6 +418,18 @@ struct modal::finite_cell::MetalOperations::Implementation {
             if (!PendingCommand) throw MetalError(@"Creating finite-cell Metal command buffer failed");
         }
         return PendingCommand;
+    }
+
+    template<typename Operation> void Record(Operation &&operation) const {
+        WithAutoreleasePool([&] {
+            try {
+                operation();
+            } catch (...) {
+                // Discard the incomplete batch after its encoders have unwound.
+                PendingCommand = nil;
+                throw;
+            }
+        });
     }
 
     void ReserveScratch(uint32_t width) const {
@@ -446,123 +488,128 @@ modal::finite_cell::MetalOperations::Block &modal::finite_cell::MetalOperations:
 modal::finite_cell::MetalOperations::Block::~Block() = default;
 
 modal::finite_cell::MetalOperations::MetalOperations(const FiniteCellOperator &operation) : Impl(std::make_unique<Implementation>()) {
-    @autoreleasepool {
-        Impl->Device = MTLCreateSystemDefaultDevice();
-        if (!Impl->Device) throw MetalError(@"No Metal device");
-        Impl->Queue = [Impl->Device newCommandQueue];
-        if (!Impl->Queue) throw MetalError(@"Creating finite-cell Metal command queue failed");
-        NSError *error = nil;
-        [[maybe_unused]] bool precompiled = false;
+    WithAutoreleasePool([&] {
+        try {
+            Impl->Device = MTLCreateSystemDefaultDevice();
+            if (!Impl->Device) throw MetalError(@"No Metal device");
+            Impl->Queue = [Impl->Device newCommandQueue];
+            if (!Impl->Queue) throw MetalError(@"Creating finite-cell Metal command queue failed");
+            NSError *error = nil;
+            [[maybe_unused]] bool precompiled = false;
 #if FASTFEM_HAS_EMBEDDED_FINITE_CELL_METALLIB
-        dispatch_data_t data = dispatch_data_create(FastFEMFiniteCellMetallib, FastFEMFiniteCellMetallib_len, nil, ^{});
-        id<MTLLibrary> library = [Impl->Device newLibraryWithData:data error:&error];
-        precompiled = library != nil;
+            dispatch_data_t data = dispatch_data_create(FastFEMFiniteCellMetallib, FastFEMFiniteCellMetallib_len, nil, ^{});
+            id<MTLLibrary> library = [Impl->Device newLibraryWithData:data error:&error];
+            precompiled = library != nil;
 #else
-        id<MTLLibrary> library = nil;
+            id<MTLLibrary> library = nil;
 #endif
-        if (!library) {
-            error = nil;
-            library = [Impl->Device newLibraryWithSource:[NSString stringWithUTF8String:Source] options:nil error:&error];
-        }
-        if (!library) throw MetalError(@"Compiling finite-cell Metal kernels failed", error);
-        id<MTLBinaryArchive> archive = nil;
-#ifdef FASTFEM_FINITE_CELL_BINARY_ARCHIVE_PATH
-        if (precompiled) {
-            MTLBinaryArchiveDescriptor *descriptor = [MTLBinaryArchiveDescriptor new];
-            descriptor.url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:FASTFEM_FINITE_CELL_BINARY_ARCHIVE_PATH]];
-            error = nil;
-            archive = [Impl->Device newBinaryArchiveWithDescriptor:descriptor error:&error];
-        }
-#endif
-        const auto pipeline = [&](NSString *name) {
-            id<MTLFunction> function = [library newFunctionWithName:name];
-            id<MTLComputePipelineState> result;
-            if (archive) {
-                MTLComputePipelineDescriptor *descriptor = [MTLComputePipelineDescriptor new];
-                descriptor.computeFunction = function;
-                descriptor.binaryArchives = @[ archive ];
-                result = [Impl->Device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&error];
-            } else result = [Impl->Device newComputePipelineStateWithFunction:function error:&error];
-            if (!result) throw MetalError(@"Creating finite-cell Metal pipeline failed", error);
-            return result;
-        };
-        Impl->ClearPipeline = pipeline(@"Clear");
-        Impl->SmootherPipeline = pipeline(@"ApplyJacobiSmoother");
-        Impl->JacobiUpdatePipeline = pipeline(@"ApplyJacobiUpdate");
-        Impl->SparseProductPipeline = pipeline(@"ApplySparseProduct");
-        Impl->DenseProductPipeline = pipeline(@"ApplyDenseProduct");
-        Impl->CombinationPipeline = pipeline(@"LinearCombination");
-        Impl->CooperativeWideBatchedPackedCellMatrixPipeline = pipeline(@"ApplyCooperativeWideBatchedPackedCellMatrixAction");
-        Impl->CellMatrixScatterPipeline = pipeline(@"ScatterCellMatrixAction");
-        Impl->RestrictPipeline = pipeline(@"RestrictP1");
-        Impl->ProlongPipeline = pipeline(@"ProlongP1");
-
-        std::vector<MetalCell> cells;
-        cells.reserve(operation.Cells.size());
-        Impl->CellOrder.reserve(operation.Cells.size());
-        for (uint32_t color = 0; color < 8; ++color) {
-            Impl->ColorOffsets[color] = uint32_t(cells.size());
-            for (uint32_t cell_index = 0; cell_index < operation.Cells.size(); ++cell_index) {
-                if (operation.Cells[cell_index].Color != color) continue;
-                cells.push_back({operation.Cells[cell_index].Nodes});
-                Impl->CellOrder.push_back(cell_index);
+            if (!library) {
+                error = nil;
+                library = [Impl->Device newLibraryWithSource:[NSString stringWithUTF8String:Source] options:nil error:&error];
             }
-        }
-        Impl->ColorOffsets[8] = uint32_t(cells.size());
-        std::vector<uint32_t> localized_cells;
-        std::vector<uint8_t> source_nodes(operation.Nodes.size());
-        for (uint8_t source_color = 0; source_color < 8; ++source_color) {
-            std::fill(source_nodes.begin(), source_nodes.end(), uint8_t{});
-            for (uint32_t source = Impl->ColorOffsets[source_color]; source < Impl->ColorOffsets[source_color + 1]; ++source)
-                for (uint32_t local = 0; local < FiniteCellOperator::NodesPerCell; ++local)
-                    source_nodes[cells[source].Nodes[local]] = 1;
-            for (uint8_t output_color = 0; output_color < 8; ++output_color) {
-                Impl->LocalizedOffsets[source_color][output_color] = uint32_t(localized_cells.size());
-                for (uint32_t target = Impl->ColorOffsets[output_color]; target < Impl->ColorOffsets[output_color + 1]; ++target) {
-                    bool affected{};
-                    for (uint32_t local = 0; local < FiniteCellOperator::NodesPerCell; ++local)
-                        affected |= source_nodes[cells[target].Nodes[local]];
-                    if (affected) localized_cells.push_back(target);
+            if (!library) throw MetalError(@"Compiling finite-cell Metal kernels failed", error);
+            id<MTLBinaryArchive> archive = nil;
+#ifdef FASTFEM_FINITE_CELL_BINARY_ARCHIVE_PATH
+            if (precompiled) {
+                MTLBinaryArchiveDescriptor *descriptor = [MTLBinaryArchiveDescriptor new];
+                descriptor.url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:FASTFEM_FINITE_CELL_BINARY_ARCHIVE_PATH]];
+                error = nil;
+                archive = [Impl->Device newBinaryArchiveWithDescriptor:descriptor error:&error];
+            }
+#endif
+            const auto pipeline = [&](NSString *name) {
+                id<MTLFunction> function = [library newFunctionWithName:name];
+                id<MTLComputePipelineState> result;
+                if (archive) {
+                    MTLComputePipelineDescriptor *descriptor = [MTLComputePipelineDescriptor new];
+                    descriptor.computeFunction = function;
+                    descriptor.binaryArchives = @[ archive ];
+                    result = [Impl->Device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&error];
+                } else result = [Impl->Device newComputePipelineStateWithFunction:function error:&error];
+                if (!result) throw MetalError(@"Creating finite-cell Metal pipeline failed", error);
+                return result;
+            };
+            Impl->ClearPipeline = pipeline(@"Clear");
+            Impl->SmootherPipeline = pipeline(@"ApplyJacobiSmoother");
+            Impl->JacobiUpdatePipeline = pipeline(@"ApplyJacobiUpdate");
+            Impl->SparseProductPipeline = pipeline(@"ApplySparseProduct");
+            Impl->DenseProductPipeline = pipeline(@"ApplyDenseProduct");
+            Impl->CombinationPipeline = pipeline(@"LinearCombination");
+            Impl->CooperativeWideBatchedPackedCellMatrixPipeline = pipeline(@"ApplyCooperativeWideBatchedPackedCellMatrixAction");
+            Impl->CellMatrixScatterPipeline = pipeline(@"ScatterCellMatrixAction");
+            Impl->RestrictPipeline = pipeline(@"RestrictP1");
+            Impl->ProlongPipeline = pipeline(@"ProlongP1");
+
+            std::vector<MetalCell> cells;
+            cells.reserve(operation.Cells.size());
+            Impl->CellOrder.reserve(operation.Cells.size());
+            for (uint32_t color = 0; color < 8; ++color) {
+                Impl->ColorOffsets[color] = uint32_t(cells.size());
+                for (uint32_t cell_index = 0; cell_index < operation.Cells.size(); ++cell_index) {
+                    if (operation.Cells[cell_index].Color != color) continue;
+                    cells.push_back({operation.Cells[cell_index].Nodes});
+                    Impl->CellOrder.push_back(cell_index);
                 }
             }
-            Impl->LocalizedOffsets[source_color][8] = uint32_t(localized_cells.size());
+            Impl->ColorOffsets[8] = uint32_t(cells.size());
+            std::vector<uint32_t> localized_cells;
+            std::vector<uint8_t> source_nodes(operation.Nodes.size());
+            for (uint8_t source_color = 0; source_color < 8; ++source_color) {
+                std::fill(source_nodes.begin(), source_nodes.end(), uint8_t{});
+                for (uint32_t source = Impl->ColorOffsets[source_color]; source < Impl->ColorOffsets[source_color + 1]; ++source)
+                    for (uint32_t local = 0; local < FiniteCellOperator::NodesPerCell; ++local)
+                        source_nodes[cells[source].Nodes[local]] = 1;
+                for (uint8_t output_color = 0; output_color < 8; ++output_color) {
+                    Impl->LocalizedOffsets[source_color][output_color] = uint32_t(localized_cells.size());
+                    for (uint32_t target = Impl->ColorOffsets[output_color]; target < Impl->ColorOffsets[output_color + 1]; ++target) {
+                        bool affected{};
+                        for (uint32_t local = 0; local < FiniteCellOperator::NodesPerCell; ++local)
+                            affected |= source_nodes[cells[target].Nodes[local]];
+                        if (affected) localized_cells.push_back(target);
+                    }
+                }
+                Impl->LocalizedOffsets[source_color][8] = uint32_t(localized_cells.size());
+            }
+            std::vector<MetalP1Stencil> stencils(operation.P1Stencils.size());
+            std::vector<uint32_t> p1_offsets(operation.NumP1Nodes + 1);
+            for (uint32_t fine = 0; fine < operation.P1Stencils.size(); ++fine) {
+                const auto &source = operation.P1Stencils[fine];
+                stencils[fine].Nodes = source.Nodes;
+                stencils[fine].Count = source.Count;
+                for (uint32_t entry = 0; entry < 8; ++entry) stencils[fine].Weights[entry] = float(source.Weights[entry]);
+                for (uint32_t entry = 0; entry < source.Count; ++entry) ++p1_offsets[source.Nodes[entry] + 1];
+            }
+            for (uint32_t node = 0; node < operation.NumP1Nodes; ++node) p1_offsets[node + 1] += p1_offsets[node];
+            std::vector<uint32_t> p1_cursor = p1_offsets;
+            std::vector<P1Occurrence> p1_occurrences(p1_offsets.back());
+            for (uint32_t fine = 0; fine < operation.P1Stencils.size(); ++fine) {
+                const auto &source = operation.P1Stencils[fine];
+                for (uint32_t entry = 0; entry < source.Count; ++entry)
+                    p1_occurrences[p1_cursor[source.Nodes[entry]]++] = {fine, float(source.Weights[entry])};
+            }
+            const auto buffer = [&](const void *bytes, size_t size) {
+                id<MTLBuffer> result = [Impl->Device newBufferWithBytes:bytes length:size options:MTLResourceStorageModeShared];
+                if (!result) throw MetalError(@"Allocating finite-cell Metal buffer failed");
+                return result;
+            };
+            Impl->Cells = buffer(cells.data(), cells.size() * sizeof(MetalCell));
+            std::vector<uint32_t> cell_indices(cells.size());
+            std::iota(cell_indices.begin(), cell_indices.end(), 0);
+            Impl->CellIndices = buffer(cell_indices.data(), cell_indices.size() * sizeof(uint32_t));
+            Impl->LocalizedCells = buffer(localized_cells.data(), localized_cells.size() * sizeof(uint32_t));
+            Impl->P1Stencils = buffer(stencils.data(), stencils.size() * sizeof(MetalP1Stencil));
+            Impl->P1Offsets = buffer(p1_offsets.data(), p1_offsets.size() * sizeof(uint32_t));
+            Impl->P1Occurrences = buffer(p1_occurrences.data(), p1_occurrences.size() * sizeof(P1Occurrence));
+            Impl->NumNodes = uint32_t(operation.Nodes.size());
+            Impl->NumP1Nodes = operation.NumP1Nodes;
+        } catch (...) {
+            Impl.reset();
+            throw;
         }
-        std::vector<MetalP1Stencil> stencils(operation.P1Stencils.size());
-        std::vector<uint32_t> p1_offsets(operation.NumP1Nodes + 1);
-        for (uint32_t fine = 0; fine < operation.P1Stencils.size(); ++fine) {
-            const auto &source = operation.P1Stencils[fine];
-            stencils[fine].Nodes = source.Nodes;
-            stencils[fine].Count = source.Count;
-            for (uint32_t entry = 0; entry < 8; ++entry) stencils[fine].Weights[entry] = float(source.Weights[entry]);
-            for (uint32_t entry = 0; entry < source.Count; ++entry) ++p1_offsets[source.Nodes[entry] + 1];
-        }
-        for (uint32_t node = 0; node < operation.NumP1Nodes; ++node) p1_offsets[node + 1] += p1_offsets[node];
-        std::vector<uint32_t> p1_cursor = p1_offsets;
-        std::vector<P1Occurrence> p1_occurrences(p1_offsets.back());
-        for (uint32_t fine = 0; fine < operation.P1Stencils.size(); ++fine) {
-            const auto &source = operation.P1Stencils[fine];
-            for (uint32_t entry = 0; entry < source.Count; ++entry)
-                p1_occurrences[p1_cursor[source.Nodes[entry]]++] = {fine, float(source.Weights[entry])};
-        }
-        const auto buffer = [&](const void *bytes, size_t size) {
-            id<MTLBuffer> result = [Impl->Device newBufferWithBytes:bytes length:size options:MTLResourceStorageModeShared];
-            if (!result) throw MetalError(@"Allocating finite-cell Metal buffer failed");
-            return result;
-        };
-        Impl->Cells = buffer(cells.data(), cells.size() * sizeof(MetalCell));
-        std::vector<uint32_t> cell_indices(cells.size());
-        std::iota(cell_indices.begin(), cell_indices.end(), 0);
-        Impl->CellIndices = buffer(cell_indices.data(), cell_indices.size() * sizeof(uint32_t));
-        Impl->LocalizedCells = buffer(localized_cells.data(), localized_cells.size() * sizeof(uint32_t));
-        Impl->P1Stencils = buffer(stencils.data(), stencils.size() * sizeof(MetalP1Stencil));
-        Impl->P1Offsets = buffer(p1_offsets.data(), p1_offsets.size() * sizeof(uint32_t));
-        Impl->P1Occurrences = buffer(p1_occurrences.data(), p1_occurrences.size() * sizeof(P1Occurrence));
-        Impl->NumNodes = uint32_t(operation.Nodes.size());
-        Impl->NumP1Nodes = operation.NumP1Nodes;
-    }
+    });
 }
 
-modal::finite_cell::MetalOperations::~MetalOperations() = default;
+modal::finite_cell::MetalOperations::~MetalOperations() { WithAutoreleasePool([&] { Impl.reset(); }); }
 
 namespace {
 modal::finite_cell::MetalOperations::Block NewBlock(
@@ -572,8 +619,10 @@ modal::finite_cell::MetalOperations::Block NewBlock(
     result.Rows = rows;
     result.Width = width;
     if (width == 0) return result;
-    result.Impl->Buffer = [device newBufferWithLength:size_t(rows) * width * sizeof(float) options:options];
-    if (!result.Impl->Buffer) throw MetalError(@"Allocating finite-cell Metal block failed");
+    WithAutoreleasePool([&] {
+        result.Impl->Buffer = [device newBufferWithLength:size_t(rows) * width * sizeof(float) options:options];
+        if (!result.Impl->Buffer) throw MetalError(@"Allocating finite-cell Metal block failed");
+    });
     return result;
 }
 } // namespace
@@ -591,13 +640,15 @@ modal::finite_cell::MetalOperations::Block modal::finite_cell::MetalOperations::
 }
 
 void modal::finite_cell::MetalOperations::Synchronize() const {
-    if (!Impl->PendingCommand) return;
-    id<MTLCommandBuffer> command = Impl->PendingCommand;
-    Impl->PendingCommand = nil;
-    [command commit];
-    [command waitUntilCompleted];
-    if (command.status == MTLCommandBufferStatusError)
-        throw MetalError(@"Finite-cell Metal command failed", command.error);
+    WithAutoreleasePool([&] {
+        if (!Impl->PendingCommand) return;
+        id<MTLCommandBuffer> command = Impl->PendingCommand;
+        Impl->PendingCommand = nil;
+        [command commit];
+        [command waitUntilCompleted];
+        if (command.status == MTLCommandBufferStatusError)
+            throw MetalError(@"Finite-cell Metal command failed", command.error);
+    });
 }
 
 namespace {
@@ -810,10 +861,10 @@ void modal::finite_cell::MetalOperations::ConfigureP1Multigrid(P1Multigrid &&pre
         throw std::invalid_argument("Finite-cell Metal P1 hierarchy must match the configured fine operator.");
     const auto &hierarchy = prepared.Impl->Levels;
     Synchronize();
-    Impl->Multigrid.clear();
-    Impl->MultigridScratch.clear();
-    Impl->Multigrid.resize(hierarchy.size());
-    @autoreleasepool {
+    WithAutoreleasePool([&] {
+        Impl->Multigrid.clear();
+        Impl->MultigridScratch.clear();
+        Impl->Multigrid.resize(hierarchy.size());
         const auto buffer = [&](const void *bytes, size_t size) {
             id<MTLBuffer> result = [Impl->Device newBufferWithBytes:bytes length:size options:MTLResourceStorageModeShared];
             if (!result) throw MetalError(@"Allocating finite-cell Metal P1 hierarchy failed");
@@ -857,7 +908,7 @@ void modal::finite_cell::MetalOperations::ConfigureP1Multigrid(P1Multigrid &&pre
                 level.Inverse = buffer(source.Inverse.data(), size_t(source.Inverse.size()) * sizeof(float));
             }
         }
-    }
+    });
 }
 
 void modal::finite_cell::MetalOperations::ApplyP1Multigrid(
@@ -883,9 +934,10 @@ void modal::finite_cell::MetalOperations::ApplyP1Multigrid(
         result.Impl->Buffer = buffer;
         return result;
     };
-    @autoreleasepool {
+    Impl->Record([&] {
         id<MTLCommandBuffer> batch = Impl->Command();
         id<MTLComputeCommandEncoder> pass = [batch computeCommandEncoder];
+        EncodingScope pass_scope{pass};
         const auto sparse = [&](id<MTLBuffer> offsets, id<MTLBuffer> columns, id<MTLBuffer> values,
                                 const Block &source, Block &destination) {
             EncodeLinear(
@@ -962,15 +1014,15 @@ void modal::finite_cell::MetalOperations::ApplyP1Multigrid(
             return result;
         };
         const auto result = cycle(0, input);
-        [pass endEncoding];
+        pass_scope.End();
         id<MTLBlitCommandEncoder> copy = [batch blitCommandEncoder];
+        EncodingScope copy_scope{copy};
         [copy copyFromBuffer:result.Impl->Buffer
                  sourceOffset:0
                      toBuffer:output.Impl->Buffer
             destinationOffset:0
                          size:size_t(result.Rows) * result.Width * sizeof(float)];
-        [copy endEncoding];
-    }
+    });
 }
 
 void modal::finite_cell::MetalOperations::LinearCombination(
@@ -981,39 +1033,40 @@ void modal::finite_cell::MetalOperations::LinearCombination(
         (left.Width && (!output.Impl->Buffer || output.Impl->Buffer.device != Impl->Device)))
         throw std::invalid_argument("Finite-cell Metal combination output must have matching dimensions.");
     if (!left.Width) return;
-    @autoreleasepool {
-        id<MTLCommandBuffer> command = Impl->Command();
-        id<MTLComputeCommandEncoder> pass = [command computeCommandEncoder];
+    Impl->Record([&] {
+        id<MTLComputeCommandEncoder> pass = [Impl->Command() computeCommandEncoder];
+        EncodingScope pass_scope{pass};
         EncodeLinear(
             pass, Impl->CombinationPipeline, {left.Impl->Buffer, right.Impl->Buffer, output.Impl->Buffer},
             AlgebraParams{left.Rows * left.Width, left.Rows, left_scale, right_scale},
             size_t(left.Rows) * left.Width
         );
-        [pass endEncoding];
-    }
+    });
 }
 
 void modal::finite_cell::MetalOperations::ConfigurePackedPatch(
     SharedFloats inverse_matrices, std::span<const double> element_matrices
 ) const {
-    constexpr uint32_t local_dofs = 3 * FiniteCellOperator::NodesPerCell;
-    const size_t values_per_cell = size_t(local_dofs) * (local_dofs + 1) / 2;
-    const size_t matrix_values = Impl->CellOrder.size() * values_per_cell;
-    if (inverse_matrices.Size != matrix_values || element_matrices.size() != matrix_values)
-        throw std::invalid_argument("Finite-cell Metal owned packed patch data dimensions do not match the operator.");
-    Synchronize();
-    Impl->PackedPatchInverses = [Impl->Device newBufferWithBytesNoCopy:inverse_matrices.Data length:inverse_matrices.CapacityBytes options:MTLResourceStorageModeShared deallocator:^(void *pointer, NSUInteger) { std::free(pointer); }];
-    if (!Impl->PackedPatchInverses) throw MetalError(@"Wrapping finite-cell Metal packed inverses failed");
-    inverse_matrices.Release();
-    Impl->PackedElementMatrices = [Impl->Device newBufferWithLength:matrix_values * sizeof(float) options:MTLResourceStorageModeShared];
-    if (!Impl->PackedElementMatrices)
-        throw MetalError(@"Allocating finite-cell Metal owned packed patch data failed");
-    auto *elements = static_cast<float *>(Impl->PackedElementMatrices.contents);
-    dispatch_apply(Impl->CellOrder.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t cell) {
-      const size_t source = size_t(Impl->CellOrder[cell]) * values_per_cell;
-      const size_t destination = cell * values_per_cell;
-      for (size_t entry = 0; entry < values_per_cell; ++entry)
-          elements[destination + entry] = float(element_matrices[source + entry]);
+    WithAutoreleasePool([&] {
+        constexpr uint32_t local_dofs = 3 * FiniteCellOperator::NodesPerCell;
+        const size_t values_per_cell = size_t(local_dofs) * (local_dofs + 1) / 2;
+        const size_t matrix_values = Impl->CellOrder.size() * values_per_cell;
+        if (inverse_matrices.Size != matrix_values || element_matrices.size() != matrix_values)
+            throw std::invalid_argument("Finite-cell Metal owned packed patch data dimensions do not match the operator.");
+        Synchronize();
+        Impl->PackedPatchInverses = [Impl->Device newBufferWithBytesNoCopy:inverse_matrices.Data length:inverse_matrices.CapacityBytes options:MTLResourceStorageModeShared deallocator:^(void *pointer, NSUInteger) { std::free(pointer); }];
+        if (!Impl->PackedPatchInverses) throw MetalError(@"Wrapping finite-cell Metal packed inverses failed");
+        inverse_matrices.Release();
+        Impl->PackedElementMatrices = [Impl->Device newBufferWithLength:matrix_values * sizeof(float) options:MTLResourceStorageModeShared];
+        if (!Impl->PackedElementMatrices)
+            throw MetalError(@"Allocating finite-cell Metal owned packed patch data failed");
+        auto *elements = static_cast<float *>(Impl->PackedElementMatrices.contents);
+        dispatch_apply(Impl->CellOrder.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t cell) {
+          const size_t source = size_t(Impl->CellOrder[cell]) * values_per_cell;
+          const size_t destination = cell * values_per_cell;
+          for (size_t entry = 0; entry < values_per_cell; ++entry)
+              elements[destination + entry] = float(element_matrices[source + entry]);
+        });
     });
 }
 
@@ -1022,11 +1075,11 @@ void modal::finite_cell::MetalOperations::ApplyElement(const Block &input, Block
     if (!Impl->PackedElementMatrices)
         throw std::logic_error("Finite-cell Metal element operators have not been configured.");
     if (!input.Width) return;
-    @autoreleasepool {
+    Impl->Record([&] {
         constexpr uint32_t local_dofs = 3 * FiniteCellOperator::NodesPerCell;
         Impl->ReserveScratch(input.Width);
-        id<MTLCommandBuffer> command = Impl->Command();
-        id<MTLComputeCommandEncoder> pass = [command computeCommandEncoder];
+        id<MTLComputeCommandEncoder> pass = [Impl->Command() computeCommandEncoder];
+        EncodingScope pass_scope{pass};
         const uint32_t count = input.Rows * input.Width;
         const uint32_t cells = uint32_t(Impl->CellOrder.size());
         EncodeLinear(pass, Impl->ClearPipeline, {output.Impl->Buffer}, count, count);
@@ -1047,8 +1100,7 @@ void modal::finite_cell::MetalOperations::ApplyElement(const Block &input, Block
                 size_t(color_cells) * input.Width * local_dofs
             );
         }
-        [pass endEncoding];
-    }
+    });
 }
 
 void modal::finite_cell::MetalOperations::ApplyPackedLocalizedMultiplicativePatchSweep(
@@ -1062,20 +1114,22 @@ void modal::finite_cell::MetalOperations::ApplyPackedLocalizedMultiplicativePatc
         correction.Impl->Buffer == remaining.Impl->Buffer)
         throw std::invalid_argument("Finite-cell Metal multiplicative sweep requires distinct blocks.");
     if (!input.Width) return;
-    @autoreleasepool {
+    Impl->Record([&] {
         constexpr uint32_t local_dofs = 3 * FiniteCellOperator::NodesPerCell;
         Impl->ReserveScratch(input.Width);
         Impl->ReservePatchBlocks(input.Rows, input.Width);
         id<MTLBuffer> delta = Impl->PatchDelta, action = Impl->PatchAction;
         id<MTLCommandBuffer> command = Impl->Command();
         id<MTLBlitCommandEncoder> copy = [command blitCommandEncoder];
+        EncodingScope copy_scope{copy};
         [copy copyFromBuffer:input.Impl->Buffer
                  sourceOffset:0
                      toBuffer:remaining.Impl->Buffer
             destinationOffset:0
                          size:size_t(input.Rows) * input.Width * sizeof(float)];
-        [copy endEncoding];
+        copy_scope.End();
         id<MTLComputeCommandEncoder> pass = [command computeCommandEncoder];
+        EncodingScope pass_scope{pass};
         const uint32_t elements = input.Rows * input.Width, batches = (input.Width + 7) / 8;
         const auto encode_clear = [&](id<MTLBuffer> output) {
             EncodeLinear(pass, Impl->ClearPipeline, {output}, elements, elements);
@@ -1137,35 +1191,32 @@ void modal::finite_cell::MetalOperations::ApplyPackedLocalizedMultiplicativePatc
             encode_local_action(color);
             encode_combination(remaining.Impl->Buffer, 1, action, -1, remaining.Impl->Buffer);
         }
-        [pass endEncoding];
-    }
+    });
 }
 
 void modal::finite_cell::MetalOperations::RestrictP1(const Block &fine, Block &coarse) const {
     RequireTransfer(*Impl, fine, coarse, "restriction requires matching fine and P1 blocks.");
     if (!fine.Width) return;
-    @autoreleasepool {
-        id<MTLCommandBuffer> command = Impl->Command();
-        id<MTLComputeCommandEncoder> pass = [command computeCommandEncoder];
+    Impl->Record([&] {
+        id<MTLComputeCommandEncoder> pass = [Impl->Command() computeCommandEncoder];
+        EncodingScope pass_scope{pass};
         EncodeLinear(
             pass, Impl->RestrictPipeline,
             {fine.Impl->Buffer, Impl->P1Offsets, Impl->P1Occurrences, coarse.Impl->Buffer},
             TransferParams{Impl->NumP1Nodes, Impl->NumNodes, fine.Width}, size_t(coarse.Rows) * coarse.Width
         );
-        [pass endEncoding];
-    }
+    });
 }
 
 void modal::finite_cell::MetalOperations::ProlongP1(const Block &coarse, Block &fine) const {
     RequireTransfer(*Impl, fine, coarse, "prolongation requires matching P1 and fine blocks.");
     if (!fine.Width) return;
-    @autoreleasepool {
-        id<MTLCommandBuffer> command = Impl->Command();
-        id<MTLComputeCommandEncoder> pass = [command computeCommandEncoder];
+    Impl->Record([&] {
+        id<MTLComputeCommandEncoder> pass = [Impl->Command() computeCommandEncoder];
+        EncodingScope pass_scope{pass};
         EncodeLinear(
             pass, Impl->ProlongPipeline, {coarse.Impl->Buffer, Impl->P1Stencils, fine.Impl->Buffer},
             TransferParams{Impl->NumP1Nodes, Impl->NumNodes, fine.Width}, size_t(fine.Rows) * fine.Width
         );
-        [pass endEncoding];
-    }
+    });
 }
