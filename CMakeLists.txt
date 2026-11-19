@@ -86,7 +86,7 @@ if(FASTFEM_METAL_RESULT EQUAL 0 AND FASTFEM_METALLIB_RESULT EQUAL 0 AND FASTFEM_
                 -DOUTPUT=${FASTFEM_FINITE_CELL_PIPELINES}
                 -DLIBRARY=${FASTFEM_FINITE_CELL_METALLIB}
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PrepareMetalPipelineScript.cmake"
-            COMMAND xcrun --sdk macosx metal-tt -target air64-apple-macos26.0 -gpu-family metal4
+            COMMAND xcrun --sdk macosx metal-tt -gpu-family metal4
                 "${FASTFEM_FINITE_CELL_PIPELINES}" -o "${FASTFEM_FINITE_CELL_BINARY_ARCHIVE}"
         )
     endif()
